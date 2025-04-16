@@ -116,3 +116,5 @@ if (WITH_P2P_STORE)
   add_subdirectory(mooncake-p2p-store)
   message(STATUS "P2P Store will be build")
 endif()
+
+add_subdirectory(mooncake-benchmark)
