@@ -306,12 +306,12 @@ int NvlinkTransport::registerLocalMemory(void *addr, size_t length,
         if (err != cudaSuccess) {
             LOG(ERROR) << "NvlinkTransport: cudaGetDevice failed: "
                        << cudaGetErrorString(err);
-            return nullptr;
+            return -1;
         }
-        CUresult result = cuDeviceGet(&currentDev, cudaDev);
+        result = cuDeviceGet(&currentDev, cudaDev);
         if (result != CUDA_SUCCESS) {
             LOG(ERROR) << "NvlinkTransport: cuDeviceGet failed: " << result;
-            return nullptr;
+            return -1;
         }
 
         CUmemFabricHandle export_handle;
