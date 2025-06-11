@@ -80,17 +80,10 @@ class TransferEnginePy {
     uintptr_t getFirstBufferAddress(const std::string &segment_name);
 
     int writeBytesToBuffer(uintptr_t dest_address, char *src_ptr,
-                           size_t length) {
-        memcpy((void *)dest_address, (void *)src_ptr, length);
-        return 0;
-    }
+                           size_t length);
 
     pybind11::bytes readBytesFromBuffer(uintptr_t source_address,
-                                        size_t length) {
-        return pybind11::bytes(
-            static_cast<const char *>(reinterpret_cast<void *>(source_address)),
-            length);
-    }
+                                        size_t length);
 
     // FOR EXPERIMENT ONLY
     int registerMemory(uintptr_t buffer_addr, size_t capacity);

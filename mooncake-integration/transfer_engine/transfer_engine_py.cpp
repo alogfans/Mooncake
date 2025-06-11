@@ -357,6 +357,33 @@ uintptr_t TransferEnginePy::getFirstBufferAddress(
     return segment_desc->buffers[0].addr;
 }
 
+int TransferEnginePy::writeBytesToBuffer(uintptr_t dest_address, char *src_ptr,
+                                         size_t length) {
+#ifdef USE_NVLINK
+    cudaMemcpy((void *)dest_address, (void *)src_ptr, length, cudaMemcpyDefault);
+#else
+    memcpy((void *)dest_address, (void *)src_ptr, length);
+#endif
+    return 0;
+}
+
+pybind11::bytes TransferEnginePy::readBytesFromBuffer(uintptr_t source_address,
+                                                      size_t length) {
+#ifdef USE_NVLINK
+    char *tmp_buf = new char[length];
+    cudaMemcpy((void *)tmp_buf, (void *)source_address, length, cudaMemcpyDefault);
+    auto ret = pybind11::bytes(
+        static_cast<const char *>(reinterpret_cast<void *>(tmp_buf)),
+        length);
+    delete []tmp_buf;
+    return ret;
+#else
+    return pybind11::bytes(
+        static_cast<const char *>(reinterpret_cast<void *>(source_address)),
+        length);
+#endif
+}
+
 namespace py = pybind11;
 
 PYBIND11_MODULE(engine, m) {
