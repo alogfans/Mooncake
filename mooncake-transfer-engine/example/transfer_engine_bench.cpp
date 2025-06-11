@@ -223,8 +223,6 @@ Status initiatorWorker(TransferEngine *engine, SegmentID segment_id,
                 requests.emplace_back(entry);
                 cudaMemcpy(entry.source, tmp_buf, FLAGS_block_size,
                            cudaMemcpyDefault);
-                LOG(INFO) << "Transfer Task: " << thread_id << ": "
-                          << entry.source << " " << (void *)entry.target_offset;
             }
 
             s = engine->submitTransfer(batch_id, requests);
@@ -269,6 +267,9 @@ Status initiatorWorker(TransferEngine *engine, SegmentID segment_id,
                     if (status.s == TransferStatusEnum::COMPLETED) {
                         cudaMemcpy(tmp_buf2, requests[task_id].source, FLAGS_block_size, cudaMemcpyDefault);
                         if (memcmp(tmp_buf, tmp_buf2, FLAGS_block_size) != 0) {
+                            auto &entry = requests[task_id];
+                            LOG(INFO) << "Transfer Task: " << thread_id << ": "
+                                      << entry.source << " " << (void *)entry.target_offset;
                             LOG(INFO) << std::string(tmp_buf, 64) << "--" << std::string(tmp_buf2, 64);
                             exit(-1);
                         }
