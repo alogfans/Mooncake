@@ -293,7 +293,7 @@ int NvlinkTransport::registerLocalMemory(void *addr, size_t length,
         }
 
         CUmemLocation loc;
-        result = cuMemGetAccess(nullptr, &loc, real_addr);
+        result = cuMemGetAccess(nullptr, &loc, (CUdeviceptr)real_addr);
         if (result != CUDA_SUCCESS) {
             LOG(ERROR) << "NvlinkTransport: cuMemSetAccess failed: " << result;
             return -1;
