@@ -55,7 +55,7 @@ static void checkCudaError(cudaError_t result, const char *message) {
 #endif
 
 #ifdef USE_CUDA
-const static int NR_SOCKETS = 1;
+const static int NR_SOCKETS = 4;
 #else
 const static int NR_SOCKETS =
     numa_available() == 0 ? numa_num_configured_nodes() : 1;
@@ -97,7 +97,7 @@ static void *allocateMemoryPool(size_t size, int socket_id,
                                 bool from_vram = false) {
 #ifdef USE_CUDA
     if (from_vram) {
-        int gpu_id = FLAGS_gpu_id;
+        int gpu_id = socket_id;
         void *d_buf;
         checkCudaError(cudaSetDevice(gpu_id), "Failed to set device");
         if (FLAGS_protocol == "nvlink") {
@@ -361,7 +361,6 @@ int initiator() {
     int buffer_num = NR_SOCKETS;
 
 #ifdef USE_CUDA
-    buffer_num = FLAGS_use_vram ? 1 : NR_SOCKETS;
     if (FLAGS_use_vram) LOG(INFO) << "VRAM is used";
     for (int i = 0; i < buffer_num; ++i) {
         addr[i] = allocateMemoryPool(FLAGS_buffer_size, i, FLAGS_use_vram);
@@ -455,7 +454,6 @@ int target() {
     int buffer_num = NR_SOCKETS;
 
 #ifdef USE_CUDA
-    buffer_num = FLAGS_use_vram ? 1 : NR_SOCKETS;
     if (FLAGS_use_vram) LOG(INFO) << "VRAM is used";
     for (int i = 0; i < buffer_num; ++i) {
         addr[i] = allocateMemoryPool(FLAGS_buffer_size, i, FLAGS_use_vram);
