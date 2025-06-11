@@ -273,8 +273,8 @@ Status initiatorWorker(TransferEngine *engine, SegmentID segment_id,
                     } else if (status.s == TransferStatusEnum::FAILED) {
                         LOG(INFO) << "FAILED";
                         LOG(INFO) << "Transfer Task: " << thread_id << ": "
-                                      << entry.source << " "
-                                      << (void *)entry.target_offset;
+                                      << requests[task_id].source << " "
+                                      << (void *)requests[task_id].target_offset;
                         completed = true;
                         exit(EXIT_FAILURE);
                     }
