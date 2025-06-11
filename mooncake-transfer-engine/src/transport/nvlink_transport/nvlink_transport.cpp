@@ -307,7 +307,7 @@ int NvlinkTransport::registerLocalMemory(void *addr, size_t length,
         // result = cuMemGetAccess(&flags, &loc, (CUdeviceptr)real_addr);
         // if (result != CUDA_SUCCESS) {
         //     LOG(ERROR) << "NvlinkTransport: cuMemGetAccess failed: " <<
-        //     result; return -1;
+        //     return -1;
         // }
 
         CUdevice currentDev;
@@ -318,6 +318,7 @@ int NvlinkTransport::registerLocalMemory(void *addr, size_t length,
                        << cudaGetErrorString(err);
             return -1;
         }
+
         result = cuDeviceGet(&currentDev, cudaDev);
         if (result != CUDA_SUCCESS) {
             LOG(ERROR) << "NvlinkTransport: cuDeviceGet failed: " << result;
@@ -424,6 +425,7 @@ int NvlinkTransport::relocateSharedMemoryAddress(uint64_t &dest_addr,
                             << result;
                         return -1;
                     }
+                    LOG(INFO) << "result "<< entry.addr << " " << shm_addr;
                     result = cuMemMap((CUdeviceptr)shm_addr, entry.length, 0,
                                       handle, 0);
                     if (result != CUDA_SUCCESS) {
