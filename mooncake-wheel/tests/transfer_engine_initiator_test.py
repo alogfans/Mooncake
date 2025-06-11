@@ -8,8 +8,8 @@ class TestVLLMAdaptorTransfer(unittest.TestCase):
     def setUpClass(cls):
         cls.target_server_name = os.getenv("TARGET_SERVER_NAME", "127.0.0.1:12345")
         cls.initiator_server_name = os.getenv("INITIATOR_SERVER_NAME", "127.0.0.1:12347")
-        cls.metadata_server = os.getenv("MC_METADATA_SERVER", "127.0.0.1:2379")
-        cls.protocol = os.getenv("PROTOCOL", "tcp")        # "rdma" or "tcp"
+        cls.metadata_server = os.getenv("MC_METADATA_SERVER", "P2PHANDSHAKE")
+        cls.protocol = os.getenv("PROTOCOL", "nvlink")        # "rdma" or "tcp"
         cls.circle = int(os.getenv("CIRCLE", 1000))
 
         cls.adaptor = TransferEngine()
