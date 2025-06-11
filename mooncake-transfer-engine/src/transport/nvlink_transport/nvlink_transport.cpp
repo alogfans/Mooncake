@@ -425,7 +425,7 @@ int NvlinkTransport::relocateSharedMemoryAddress(uint64_t &dest_addr,
                             << result;
                         return -1;
                     }
-                    LOG(INFO) << "result "<< entry.addr << " " << shm_addr;
+                    LOG(INFO) << "remap -> "<< (void *) entry.addr << " " << shm_addr;
                     result = cuMemMap((CUdeviceptr)shm_addr, entry.length, 0,
                                       handle, 0);
                     if (result != CUDA_SUCCESS) {

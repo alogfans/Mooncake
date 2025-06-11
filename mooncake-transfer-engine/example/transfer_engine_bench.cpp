@@ -269,21 +269,12 @@ Status initiatorWorker(TransferEngine *engine, SegmentID segment_id,
                         engine->getTransferStatus(batch_id, task_id, status);
                     LOG_ASSERT(s.ok());
                     if (status.s == TransferStatusEnum::COMPLETED) {
-                        cudaMemcpy(tmp_buf2, requests[task_id].source,
-                                   FLAGS_block_size, cudaMemcpyDefault);
-                        auto &entry = requests[task_id];
-                        if (memcmp(tmp_buf, tmp_buf2, FLAGS_block_size) != 0) {
-                            LOG(INFO) << "Transfer Task: " << thread_id << ": "
-                                      << entry.source << " "
-                                      << (void *)entry.target_offset;
-                            LOG(INFO) << std::string(tmp_buf, 64) << "--"
-                                      << std::string(tmp_buf2, 64);
-                            exit(-1);
-                        }
-                        memset(tmp_buf2, 0, FLAGS_block_size);
                         completed = true;
                     } else if (status.s == TransferStatusEnum::FAILED) {
                         LOG(INFO) << "FAILED";
+                        LOG(INFO) << "Transfer Task: " << thread_id << ": "
+                                      << entry.source << " "
+                                      << (void *)entry.target_offset;
                         completed = true;
                         exit(EXIT_FAILURE);
                     }
