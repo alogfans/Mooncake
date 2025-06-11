@@ -223,6 +223,7 @@ Status initiatorWorker(TransferEngine *engine, SegmentID segment_id,
                 Status s = engine->getTransferStatus(batch_id, task_id, status);
                 LOG_ASSERT(s.ok());
                 if (status.s == TransferStatusEnum::COMPLETED) {
+                    completed = true;
 #ifdef USE_CUDA
                     char *tmp_buf = new char[FLAGS_block_size];
                     cudaMemcpy(tmp_buf, (void *)requests[task_id].source,
