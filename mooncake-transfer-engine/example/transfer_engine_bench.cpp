@@ -32,8 +32,8 @@
 
 #ifdef USE_CUDA
 #include <bits/stdint-uintn.h>
-#include <cuda_runtime.h>
 #include <cuda.h>
+#include <cuda_runtime.h>
 
 #ifdef USE_NVMEOF
 #include <cufile.h>
@@ -221,9 +221,17 @@ Status initiatorWorker(TransferEngine *engine, SegmentID segment_id,
             while (!completed) {
                 Status s = engine->getTransferStatus(batch_id, task_id, status);
                 LOG_ASSERT(s.ok());
-                if (status.s == TransferStatusEnum::COMPLETED)
-                    completed = true;
-                else if (status.s == TransferStatusEnum::FAILED) {
+                if (status.s == TransferStatusEnum::COMPLETED) {
+#ifdef USE_CUDA
+                    char *tmp_buf = new char[FLAGS_block_size];
+                    cudaMemcpy(tmp_buf, requests[i].target_offset, FLAGS_block_size,
+                               cudaMemcpyDefault);
+                    LOG(INFO) << std::string(tmp_buf, 32);
+                    for (uint64_t j = 0; j < FLAGS_block_size; ++j)
+                        LOG_ASSERT(tmp_buf[j] == ((requests[i].target_offset + j) % 26) + 'a');
+                    delete[] tmp_buf;
+#endif
+                } else if (status.s == TransferStatusEnum::FAILED) {
                     LOG(INFO) << "FAILED";
                     completed = true;
                     exit(EXIT_FAILURE);
@@ -317,6 +325,11 @@ int initiator() {
         int rc = engine->registerLocalMemory(addr[i], FLAGS_buffer_size,
                                              name_prefix + std::to_string(i));
         LOG_ASSERT(!rc);
+        char *tmp_buf = new char[FLAGS_buffer_size];
+        for (uint64_t j = 0; j < FLAGS_buffer_size; ++j)
+            tmp_buf[j] = (((uint64_t)addr[i] + j) % 26) + 'a';
+        cudaMemcpy(addr[i], tmp_buf, FLAGS_buffer_size, cudaMemcpyDefault);
+        delete[] tmp_buf;
     }
 #else
     for (int i = 0; i < buffer_num; ++i) {
