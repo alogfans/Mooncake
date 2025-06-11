@@ -436,12 +436,17 @@ int NvlinkTransport::relocateSharedMemoryAddress(uint64_t &dest_addr,
                         return -1;
                     }
 
-                    CUmemAccessDesc accessDesc = {};
-                    accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
-                    accessDesc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-                    accessDesc.location.id = device_id;
-                    result = cuMemSetAccess((CUdeviceptr)shm_addr, entry.length,
-                                            &accessDesc, 1);
+                    int device_count;
+                    cudaGetDeviceCount(&device_count);
+                    CUmemAccessDesc accessDesc[device_count + 1];
+                    for (int idx = 0; idx < device_count; ++idx) {
+                        accessDesc[idx].location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+                        accessDesc[idx].location.id = idx;
+                        accessDesc[idx].flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+                    }
+                    accessDesc[device_count].location.type = CU_MEM_LOCATION_TYPE_HOST;
+                    accessDesc[device_count].flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+                    result = cuMemSetAccess((CUdeviceptr)shm_addr, size, accessDesc, device_count + 1);
                     if (result != CUDA_SUCCESS) {
                         LOG(ERROR) << "NvlinkTransport: cuMemSetAccess failed: "
                                    << result;
@@ -452,7 +457,7 @@ int NvlinkTransport::relocateSharedMemoryAddress(uint64_t &dest_addr,
                     if (result != CUDA_SUCCESS) {
                         LOG(ERROR) << "NvlinkTransport: cuMemGetAccess failed: "
                                    << result;
-                        return -1;
+                        // return -1;
                     }
 
                     OpenedShmEntry shm_entry;
@@ -498,7 +503,6 @@ void *NvlinkTransport::allocatePinnedLocalMemory(size_t size) {
     size_t granularity = 0;
     CUdevice currentDev;
     CUmemAllocationProp prop = {};
-    CUmemAccessDesc accessDesc = {};
     CUmemGenericAllocationHandle handle;
     void *ptr = nullptr;
     int cudaDev;
@@ -555,10 +559,17 @@ void *NvlinkTransport::allocatePinnedLocalMemory(size_t size) {
         cuMemRelease(handle);
         return nullptr;
     }
-    accessDesc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-    accessDesc.location.id = currentDev;
-    accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
-    result = cuMemSetAccess((CUdeviceptr)ptr, size, &accessDesc, 1);
+    int device_count;
+    cudaGetDeviceCount(&device_count);
+    CUmemAccessDesc accessDesc[device_count + 1];
+    for (int idx = 0; idx < device_count; ++idx) {
+        accessDesc[idx].location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+        accessDesc[idx].location.id = idx;
+        accessDesc[idx].flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+    }
+    accessDesc[device_count].location.type = CU_MEM_LOCATION_TYPE_HOST;
+    accessDesc[device_count].flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+    result = cuMemSetAccess((CUdeviceptr)ptr, size, accessDesc, device_count + 1);
     if (result != CUDA_SUCCESS) {
         LOG(ERROR) << "NvlinkTransport: cuMemSetAccess failed: " << result;
         cuMemUnmap((CUdeviceptr)ptr, size);
