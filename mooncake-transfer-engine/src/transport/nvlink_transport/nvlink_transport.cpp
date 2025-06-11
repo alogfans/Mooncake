@@ -413,6 +413,7 @@ int NvlinkTransport::relocateSharedMemoryAddress(uint64_t &dest_addr,
         }
         index++;
     }
+    LOG(ERROR) << "Request address " << (void *) dest_addr << " to " << (void *) (dest_addr + length) << " not found!!!";
     return ERR_INVALID_ARGUMENT;
 }
 
