@@ -174,6 +174,8 @@ static inline std::string calculateRate(uint64_t data_bytes, double duration) {
 volatile bool running = true;
 std::atomic<size_t> total_batch_count(0);
 
+std::mutex mu;
+
 Status initiatorWorker(TransferEngine *engine, SegmentID segment_id,
                        int thread_id, void *addr) {
     bindToSocket(thread_id % NR_SOCKETS);
@@ -200,6 +202,7 @@ Status initiatorWorker(TransferEngine *engine, SegmentID segment_id,
 
     size_t batch_count = 0;
     while (running) {
+        std::lock_guard<std::mutex> lock(mu);
         char *tmp_buf = new char[FLAGS_block_size];
         char *tmp_buf2 = new char[FLAGS_block_size];
         for (uint64_t j = 0; j < FLAGS_block_size; ++j)
