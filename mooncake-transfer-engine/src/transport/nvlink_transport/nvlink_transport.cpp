@@ -324,6 +324,8 @@ int NvlinkTransport::registerLocalMemory(void *addr, size_t length,
             return -1;
         }
 
+        LOG(INFO) << addr << ", device id " << currentDev;
+
         CUmemFabricHandle export_handle;
         result = cuMemExportToShareableHandle(&export_handle, handle,
                                               CU_MEM_HANDLE_TYPE_FABRIC, 0);
