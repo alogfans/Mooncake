@@ -203,6 +203,7 @@ Status initiatorWorker(TransferEngine *engine, SegmentID segment_id,
     size_t batch_count = 0;
     while (running) {
         std::lock_guard<std::mutex> lock(mu);
+        LOG(INFO) << thread_id;
         char *tmp_buf = new char[FLAGS_block_size];
         char *tmp_buf2 = new char[FLAGS_block_size];
         for (uint64_t j = 0; j < FLAGS_block_size; ++j)
