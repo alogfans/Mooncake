@@ -366,6 +366,7 @@ int NvlinkTransport::relocateSharedMemoryAddress(uint64_t &dest_addr,
                     handle_str = entry.shm_name.substr(0, pos);
                     device_id =
                         std::atoi(entry.shm_name.substr(pos + 1).c_str());
+                    LOG(INFO) << handle_str << " " << device_id;
                 }
 
                 std::vector<unsigned char> output_buffer;
@@ -530,7 +531,7 @@ void *NvlinkTransport::allocatePinnedLocalMemory(size_t size) {
         return nullptr;
     }
     accessDesc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-    accessDesc.location.id = 1; // currentDev;
+    accessDesc.location.id = currentDev;
     accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
     result = cuMemSetAccess((CUdeviceptr)ptr, size, &accessDesc, 1);
     if (result != CUDA_SUCCESS) {
