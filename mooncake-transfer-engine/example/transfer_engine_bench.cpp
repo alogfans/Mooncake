@@ -194,61 +194,95 @@ Status initiatorWorker(TransferEngine *engine, SegmentID segment_id,
     }
     uint64_t remote_base =
         (uint64_t)segment_desc->buffers[thread_id % NR_SOCKETS].addr;
-    
+
     uint64_t length = segment_desc->buffers[thread_id % NR_SOCKETS].length;
-    LOG(INFO) << (void *) remote_base << " " << (void *) (remote_base + length);
+    LOG(INFO) << (void *)remote_base << " " << (void *)(remote_base + length);
 
     size_t batch_count = 0;
     while (running) {
-        auto batch_id = engine->allocateBatchID(FLAGS_batch_size);
-        Status s;
+        char *tmp_buf = new char[FLAGS_block_size];
+        char *tmp_buf2 = new char[FLAGS_block_size];
+        for (uint64_t j = 0; j < FLAGS_block_size; ++j)
+            tmp_buf[j] = (lrand48() % 26) + 'a';
         std::vector<TransferRequest> requests;
-        for (int i = 0; i < FLAGS_batch_size; ++i) {
-            TransferRequest entry;
-            entry.opcode = opcode;
-            entry.length = FLAGS_block_size;
-            entry.source = (uint8_t *)(addr) +
-                           FLAGS_block_size * (i * FLAGS_threads + thread_id);
-            entry.target_id = segment_id;
-            entry.target_offset = remote_base + (lrand48() % (FLAGS_buffer_size - FLAGS_block_size));
-            LOG_ASSERT(entry.target_offset <= remote_base + length);
-            //    remote_base +
-            //    FLAGS_block_size * (i * FLAGS_threads + thread_id);
-            requests.emplace_back(entry);
-        }
+        {
+            auto batch_id = engine->allocateBatchID(FLAGS_batch_size);
+            Status s;
+            for (int i = 0; i < FLAGS_batch_size; ++i) {
+                TransferRequest entry;
+                entry.opcode = TransferRequest::WRITE;
+                entry.length = FLAGS_block_size;
+                entry.source =
+                    (uint8_t *)(addr) +
+                    FLAGS_block_size * (i * FLAGS_threads + thread_id);
+                entry.target_id = segment_id;
+                entry.target_offset =
+                    remote_base +
+                    (lrand48() % (FLAGS_buffer_size - FLAGS_block_size));
+                LOG_ASSERT(entry.target_offset <= remote_base + length);
+                //    remote_base +
+                //    FLAGS_block_size * (i * FLAGS_threads + thread_id);
+                requests.emplace_back(entry);
+                cudaMemcpy(entry.source, tmp_buf, FLAGS_block_size,
+                           cudaMemcpyDefault);
+            }
 
-        s = engine->submitTransfer(batch_id, requests);
-        if (!s.ok()) LOG(ERROR) << s.ToString();
-        LOG_ASSERT(s.ok());
-        for (int task_id = 0; task_id < FLAGS_batch_size; ++task_id) {
-            bool completed = false;
-            TransferStatus status;
-            while (!completed) {
-                Status s = engine->getTransferStatus(batch_id, task_id, status);
-                LOG_ASSERT(s.ok());
-                if (status.s == TransferStatusEnum::COMPLETED) {
-                    completed = true;
-#ifdef USE_CUDA
-                    char *tmp_buf = new char[FLAGS_block_size];
-                    cudaMemcpy(tmp_buf, (void *)requests[task_id].source,
-                               FLAGS_block_size, cudaMemcpyDefault);
-                    // LOG(INFO) << "[" << std::string(tmp_buf, 32) << "]";
-                    for (uint64_t j = 0; j < FLAGS_block_size; ++j)
-                        LOG_ASSERT(
-                            tmp_buf[j] ==
-                            ((requests[task_id].target_offset + j) % 26) + 'a');
-                    delete[] tmp_buf;
-#endif
-                } else if (status.s == TransferStatusEnum::FAILED) {
-                    LOG(INFO) << "FAILED";
-                    completed = true;
-                    exit(EXIT_FAILURE);
+            s = engine->submitTransfer(batch_id, requests);
+            if (!s.ok()) LOG(ERROR) << s.ToString();
+            LOG_ASSERT(s.ok());
+            for (int task_id = 0; task_id < FLAGS_batch_size; ++task_id) {
+                bool completed = false;
+                TransferStatus status;
+                while (!completed) {
+                    Status s =
+                        engine->getTransferStatus(batch_id, task_id, status);
+                    LOG_ASSERT(s.ok());
+                    if (status.s == TransferStatusEnum::COMPLETED) {
+                        completed = true;
+                    } else if (status.s == TransferStatusEnum::FAILED) {
+                        LOG(INFO) << "FAILED";
+                        completed = true;
+                        exit(EXIT_FAILURE);
+                    }
                 }
             }
-        }
 
-        s = engine->freeBatchID(batch_id);
-        LOG_ASSERT(s.ok());
+            s = engine->freeBatchID(batch_id);
+            LOG_ASSERT(s.ok());
+        }
+        {
+            auto batch_id = engine->allocateBatchID(FLAGS_batch_size);
+            Status s;
+            for (int i = 0; i < FLAGS_batch_size; ++i) {
+                requests[i].opcode = TransferRequest::READ;
+            }
+            s = engine->submitTransfer(batch_id, requests);
+            if (!s.ok()) LOG(ERROR) << s.ToString();
+            LOG_ASSERT(s.ok());
+            for (int task_id = 0; task_id < FLAGS_batch_size; ++task_id) {
+                bool completed = false;
+                TransferStatus status;
+                while (!completed) {
+                    Status s =
+                        engine->getTransferStatus(batch_id, task_id, status);
+                    LOG_ASSERT(s.ok());
+                    if (status.s == TransferStatusEnum::COMPLETED) {
+                        cudaMemcpy(tmp_buf2, requests[task_id].source, FLAGS_block_size, cudaMemcpyDefault);
+                        LOG_ASSERT(memcmp(tmp_buf, tmp_buf2, FLAGS_block_size) == 0);
+                        completed = true;
+                    } else if (status.s == TransferStatusEnum::FAILED) {
+                        LOG(INFO) << "FAILED";
+                        completed = true;
+                        exit(EXIT_FAILURE);
+                    }
+                }
+            }
+
+            s = engine->freeBatchID(batch_id);
+            LOG_ASSERT(s.ok());
+        }
+        delete[] tmp_buf2;
+        delete[] tmp_buf;
         batch_count++;
     }
     LOG(INFO) << "Worker " << thread_id << " stopped!";
@@ -427,12 +461,6 @@ int target() {
         int rc = engine->registerLocalMemory(addr[i], FLAGS_buffer_size,
                                              name_prefix + std::to_string(i));
         LOG_ASSERT(!rc);
-
-        char *tmp_buf = new char[FLAGS_buffer_size];
-        for (uint64_t j = 0; j < FLAGS_buffer_size; ++j)
-            tmp_buf[j] = (((uint64_t)addr[i] + j) % 26) + 'a';
-        cudaMemcpy(addr[i], tmp_buf, FLAGS_buffer_size, cudaMemcpyDefault);
-        delete[] tmp_buf;
     }
 #else
     for (int i = 0; i < buffer_num; ++i) {
