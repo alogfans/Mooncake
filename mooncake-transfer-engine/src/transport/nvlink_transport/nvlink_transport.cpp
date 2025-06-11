@@ -130,7 +130,7 @@ Status NvlinkTransport::submitTransfer(
             err = cudaMemcpy((void *)slice->local.dest_addr, slice->source_addr,
                              slice->length, cudaMemcpyDefault);
         if (err != cudaSuccess) {
-            LOG(ERROR) << "NvlinkTransport: cudaMemcpy failed" << err;
+            LOG(ERROR) << "NvlinkTransport: cudaMemcpy failed: " << err;
             slice->markFailed();
         } else
             slice->markSuccess();
@@ -196,7 +196,7 @@ Status NvlinkTransport::submitTransferTask(
             err = cudaMemcpy((void *)slice->local.dest_addr, slice->source_addr,
                              slice->length, cudaMemcpyDefault);
         if (err != cudaSuccess) {
-            LOG(ERROR) << "NvlinkTransport: cudaMemcpy failed" << err;
+            LOG(ERROR) << "NvlinkTransport: cudaMemcpy failed: " << err;
             slice->markFailed();
         } else
             slice->markSuccess();

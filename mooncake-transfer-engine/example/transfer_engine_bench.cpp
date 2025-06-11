@@ -194,16 +194,14 @@ Status initiatorWorker(TransferEngine *engine, SegmentID segment_id,
         LOG(ERROR) << "Unable to get target segment ID, please recheck";
         exit(EXIT_FAILURE);
     }
-    uint64_t remote_base =
-        (uint64_t)segment_desc->buffers[thread_id % NR_SOCKETS].addr;
-
-    uint64_t length = segment_desc->buffers[thread_id % NR_SOCKETS].length;
+    auto buf_idx = 1; // thread_id % NR_SOCKETS;
+    uint64_t remote_base = (uint64_t)segment_desc->buffers[buf_idx].addr;
+    uint64_t length = segment_desc->buffers[buf_idx].length;
     LOG(INFO) << (void *)remote_base << " " << (void *)(remote_base + length);
 
     size_t batch_count = 0;
     while (running) {
         std::lock_guard<std::mutex> lock(mu);
-        LOG(INFO) << thread_id;
         char *tmp_buf = new char[FLAGS_block_size];
         char *tmp_buf2 = new char[FLAGS_block_size];
         for (uint64_t j = 0; j < FLAGS_block_size; ++j)
