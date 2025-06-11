@@ -292,8 +292,8 @@ int NvlinkTransport::registerLocalMemory(void *addr, size_t length,
             return -1;
         }
 
-        CUmemLocation location;
-        result = cuMemGetAccess(nullptr, &location, real_addr);
+        CUmemLocation loc;
+        result = cuMemGetAccess(nullptr, &loc, real_addr);
         if (result != CUDA_SUCCESS) {
             LOG(ERROR) << "NvlinkTransport: cuMemSetAccess failed: " << result;
             return -1;
@@ -316,7 +316,7 @@ int NvlinkTransport::registerLocalMemory(void *addr, size_t length,
         desc.name = location;
         desc.shm_name =
             serializeBinaryData(&export_handle, sizeof(CUmemFabricHandle)) +
-            ":" + std::to_string(location.id);
+            ":" + std::to_string(loc.id);
         return metadata_->addLocalMemoryBuffer(desc, true);
     }
 }
