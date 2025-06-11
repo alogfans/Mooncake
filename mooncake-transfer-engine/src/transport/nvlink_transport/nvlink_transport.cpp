@@ -292,12 +292,26 @@ int NvlinkTransport::registerLocalMemory(void *addr, size_t length,
             return -1;
         }
 
-        CUmemLocation loc;
-        unsigned long long flags;
-        result = cuMemGetAccess(&flags, &loc, (CUdeviceptr)real_addr);
+        // CUmemLocation loc;
+        // unsigned long long flags;
+        // result = cuMemGetAccess(&flags, &loc, (CUdeviceptr)real_addr);
+        // if (result != CUDA_SUCCESS) {
+        //     LOG(ERROR) << "NvlinkTransport: cuMemGetAccess failed: " <<
+        //     result; return -1;
+        // }
+
+        CUdevice currentDev;
+        int cudaDev;
+        cudaError_t err = cudaGetDevice(&cudaDev);
+        if (err != cudaSuccess) {
+            LOG(ERROR) << "NvlinkTransport: cudaGetDevice failed: "
+                       << cudaGetErrorString(err);
+            return nullptr;
+        }
+        CUresult result = cuDeviceGet(&currentDev, cudaDev);
         if (result != CUDA_SUCCESS) {
-            LOG(ERROR) << "NvlinkTransport: cuMemGetAccess failed: " << result;
-            return -1;
+            LOG(ERROR) << "NvlinkTransport: cuDeviceGet failed: " << result;
+            return nullptr;
         }
 
         CUmemFabricHandle export_handle;
@@ -317,7 +331,7 @@ int NvlinkTransport::registerLocalMemory(void *addr, size_t length,
         desc.name = location;
         desc.shm_name =
             serializeBinaryData(&export_handle, sizeof(CUmemFabricHandle)) +
-            ":" + std::to_string(loc.id);
+            ":" + std::to_string(currentDev);
         return metadata_->addLocalMemoryBuffer(desc, true);
     }
 }
@@ -350,7 +364,8 @@ int NvlinkTransport::relocateSharedMemoryAddress(uint64_t &dest_addr,
                 size_t pos = entry.shm_name.find(':');
                 if (pos != entry.shm_name.npos) {
                     handle_str = entry.shm_name.substr(0, pos);
-                    device_id = std::atoi(entry.shm_name.substr(pos + 1).c_str());
+                    device_id =
+                        std::atoi(entry.shm_name.substr(pos + 1).c_str());
                 }
 
                 std::vector<unsigned char> output_buffer;
