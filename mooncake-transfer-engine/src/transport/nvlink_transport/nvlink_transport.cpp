@@ -448,13 +448,13 @@ int NvlinkTransport::relocateSharedMemoryAddress(uint64_t &dest_addr,
                         return -1;
                     }
 
-                    result = cuMemGetAccess(nullptr, nullptr, shm_addr);
+                    result = cuMemGetAccess(nullptr, nullptr, (CUdeviceptr)shm_addr);
                     if (result != CUDA_SUCCESS) {
                         LOG(ERROR) << "NvlinkTransport: cuMemGetAccess failed: "
                                    << result;
                         return -1;
                     }
-                    
+
                     OpenedShmEntry shm_entry;
                     shm_entry.shm_addr = shm_addr;
                     shm_entry.length = length;
