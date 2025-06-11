@@ -450,7 +450,7 @@ int NvlinkTransport::relocateSharedMemoryAddress(uint64_t &dest_addr,
                     OpenedShmEntry shm_entry;
                     shm_entry.shm_addr = shm_addr;
                     shm_entry.length = length;
-                    remap_entries_[entry.addr] = shm_entry;
+                    // remap_entries_[entry.addr] = shm_entry;
                 } else {
                     LOG(ERROR) << "Mismatched NVLink data transfer method";
                     return -1;
