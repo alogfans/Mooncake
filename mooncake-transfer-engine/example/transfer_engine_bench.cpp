@@ -211,6 +211,7 @@ Status initiatorWorker(TransferEngine *engine, SegmentID segment_id,
                            FLAGS_block_size * (i * FLAGS_threads + thread_id);
             entry.target_id = segment_id;
             entry.target_offset = remote_base + (lrand48() % (FLAGS_buffer_size - FLAGS_block_size));
+            LOG_ASSERT(entry.target_offset <= remote_base + length);
             //    remote_base +
             //    FLAGS_block_size * (i * FLAGS_threads + thread_id);
             requests.emplace_back(entry);
