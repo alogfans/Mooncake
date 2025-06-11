@@ -422,12 +422,8 @@ int target() {
     buffer_num = FLAGS_use_vram ? 1 : NR_SOCKETS;
     if (FLAGS_use_vram) LOG(INFO) << "VRAM is used";
     for (int i = 0; i < buffer_num; ++i) {
-        if (FLAGS_protocol == "nvlink") {
-            addr[i] = mooncake::NvlinkTransport::allocatePinnedLocalMemory(
-                FLAGS_buffer_size);
-        } else {
-            addr[i] = allocateMemoryPool(FLAGS_buffer_size, i, FLAGS_use_vram);
-        }
+        addr[i] = allocateMemoryPool(FLAGS_buffer_size, i, FLAGS_use_vram);
+        LOG(INFO) << "fix!";
         std::string name_prefix = FLAGS_use_vram ? "cuda:" : "cpu:";
         int rc = engine->registerLocalMemory(addr[i], FLAGS_buffer_size,
                                              name_prefix + std::to_string(i));
