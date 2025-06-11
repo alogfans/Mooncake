@@ -530,7 +530,7 @@ void *NvlinkTransport::allocatePinnedLocalMemory(size_t size) {
         return nullptr;
     }
     accessDesc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-    accessDesc.location.id = currentDev;
+    accessDesc.location.id = 1; // currentDev;
     accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
     result = cuMemSetAccess((CUdeviceptr)ptr, size, &accessDesc, 1);
     if (result != CUDA_SUCCESS) {
