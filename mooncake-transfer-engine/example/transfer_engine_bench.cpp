@@ -197,7 +197,7 @@ Status initiatorWorker(TransferEngine *engine, SegmentID segment_id,
 
     size_t batch_count = 0;
     while (running) {
-        auto buf_idx = lrand48() % NR_SOCKETS;
+        auto buf_idx = thread_id % NR_SOCKETS;
         uint64_t remote_base = (uint64_t)segment_desc->buffers[buf_idx].addr;
         uint64_t length = segment_desc->buffers[buf_idx].length;
         LOG(INFO) << (void *)remote_base << " "
