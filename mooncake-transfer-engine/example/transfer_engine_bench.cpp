@@ -101,6 +101,7 @@ static void *allocateMemoryPool(size_t size, int socket_id,
         void *d_buf;
         checkCudaError(cudaSetDevice(gpu_id), "Failed to set device");
 #ifdef USE_NVLINK
+        LOG(INFO) << "allocate pinned memory";
         d_buf = mooncake::NvlinkTransport::allocatePinnedLocalMemory(size);
 #else
         checkCudaError(cudaMalloc(&d_buf, size),
