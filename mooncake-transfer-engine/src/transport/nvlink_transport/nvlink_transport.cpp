@@ -363,14 +363,14 @@ int NvlinkTransport::relocateSharedMemoryAddress(uint64_t &dest_addr,
     for (auto &entry : desc->buffers) {
         if (!entry.shm_name.empty() && entry.addr <= dest_addr &&
             dest_addr + length <= entry.addr + entry.length) {
-            // remap_lock_.lockShared();
-            // if (remap_entries_.count(entry.addr)) {
-            //     auto shm_addr = remap_entries_[entry.addr].shm_addr;
-            //     remap_lock_.unlockShared();
-            //     dest_addr = dest_addr - entry.addr + ((uint64_t)shm_addr);
-            //     return 0;
-            // }
-            // remap_lock_.unlockShared();
+            remap_lock_.lockShared();
+            if (remap_entries_.count(entry.addr)) {
+                auto shm_addr = remap_entries_[entry.addr].shm_addr;
+                remap_lock_.unlockShared();
+                dest_addr = dest_addr - entry.addr + ((uint64_t)shm_addr);
+                return 0;
+            }
+            remap_lock_.unlockShared();
             RWSpinlock::WriteGuard lock_guard(remap_lock_);
             if (!remap_entries_.count(entry.addr)) {
                 std::string handle_str = entry.shm_name;
@@ -447,10 +447,18 @@ int NvlinkTransport::relocateSharedMemoryAddress(uint64_t &dest_addr,
                                    << result;
                         return -1;
                     }
+
+                    result = cuMemGetAccess(nullptr, nullptr, shm_addr);
+                    if (result != CUDA_SUCCESS) {
+                        LOG(ERROR) << "NvlinkTransport: cuMemGetAccess failed: "
+                                   << result;
+                        return -1;
+                    }
+                    
                     OpenedShmEntry shm_entry;
                     shm_entry.shm_addr = shm_addr;
                     shm_entry.length = length;
-                    // remap_entries_[entry.addr] = shm_entry;
+                    remap_entries_[entry.addr] = shm_entry;
                 } else {
                     LOG(ERROR) << "Mismatched NVLink data transfer method";
                     return -1;
