@@ -122,13 +122,14 @@ Status NvlinkTransport::submitTransfer(
         slice->target_id = request.target_id;
         slice->status = Slice::PENDING;
         __sync_fetch_and_add(&task.slice_count, 1);
+        cudaError_t err;
         if (slice->opcode == TransferRequest::READ)
-            cudaMemcpy(slice->source_addr, (void *)slice->local.dest_addr,
-                       slice->length, cudaMemcpyDefault);
+            err = cudaMemcpy(slice->source_addr, (void *)slice->local.dest_addr,
+                             slice->length, cudaMemcpyDefault);
         else
-            cudaMemcpy((void *)slice->local.dest_addr, slice->source_addr,
-                       slice->length, cudaMemcpyDefault);
-        slice->markSuccess();
+            err = cudaMemcpy((void *)slice->local.dest_addr, slice->source_addr,
+                             slice->length, cudaMemcpyDefault);
+        if (err ==) slice->markSuccess();
     }
 
     return Status::OK();
@@ -183,13 +184,18 @@ Status NvlinkTransport::submitTransferTask(
         slice->status = Slice::PENDING;
         task.slice_list.push_back(slice);
         __sync_fetch_and_add(&task.slice_count, 1);
+        cudaError_t err;
         if (slice->opcode == TransferRequest::READ)
-            cudaMemcpy(slice->source_addr, (void *)slice->local.dest_addr,
-                       slice->length, cudaMemcpyDefault);
+            err = cudaMemcpy(slice->source_addr, (void *)slice->local.dest_addr,
+                             slice->length, cudaMemcpyDefault);
         else
-            cudaMemcpy((void *)slice->local.dest_addr, slice->source_addr,
-                       slice->length, cudaMemcpyDefault);
-        slice->markSuccess();
+            err = cudaMemcpy((void *)slice->local.dest_addr, slice->source_addr,
+                             slice->length, cudaMemcpyDefault);
+        if (err != cudaSuccess) {
+            LOG(ERROR) << "NvlinkTransport: cudaMemcpy failed" << err;
+            slice->markFailed();
+        } else
+            slice->markSuccess();
     }
     return Status::OK();
 }
@@ -361,6 +367,7 @@ int NvlinkTransport::relocateSharedMemoryAddress(uint64_t &dest_addr,
                 std::string handle_str = entry.shm_name;
                 int device_id = 0;
 
+                LOG(INFO) << entry.shm_name;
                 size_t pos = entry.shm_name.find(':');
                 if (pos != entry.shm_name.npos) {
                     handle_str = entry.shm_name.substr(0, pos);

@@ -272,9 +272,6 @@ Status initiatorWorker(TransferEngine *engine, SegmentID segment_id,
                         cudaMemcpy(tmp_buf2, requests[task_id].source,
                                    FLAGS_block_size, cudaMemcpyDefault);
                         auto &entry = requests[task_id];
-                        LOG(INFO) << "[OK] Transfer Task: " << thread_id << ": "
-                                  << entry.source << " "
-                                  << (void *)entry.target_offset;
                         if (memcmp(tmp_buf, tmp_buf2, FLAGS_block_size) != 0) {
                             LOG(INFO) << "Transfer Task: " << thread_id << ": "
                                       << entry.source << " "
