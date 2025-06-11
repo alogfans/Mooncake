@@ -270,6 +270,7 @@ Status initiatorWorker(TransferEngine *engine, SegmentID segment_id,
                             LOG(INFO) << std::string(tmp_buf, 64) << "--" << std::string(tmp_buf2, 64);
                             exit(-1);
                         }
+                        memset(tmp_buf2, 0, FLAGS_block_size);
                         completed = true;
                     } else if (status.s == TransferStatusEnum::FAILED) {
                         LOG(INFO) << "FAILED";
