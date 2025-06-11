@@ -328,11 +328,6 @@ int initiator() {
         int rc = engine->registerLocalMemory(addr[i], FLAGS_buffer_size,
                                              name_prefix + std::to_string(i));
         LOG_ASSERT(!rc);
-        char *tmp_buf = new char[FLAGS_buffer_size];
-        for (uint64_t j = 0; j < FLAGS_buffer_size; ++j)
-            tmp_buf[j] = (((uint64_t)addr[i] + j) % 26) + 'a';
-        cudaMemcpy(addr[i], tmp_buf, FLAGS_buffer_size, cudaMemcpyDefault);
-        delete[] tmp_buf;
     }
 #else
     for (int i = 0; i < buffer_num; ++i) {
@@ -423,11 +418,16 @@ int target() {
     if (FLAGS_use_vram) LOG(INFO) << "VRAM is used";
     for (int i = 0; i < buffer_num; ++i) {
         addr[i] = allocateMemoryPool(FLAGS_buffer_size, i, FLAGS_use_vram);
-        LOG(INFO) << "fix!";
         std::string name_prefix = FLAGS_use_vram ? "cuda:" : "cpu:";
         int rc = engine->registerLocalMemory(addr[i], FLAGS_buffer_size,
                                              name_prefix + std::to_string(i));
         LOG_ASSERT(!rc);
+
+        char *tmp_buf = new char[FLAGS_buffer_size];
+        for (uint64_t j = 0; j < FLAGS_buffer_size; ++j)
+            tmp_buf[j] = (((uint64_t)addr[i] + j) % 26) + 'a';
+        cudaMemcpy(addr[i], tmp_buf, FLAGS_buffer_size, cudaMemcpyDefault);
+        delete[] tmp_buf;
     }
 #else
     for (int i = 0; i < buffer_num; ++i) {
