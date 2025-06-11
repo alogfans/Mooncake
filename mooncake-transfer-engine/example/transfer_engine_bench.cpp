@@ -225,9 +225,9 @@ Status initiatorWorker(TransferEngine *engine, SegmentID segment_id,
                 if (status.s == TransferStatusEnum::COMPLETED) {
 #ifdef USE_CUDA
                     char *tmp_buf = new char[FLAGS_block_size];
-                    cudaMemcpy(tmp_buf, (void *)requests[task_id].target_offset,
+                    cudaMemcpy(tmp_buf, (void *)requests[task_id].source,
                                FLAGS_block_size, cudaMemcpyDefault);
-                    LOG(INFO) << std::string(tmp_buf, 32);
+                    LOG(INFO) << "[" << std::string(tmp_buf, 32) << "]";
                     for (uint64_t j = 0; j < FLAGS_block_size; ++j)
                         LOG_ASSERT(
                             tmp_buf[j] ==
