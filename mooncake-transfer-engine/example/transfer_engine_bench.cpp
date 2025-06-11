@@ -461,6 +461,7 @@ int target() {
         int rc = engine->registerLocalMemory(addr[i], FLAGS_buffer_size,
                                              name_prefix + std::to_string(i));
         LOG_ASSERT(!rc);
+        LOG(INFO) << "Device #" << i << ":" << addr[i];
     }
 #else
     for (int i = 0; i < buffer_num; ++i) {
