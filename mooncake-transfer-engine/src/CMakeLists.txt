@@ -47,6 +47,7 @@ if (USE_CUDA)
   endif()
 endif()
 
+<<<<<<< HEAD
 if (USE_ASCEND)
   file(GLOB ASCEND_TOOLKIT_ROOT "/usr/local/Ascend/ascend-toolkit/latest/*-linux")
   file(GLOB MPI_LIB_DIR "/usr/local/mpich-*/lib/")
@@ -55,3 +56,6 @@ if (USE_ASCEND)
   target_link_libraries(transfer_engine PUBLIC ascendcl hccl)
   target_link_libraries(transfer_engine PUBLIC ascend_transport)
 endif()
+=======
+add_subdirectory(v1)
+>>>>>>> v1.0-beta
