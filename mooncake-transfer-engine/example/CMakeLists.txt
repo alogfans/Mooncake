@@ -12,7 +12,6 @@ target_link_libraries(transfer_engine_bench_with_notify PUBLIC transfer_engine)
 add_executable(memory_pool memory_pool.cpp)
 target_link_libraries(memory_pool PUBLIC transfer_engine)
 
-<<<<<<< HEAD
 if (USE_ASCEND)
     add_executable(transfer_engine_ascend_one_sided transfer_engine_ascend_one_sided.cpp)
     target_link_libraries(transfer_engine_ascend_one_sided PUBLIC transfer_engine)
@@ -20,7 +19,6 @@ if (USE_ASCEND)
     add_executable(transfer_engine_ascend_perf transfer_engine_ascend_perf.cpp)
     target_link_libraries(transfer_engine_ascend_perf PUBLIC transfer_engine)
 endif()
-=======
+
 add_executable(transfer_engine_bench_v1 transfer_engine_bench_v1.cpp)
 target_link_libraries(transfer_engine_bench_v1 PUBLIC transfer_engine_v1)
->>>>>>> v1.0-beta
