@@ -196,12 +196,28 @@ static std::vector<TopologyEntry> discoverCudaTopology(
 
         std::vector<std::string> preferred_hca;
         std::vector<std::string> avail_hca;
+
+        int min_distance = INT_MAX;
+        std::unordered_map<int, std::vector<std::string>> distance_map;
         for (const auto &hca : all_hca) {
-            // FIXME: currently we only identify the NICs connected to the same
-            // PCIe switch/RC with GPU as preferred.
-            if (getPciDistance(hca.pci_bus_id.c_str(), pci_bus_id) == 0) {
-                preferred_hca.push_back(hca.name);
-            } else {
+            int dist = getPciDistance(hca.pci_bus_id.c_str(), pci_bus_id);
+            distance_map[dist].push_back(hca.name);
+            min_distance = std::min(min_distance, dist);
+        }
+
+        if (distance_map.count(0)) {
+            // Prefer NICs with distance 0 (e.g. same PCIe switch/RC)
+            preferred_hca = std::move(distance_map[0]);
+        } else if (distance_map.count(min_distance)) {
+            // No exact match — fall back to NICs with closest PCIe distance
+            preferred_hca = std::move(distance_map[min_distance]);
+        }
+
+        // Fill avail_hca with remaining NICs not in preferred_hca
+        std::unordered_set<std::string> preferred_set(preferred_hca.begin(),
+                                                      preferred_hca.end());
+        for (const auto &hca : all_hca) {
+            if (!preferred_set.count(hca.name)) {
                 avail_hca.push_back(hca.name);
             }
         }
