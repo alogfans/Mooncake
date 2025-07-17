@@ -22,7 +22,7 @@
 #include "v1/common.h"
 #include "v1/transport/rdma/context.h"
 
-#define CHECK_STATUS(status)                                                 \
+#define ASSERT_STATUS(status)                                                \
     do {                                                                     \
         if (status_ != (status)) {                                           \
             LOG(FATAL) << "Detected incorrect status in endpoint ["          \
@@ -32,7 +32,7 @@
         }                                                                    \
     } while (0)
 
-#define CHECK_STATUS_NOT(status)                                    \
+#define ASSERT_STATUS_NOT(status)                                   \
     do {                                                            \
         if (status_ == (status)) {                                  \
             LOG(FATAL) << "Detected incorrect status in endpoint [" \
@@ -68,7 +68,7 @@ RdmaEndPoint::~RdmaEndPoint() {
 
 int RdmaEndPoint::construct(RdmaContext *context, EndPointParams *params,
                             const std::string &endpoint_name) {
-    CHECK_STATUS(EP_UNINIT);
+    ASSERT_STATUS(EP_UNINIT);
     context_ = context;
     params_ = params;
     endpoint_name_ = endpoint_name;
@@ -78,7 +78,7 @@ int RdmaEndPoint::construct(RdmaContext *context, EndPointParams *params,
 
 int RdmaEndPoint::enable() {
     RWSpinlock::WriteGuard guard(ep_lock_);
-    CHECK_STATUS_NOT(EP_UNINIT);
+    ASSERT_STATUS_NOT(EP_UNINIT);
     qp_list_.resize(params_->qp_mul_factor);
     wr_depth_list_ = new WrDepthBlock[params_->qp_mul_factor];
 
@@ -107,7 +107,7 @@ int RdmaEndPoint::enable() {
 
 int RdmaEndPoint::disable() {
     RWSpinlock::WriteGuard guard(ep_lock_);
-    CHECK_STATUS_NOT(EP_UNINIT);
+    ASSERT_STATUS_NOT(EP_UNINIT);
     for (size_t i = 0; i < qp_list_.size(); ++i) {
         // TODO force cancel these work requests
         if (wr_depth_list_[i].value != 0)
@@ -127,7 +127,7 @@ int RdmaEndPoint::disable() {
 
 int RdmaEndPoint::reset() {
     RWSpinlock::WriteGuard guard(ep_lock_);
-    CHECK_STATUS_NOT(EP_UNINIT);
+    ASSERT_STATUS_NOT(EP_UNINIT);
     for (size_t i = 0; i < qp_list_.size(); ++i) {
         // TODO force cancel these work requests
         if (wr_depth_list_[i].value != 0)
@@ -196,7 +196,7 @@ int RdmaEndPoint::submitSlices(std::vector<RdmaSlice *> &slice_list,
     // RWSpinlock::ReadGuard guard(ep_lock_);
     const static int kSgeEntries = 1;
 
-    CHECK_STATUS(EP_READY);
+    ASSERT_STATUS(EP_READY);
     if (qp_index < 0) qp_index = 0;
     qp_index %= qp_list_.size();
     auto cq = context_->cq(qp_index % context_->cqCount());
@@ -251,7 +251,7 @@ int RdmaEndPoint::submitSlices(std::vector<RdmaSlice *> &slice_list,
 
 int RdmaEndPoint::submitRecvImmDataRequest(int qp_index, uint64_t id) {
     RWSpinlock::ReadGuard guard(ep_lock_);
-    CHECK_STATUS(EP_READY);
+    ASSERT_STATUS(EP_READY);
     if (qp_index < 0 || qp_index >= (int)qp_list_.size()) return 0;
     ibv_recv_wr wr, *bad_wr;
     memset(&wr, 0, sizeof(ibv_recv_wr));

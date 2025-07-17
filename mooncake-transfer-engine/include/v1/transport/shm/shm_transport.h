@@ -126,6 +126,7 @@ class ShmTransport : public Transport {
     std::unordered_map<void *, std::string> shm_path_map_;
 
     std::string cxl_mount_path_;
+    uint64_t async_memcpy_threshold_;
 };
 }  // namespace v1
 }  // namespace mooncake

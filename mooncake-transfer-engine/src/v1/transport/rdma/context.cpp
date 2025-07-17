@@ -28,7 +28,7 @@
 
 #define MIN(lhs, rhs) lhs = std::min(lhs, rhs)
 
-#define CHECK_STATUS(status)                                               \
+#define ASSERT_STATUS(status)                                              \
     do {                                                                   \
         if (status_ != (status)) {                                         \
             LOG(FATAL) << "Detected incorrect status in context ["         \
@@ -38,7 +38,7 @@
         }                                                                  \
     } while (0)
 
-#define CHECK_STATUS_NOT(status)                                               \
+#define ASSERT_STATUS_NOT(status)                                              \
     do {                                                                       \
         if (status_ == (status)) {                                             \
             LOG(FATAL) << "Detected incorrect status in context ["             \
@@ -155,7 +155,7 @@ RdmaContext::~RdmaContext() {
 int RdmaContext::construct(const std::string &device_name,
                            std::shared_ptr<EndpointStore> endpoint_store,
                            std::shared_ptr<RdmaParams> params) {
-    CHECK_STATUS(DEVICE_UNINIT);
+    ASSERT_STATUS(DEVICE_UNINIT);
     device_name_ = device_name;
     endpoint_store_ = endpoint_store;
     params_ = params;
@@ -164,7 +164,7 @@ int RdmaContext::construct(const std::string &device_name,
 }
 
 int RdmaContext::enable() {
-    CHECK_STATUS(DEVICE_DISABLED);
+    ASSERT_STATUS(DEVICE_DISABLED);
     if (openDevice(device_name_, params_->device.port)) {
         LOG(ERROR) << "Failed to open device [" << device_name_ << "] on port ["
                    << params_->device.port << "] with GID index ["
@@ -227,7 +227,7 @@ int RdmaContext::enable() {
 }
 
 int RdmaContext::disable() {
-    CHECK_STATUS_NOT(DEVICE_UNINIT);
+    ASSERT_STATUS_NOT(DEVICE_UNINIT);
     endpoint_store_->clearEndpoints(device_name_);
 
     for (auto &entry : mr_set_) {
@@ -268,7 +268,7 @@ int RdmaContext::disable() {
 
 RdmaContext::MemReg RdmaContext::registerMemReg(void *addr, size_t length,
                                                 int access) {
-    CHECK_STATUS(DEVICE_ENABLED);
+    ASSERT_STATUS(DEVICE_ENABLED);
     ibv_mr *entry = ibv_reg_mr(native_pd_, addr, length, access);
     if (!entry) {
         PLOG(ERROR) << "Failed to register memory from " << addr << " to "
@@ -282,7 +282,7 @@ RdmaContext::MemReg RdmaContext::registerMemReg(void *addr, size_t length,
 }
 
 int RdmaContext::unregisterMemReg(MemReg id) {
-    CHECK_STATUS(DEVICE_ENABLED);
+    ASSERT_STATUS(DEVICE_ENABLED);
     auto entry = (ibv_mr *)id;
     mr_set_mutex_.lock();
     mr_set_.erase(entry);
@@ -298,7 +298,7 @@ int RdmaContext::unregisterMemReg(MemReg id) {
 }
 
 std::string RdmaContext::gid() const {
-    CHECK_STATUS(DEVICE_ENABLED);
+    ASSERT_STATUS(DEVICE_ENABLED);
     std::string gid_str;
     char buf[16] = {0};
     const static size_t kGidLength = 16;
@@ -310,14 +310,14 @@ std::string RdmaContext::gid() const {
 }
 
 RdmaCQ *RdmaContext::cq(int index) {
-    CHECK_STATUS(DEVICE_ENABLED);
+    ASSERT_STATUS(DEVICE_ENABLED);
     if (index < 0 || index >= params_->device.num_cq_list) return nullptr;
     return cq_list_[index];
 }
 
 std::shared_ptr<RdmaEndPoint> RdmaContext::endpoint(
     const std::string &key, EndPointOperation operation) {
-    CHECK_STATUS(DEVICE_ENABLED);
+    ASSERT_STATUS(DEVICE_ENABLED);
     if (device_name_.empty() || key.empty()) {
         LOG(ERROR) << "Invalid argument for endpoint operation";
         return nullptr;
@@ -410,7 +410,8 @@ int RdmaContext::openDevice(const std::string &device_name, uint8_t port) {
     if (gid_index_ <= 0) {
         int ret = getBestGidIndex(device_name, context, port_attr, port);
         if (ret >= 0) {
-            // LOG(INFO) << "Find best GID " << ret << " on " << device_name << "/"
+            // LOG(INFO) << "Find best GID " << ret << " on " << device_name <<
+            // "/"
             //           << port;
             gid_index_ = ret;
         }

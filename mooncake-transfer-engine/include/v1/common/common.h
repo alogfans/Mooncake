@@ -166,7 +166,7 @@ static inline std::string serializeBinaryData(const void *data, size_t length) {
 }
 
 static inline void deserializeBinaryData(const std::string &hexString,
-                           std::vector<unsigned char> &buffer) {
+                                         std::vector<unsigned char> &buffer) {
     if (hexString.length() % 2 != 0) {
         throw std::invalid_argument("Input string length must be even");
     }

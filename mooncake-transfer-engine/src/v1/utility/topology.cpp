@@ -183,13 +183,16 @@ static std::vector<TopologyEntry> discoverCudaTopology(
     const std::vector<InfinibandDevice> &all_hca) {
     std::vector<TopologyEntry> topology;
     int device_count;
-    if (cudaGetDeviceCount(&device_count) != cudaSuccess) {
+    auto err = cudaGetDeviceCount(&device_count);
+    if (err != cudaSuccess) {
+        LOG(WARNING) << "cudaGetDeviceCount: " << cudaGetErrorString(err);
         device_count = 0;
     }
     for (int i = 0; i < device_count; i++) {
         char pci_bus_id[20];
-        if (cudaDeviceGetPCIBusId(pci_bus_id, sizeof(pci_bus_id), i) !=
-            cudaSuccess) {
+        err = cudaDeviceGetPCIBusId(pci_bus_id, sizeof(pci_bus_id), i);
+        if (err != cudaSuccess) {
+            LOG(WARNING) << "cudaDeviceGetPCIBusId: " << cudaGetErrorString(err);
             continue;
         }
         for (char *ch = pci_bus_id; (*ch = tolower(*ch)); ch++);

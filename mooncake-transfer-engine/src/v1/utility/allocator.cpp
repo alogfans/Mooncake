@@ -39,13 +39,8 @@ Status genericAllocateLocalMemory(void **pptr, size_t size,
     auto result = parseLocation(options.location);
     if (result.first == "cuda") {
 #ifdef USE_CUDA
-        auto ret = cudaSetDevice(result.second);
-        if (ret != cudaSuccess)
-            return Status::InternalError("CUDA unable to set device" LOC_MARK);
-        ret = cudaMalloc(pptr, size);
-        if (ret != cudaSuccess)
-            return Status::InternalError(
-                "CUDA unable to malloc memory" LOC_MARK);
+        CHECK_CUDA(cudaSetDevice(result.second));
+        CHECK_CUDA(cudaMalloc(pptr, size));
         return Status::OK();
 #else
         return Status::NotImplemented("CUDA feature not supported" LOC_MARK);
@@ -63,12 +58,9 @@ Status genericFreeLocalMemory(void *ptr, size_t size) {
 #ifdef USE_CUDA
     // Check pointer on GPU
     cudaPointerAttributes attributes;
-    auto ret = cudaPointerGetAttributes(&attributes, ptr);
-    if (ret != cudaSuccess)
-        return Status::InternalError(
-            "CUDA failed to get pointer attributes" LOC_MARK);
+    CHECK_CUDA(cudaPointerGetAttributes(&attributes, ptr));
     if (attributes.type == cudaMemoryTypeDevice) {
-        cudaFree(ptr);
+        CHECK_CUDA(cudaFree(ptr));
     } else if (attributes.type == cudaMemoryTypeHost ||
                attributes.type == cudaMemoryTypeUnregistered) {
         numa_free(ptr, size);

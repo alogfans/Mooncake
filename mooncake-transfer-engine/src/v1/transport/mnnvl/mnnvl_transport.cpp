@@ -32,12 +32,6 @@
 #include "v1/common.h"
 #include "v1/metadata/metadata.h"
 
-#define CHECK_STATUS(cmd)                \
-    do {                                 \
-        Status status = cmd;             \
-        if (!status.ok()) return status; \
-    } while (0)
-
 namespace mooncake {
 namespace v1 {
 

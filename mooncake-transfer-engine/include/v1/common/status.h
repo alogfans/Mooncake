@@ -35,6 +35,23 @@
 #define TOSTRING(x) STRINGIFY(x)
 #define LOC_MARK ", at " __FILE__ ":" TOSTRING(__LINE__)
 
+#define CHECK_STATUS(call)               \
+    do {                                 \
+        Status status = call;            \
+        if (!status.ok()) return status; \
+    } while (0)
+
+#ifdef USE_CUDA
+#define CHECK_CUDA(call)                                                \
+    do {                                                                \
+        auto err = call;                                                \
+        if (err != cudaSuccess)                                         \
+            return Status::InternalError(std::string(#call) + ": " +      \
+                                         cudaGetErrorString(cuda_err) + \
+                                         LOC_MARK);                     \
+    } while (0)
+#endif
+
 namespace mooncake {
 namespace v1 {
 class Status final {

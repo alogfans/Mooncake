@@ -24,18 +24,6 @@
 #include <iomanip>
 #include <memory>
 
-#ifdef USE_CUDA
-#define CHECK_CUDA(call)                                                   \
-    {                                                                      \
-        cudaError_t err = call;                                            \
-        if (err != cudaSuccess) {                                          \
-            std::cerr << "CUDA error: " << cudaGetErrorString(err) << " (" \
-                      << __FILE__ << ":" << __LINE__ << ")" << "\n";       \
-            exit(EXIT_FAILURE);                                            \
-        }                                                                  \
-    }
-#endif
-
 #include "v1/common.h"
 #include "v1/metadata/metadata.h"
 
@@ -62,6 +50,8 @@ Status ShmTransport::install(std::string &local_segment_name,
     machine_id_ = metadata->segmentManager().getLocal()->machine_id;
     installed_ = true;
     cxl_mount_path_ = conf_->get("transports/shm/cxl_mount_path", "");
+    async_memcpy_threshold_ =
+        conf_->get("transports/shm/async_memcpy_threshold", 4) * 1024;
     return setPeerAccess();
 }
 
@@ -72,7 +62,7 @@ Status ShmTransport::uninstall() {
             for (auto &entry : relocate_map.second) {
                 if (entry.second.is_cuda_ipc) {
 #ifdef USE_CUDA
-                    cudaIpcCloseMemHandle(entry.second.shm_addr);
+                    CHECK_CUDA(cudaIpcCloseMemHandle(entry.second.shm_addr));
 #endif
                 } else {
                     munmap(entry.second.shm_addr, entry.second.length);
@@ -138,10 +128,23 @@ Status ShmTransport::submitTransferTasks(
 }
 
 void ShmTransport::startTransfer(ShmTask *task, ShmSubBatch *batch) {
-    if (task->is_cuda_ipc) {
 #ifdef USE_CUDA
-        cudaSetDevice(task->cuda_id);
-        cudaError_t err;
+    cudaSetDevice(task->cuda_id);
+    cudaError_t err;
+    if (task->request.length < async_memcpy_threshold_) {
+        if (task->request.opcode == Request::READ)
+            err = cudaMemcpy(task->request.source, (void *)task->target_addr,
+                             task->request.length, cudaMemcpyDefault);
+        else
+            err = cudaMemcpy((void *)task->target_addr, task->request.source,
+                             task->request.length, cudaMemcpyDefault);
+        if (err != cudaSuccess)
+            task->status_word = TransferStatusEnum::FAILED;
+        else {
+            task->transferred_bytes = task->request.length;
+            task->status_word = TransferStatusEnum::COMPLETED;
+        }
+    } else {
         if (task->request.opcode == Request::READ)
             err = cudaMemcpyAsync(
                 task->request.source, (void *)task->target_addr,
@@ -151,19 +154,17 @@ void ShmTransport::startTransfer(ShmTask *task, ShmSubBatch *batch) {
                                   task->request.source, task->request.length,
                                   cudaMemcpyDefault, batch->stream);
         if (err != cudaSuccess) task->status_word = TransferStatusEnum::FAILED;
-#else
-        assert(0);
-#endif
-    } else {
-        if (task->request.opcode == Request::READ)
-            memcpy(task->request.source, (void *)task->target_addr,
-                   task->request.length);
-        else
-            memcpy((void *)task->target_addr, task->request.source,
-                   task->request.length);
-        task->transferred_bytes = task->request.length;
-        task->status_word = TransferStatusEnum::COMPLETED;
     }
+#else
+    if (task->request.opcode == Request::READ)
+        memcpy(task->request.source, (void *)task->target_addr,
+               task->request.length);
+    else
+        memcpy((void *)task->target_addr, task->request.source,
+               task->request.length);
+    task->transferred_bytes = task->request.length;
+    task->status_word = TransferStatusEnum::COMPLETED;
+#endif
 }
 
 Status ShmTransport::getTransferStatus(SubBatchRef batch, int task_id,
@@ -207,10 +208,7 @@ Status ShmTransport::addMemoryBuffer(BufferDesc &desc,
 #ifdef USE_CUDA
     if (parseLocation(desc.location).first == "cuda") {
         cudaIpcMemHandle_t handle;
-        auto err = cudaIpcGetMemHandle(&handle, (void *)desc.addr);
-        if (err != cudaSuccess) {
-            return Status::InternalError("Failed to get cuda memory handle");
-        }
+        CHECK_CUDA(cudaIpcGetMemHandle(&handle, (void *)desc.addr));
         desc.shm_path =
             serializeBinaryData(&handle, sizeof(cudaIpcMemHandle_t));
         return Status::OK();
@@ -347,14 +345,8 @@ Status ShmTransport::relocateSharedMemoryAddress(uint64_t &dest_addr,
                     deserializeBinaryData(entry.shm_path, output_buffer);
                     cudaIpcMemHandle_t handle;
                     memcpy(&handle, output_buffer.data(), sizeof(handle));
-                    auto err = cudaIpcOpenMemHandle(
-                        &shm_addr, handle, cudaIpcMemLazyEnablePeerAccess);
-                    if (err != cudaSuccess) {
-                        LOG(ERROR) << "Failed to open cuda memory handle: "
-                                   << cudaGetErrorString(err);
-                        return Status::InternalError(
-                            "Failed to open cuda memory handle " LOC_MARK);
-                    }
+                    CHECK_CUDA(cudaIpcOpenMemHandle(
+                        &shm_addr, handle, cudaIpcMemLazyEnablePeerAccess));
                     OpenedShmEntry shm_entry;
                     shm_entry.shm_fd = -1;
                     shm_entry.shm_addr = shm_addr;
@@ -434,8 +426,8 @@ bool ShmTransport::taskSupported(const Request &request) {
 Status ShmTransport::setPeerAccess() {
 #ifdef USE_CUDA
     int device_count = 0;
-    cudaError_t err = cudaGetDeviceCount(&device_count);
-    if (err != cudaSuccess || device_count < 2) return Status::OK();
+    CHECK_CUDA(cudaGetDeviceCount(&device_count));
+    if (device_count < 2) return Status::OK();
     for (int i = 0; i < device_count; ++i) {
         cudaSetDevice(i);
         for (int j = 0; j < device_count; ++j) {
@@ -445,9 +437,9 @@ Status ShmTransport::setPeerAccess() {
             if (!can_access) {
                 continue;
             }
-            cudaError_t perr = cudaDeviceEnablePeerAccess(j, 0);
-            if (perr != cudaSuccess) {
-                if (perr == cudaErrorPeerAccessAlreadyEnabled) {
+            cudaError_t err = cudaDeviceEnablePeerAccess(j, 0);
+            if (err != cudaSuccess) {
+                if (err == cudaErrorPeerAccessAlreadyEnabled) {
                     cudaGetLastError();
                 } else {
                     return Status::InternalError(

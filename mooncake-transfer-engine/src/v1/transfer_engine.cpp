@@ -28,12 +28,6 @@
 #endif
 #include "v1/utility/ip.h"
 
-#define CHECK_STATUS(cmd)                \
-    do {                                 \
-        Status status = cmd;             \
-        if (!status.ok()) return status; \
-    } while (0)
-
 namespace mooncake {
 namespace v1 {
 

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "v1/utility/memory_location.h"
+
 #include "v1/common.h"
 
 #ifdef USE_CUDA
@@ -42,8 +43,7 @@ const std::vector<MemoryLocationEntry> getMemoryLocation(void *start,
     cudaError_t result;
     result = cudaPointerGetAttributes(&attributes, start);
     if (result != cudaSuccess) {
-        LOG(ERROR) << "Error code: " << result << " - "
-                   << cudaGetErrorString(result);
+        LOG(WARNING) << "cudaPointerGetAttributes: " << cudaGetErrorString(result);
         entries.push_back({(uint64_t)start, len, kWildcardLocation});
         return entries;
     }
@@ -93,5 +93,5 @@ const std::vector<MemoryLocationEntry> getMemoryLocation(void *start,
     free(status);
     return entries;
 }
-}
+}  // namespace v1
 }  // namespace mooncake
