@@ -131,13 +131,42 @@ void ShmTransport::startTransfer(ShmTask *task, ShmSubBatch *batch) {
 #ifdef USE_CUDA
     cudaSetDevice(task->cuda_id);
     cudaError_t err;
-    if (task->request.length < async_memcpy_threshold_) {
-        if (task->request.opcode == Request::READ)
-            err = cudaMemcpy(task->request.source, (void *)task->target_addr,
-                             task->request.length, cudaMemcpyDefault);
-        else
-            err = cudaMemcpy((void *)task->target_addr, task->request.source,
-                             task->request.length, cudaMemcpyDefault);
+    void *src = nullptr, *dst = nullptr;
+
+    // Determine direction and addresses
+    if (task->request.opcode == Request::READ) {
+        dst = task->request.source;       // read into source buffer
+        src = (void *)task->target_addr;  // from remote
+    } else {
+        src = task->request.source;  // write from source buffer
+        dst = (void *)task->target_addr;
+    }
+
+    bool is_async = (task->request.length >= async_memcpy_threshold_);
+
+    // Determine memory types
+    cudaPointerAttributes src_attr, dst_attr;
+    cudaMemoryType src_type = cudaMemoryTypeHost;
+    cudaMemoryType dst_type = cudaMemoryTypeHost;
+    if (cudaPointerGetAttributes(&src_attr, src) == cudaSuccess)
+        src_type = src_attr.type;
+    if (cudaPointerGetAttributes(&dst_attr, dst) == cudaSuccess)
+        dst_type = dst_attr.type;
+
+    cudaMemcpyKind kind = cudaMemcpyDefault;  // let CUDA infer if possible
+    if (src_type == cudaMemoryTypeDevice && dst_type == cudaMemoryTypeHost)
+        kind = cudaMemcpyDeviceToHost;
+    else if (src_type == cudaMemoryTypeHost && dst_type == cudaMemoryTypeDevice)
+        kind = cudaMemcpyHostToDevice;
+    else if (src_type == cudaMemoryTypeDevice &&
+             dst_type == cudaMemoryTypeDevice)
+        kind = cudaMemcpyDeviceToDevice;
+    else if (src_type == cudaMemoryTypeHost && dst_type == cudaMemoryTypeHost)
+        kind = cudaMemcpyHostToHost;
+
+    // Select copy method
+    if (!is_async || kind == cudaMemcpyDefault) {
+        err = cudaMemcpy(dst, src, task->request.length, kind);
         if (err != cudaSuccess)
             task->status_word = TransferStatusEnum::FAILED;
         else {
@@ -145,14 +174,8 @@ void ShmTransport::startTransfer(ShmTask *task, ShmSubBatch *batch) {
             task->status_word = TransferStatusEnum::COMPLETED;
         }
     } else {
-        if (task->request.opcode == Request::READ)
-            err = cudaMemcpyAsync(
-                task->request.source, (void *)task->target_addr,
-                task->request.length, cudaMemcpyDefault, batch->stream);
-        else
-            err = cudaMemcpyAsync((void *)task->target_addr,
-                                  task->request.source, task->request.length,
-                                  cudaMemcpyDefault, batch->stream);
+        err = cudaMemcpyAsync(dst, src, task->request.length, kind,
+                              batch->stream);
         if (err != cudaSuccess) task->status_word = TransferStatusEnum::FAILED;
     }
 #else
