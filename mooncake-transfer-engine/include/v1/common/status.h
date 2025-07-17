@@ -42,13 +42,12 @@
     } while (0)
 
 #ifdef USE_CUDA
-#define CHECK_CUDA(call)                                                \
-    do {                                                                \
-        auto err = call;                                                \
-        if (err != cudaSuccess)                                         \
-            return Status::InternalError(std::string(#call) + ": " +      \
-                                         cudaGetErrorString(cuda_err) + \
-                                         LOC_MARK);                     \
+#define CHECK_CUDA(call)                                                      \
+    do {                                                                      \
+        auto err = call;                                                      \
+        if (err != cudaSuccess)                                               \
+            return Status::InternalError(std::string(#call) + ": " +          \
+                                         cudaGetErrorString(err) + LOC_MARK); \
     } while (0)
 #endif
 
