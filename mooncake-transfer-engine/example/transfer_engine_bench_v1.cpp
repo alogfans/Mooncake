@@ -111,7 +111,25 @@ uint64_t getStartAddress(TransferEngine *engine, SegmentID handle,
                    << " no registered memory, please recheck";
         exit(EXIT_FAILURE);
     }
-    return (uint64_t)detail.buffers[thread_id % detail.buffers.size()].addr;
+
+    int buffer_id = thread_id % detail.buffers.size();
+    std::string location;
+#ifdef USE_CUDA
+    if (FLAGS_use_dram && buffer_id < num_sockets) {
+        location = "cpu:" + std::to_string(buffer_id);
+    } else if (FLAGS_use_vram) {
+        if (FLAGS_use_dram) buffer_id -= num_sockets;
+        location = "cuda:" + std::to_string(buffer_id);
+    }
+#else
+    location = "cpu:" + std::to_string(buffer_id);
+#endif
+
+    for (auto &entry : detail.buffers) {
+        if (entry.location == location) return (uint64_t)entry.addr;
+    }
+
+    return (uint64_t)detail.buffers[0].addr;
 }
 
 Status submitRequestSync(TransferEngine *engine, SegmentID handle,

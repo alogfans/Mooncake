@@ -20,6 +20,11 @@
 #include <queue>
 #include <string>
 
+#ifdef USE_CUDA
+#include <cuda.h>
+#include <cuda_runtime.h>
+#endif
+
 #include "v1/metadata/metadata.h"
 #include "v1/transport/transport.h"
 
@@ -32,11 +37,15 @@ struct ShmTask {
     volatile size_t transferred_bytes;
     uint64_t target_addr = 0;
     bool is_cuda_ipc;
+    int cuda_id = 0;
 };
 
 struct ShmSubBatch : public Transport::SubBatch {
     std::vector<ShmTask> task_list;
     size_t max_size;
+#ifdef USE_CUDA
+    cudaStream_t stream;
+#endif
 };
 
 class ShmTransport : public Transport {
@@ -80,12 +89,14 @@ class ShmTransport : public Transport {
     virtual bool taskSupported(const Request &request);
 
    private:
-    void startTransfer(ShmTask *task);
+    void startTransfer(ShmTask *task, ShmSubBatch *batch);
 
     void *createSharedMemory(const std::string &path, size_t size);
 
     Status relocateSharedMemoryAddress(uint64_t &dest_addr, uint64_t length,
                                        uint64_t target_id, bool &is_cuda_ipc);
+
+    Status setPeerAccess();
 
    private:
     bool installed_;
@@ -98,6 +109,7 @@ class ShmTransport : public Transport {
         void *shm_addr;
         uint64_t length;
         bool is_cuda_ipc;
+        int cuda_id;
     };
 
     using HashMap =
