@@ -136,7 +136,7 @@ static inline bool genericMemcpy(void *dst, void *src, size_t length) {
 }
 static inline bool isCudaMemory(void *ptr) {
     cudaPointerAttributes attr;
-    auto ret = cudaPointerGetAttributes(&attr, addr);
+    auto ret = cudaPointerGetAttributes(&attr, ptr);
     return ret == cudaSuccess && attr.type == cudaMemoryTypeDevice;
 }
 #else
