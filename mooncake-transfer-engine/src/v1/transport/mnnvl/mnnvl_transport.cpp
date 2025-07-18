@@ -304,29 +304,23 @@ Status MnnvlTransport::allocateLocalMemory(void **addr, size_t size,
     void *ptr = nullptr;
     auto result = cuMemCreate(&handle, size, &prop, 0);
     if (result != CUDA_SUCCESS) {
-        const char **pstr = nullptr;
-        cuGetErrorName(result, pstr);
-        return Status::InternalError(std::string("cuMemCreate") + ": " +
-                                     (pstr ? *pstr : "<unknown>") + LOC_MARK);
+        return Status::InternalError(std::string("cuMemCreate: ") +
+                                     std::to_string(result) + LOC_MARK);
     }
 
     result = cuMemAddressReserve((CUdeviceptr *)&ptr, size, granularity, 0, 0);
     if (result != CUDA_SUCCESS) {
         cuMemRelease(handle);
-        const char **pstr = nullptr;
-        cuGetErrorName(result, pstr);
-        return Status::InternalError(std::string("cuMemAddressReserve") + ": " +
-                                     (pstr ? *pstr : "<unknown>") + LOC_MARK);
+        return Status::InternalError(std::string("cuMemAddressReserve: cuResult ") +
+                                     std::to_string(result) + LOC_MARK);
     }
 
     result = cuMemMap((CUdeviceptr)ptr, size, 0, handle, 0);
     if (result != CUDA_SUCCESS) {
         cuMemAddressFree((CUdeviceptr)ptr, size);
         cuMemRelease(handle);
-        const char **pstr = nullptr;
-        cuGetErrorName(result, pstr);
-        return Status::InternalError(std::string("cuMemMap") + ": " +
-                                     (pstr ? *pstr : "<unknown>") + LOC_MARK);
+        return Status::InternalError(std::string("cuMemMap: cuResult ") +
+                                     std::to_string(result) + LOC_MARK);
     }
 
     int device_count;
@@ -343,10 +337,8 @@ Status MnnvlTransport::allocateLocalMemory(void **addr, size_t size,
         cuMemUnmap((CUdeviceptr)ptr, size);
         cuMemAddressFree((CUdeviceptr)ptr, size);
         cuMemRelease(handle);
-        const char **pstr = nullptr;
-        cuGetErrorName(result, pstr);
-        return Status::InternalError(std::string("cuMemSetAccess") + ": " +
-                                     (pstr ? *pstr : "<unknown>") + LOC_MARK);
+        return Status::InternalError(std::string("cuMemSetAccess: cuResult ") +
+                                     std::to_string(result) + LOC_MARK);
     }
 
     *addr = ptr;

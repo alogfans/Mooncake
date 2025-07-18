@@ -50,16 +50,13 @@
                                          cudaGetErrorString(err) + LOC_MARK); \
     } while (0)
 
-#define CHECK_CU(call)                                                  \
-    do {                                                                \
-        auto err = call;                                                \
-        if (err != CUDA_SUCCESS) {                                      \
-            const char** pstr = nullptr;                                \
-            cuGetErrorName(err, pstr);                                  \
-            return Status::InternalError(std::string(#call) + ": " +    \
-                                         (pstr ? *pstr : "<unknown>") + \
-                                         LOC_MARK);                     \
-        }                                                               \
+#define CHECK_CU(call)                                                        \
+    do {                                                                      \
+        auto err = call;                                                      \
+        if (err != CUDA_SUCCESS) {                                            \
+            return Status::InternalError(std::string(#call) + ": cuResult " + \
+                                         std::to_string(err) + LOC_MARK);     \
+        }                                                                     \
     } while (0)
 #endif
 
