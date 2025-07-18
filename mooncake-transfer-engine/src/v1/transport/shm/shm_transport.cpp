@@ -129,7 +129,7 @@ Status ShmTransport::submitTransferTasks(
 
 void ShmTransport::startTransfer(ShmTask *task, ShmSubBatch *batch) {
 #ifdef USE_CUDA
-    cudaSetDevice(task->cuda_id);
+    // cudaSetDevice(task->cuda_id);
     cudaError_t err;
     void *src = nullptr, *dst = nullptr;
 
@@ -165,7 +165,11 @@ void ShmTransport::startTransfer(ShmTask *task, ShmSubBatch *batch) {
         kind = cudaMemcpyHostToHost;
 
     // Select copy method
-    if (!is_async || kind == cudaMemcpyDefault) {
+    if (kind == cudaMemcpyDefault) {
+        memcpy(dst, src, task->request.length);
+        task->transferred_bytes = task->request.length;
+        task->status_word = TransferStatusEnum::COMPLETED;
+    } else if (!is_async) {
         err = cudaMemcpy(dst, src, task->request.length, kind);
         if (err != cudaSuccess)
             task->status_word = TransferStatusEnum::FAILED;
@@ -220,7 +224,7 @@ void ShmTransport::queryOutstandingTasks(SubBatchRef batch,
     for (int task_id = 0; task_id < (int)shm_batch->task_list.size();
          ++task_id) {
         auto &task = shm_batch->task_list[task_id];
-        if (task.status_word != TransferStatusEnum::COMPLETED) {
+        if (task.status_word == TransferStatusEnum::PENDING) {
             task_id_list.push_back(task_id);
         }
     }
@@ -236,6 +240,9 @@ Status ShmTransport::addMemoryBuffer(BufferDesc &desc,
             serializeBinaryData(&handle, sizeof(cudaIpcMemHandle_t));
         return Status::OK();
     }
+    if (parseLocation(desc.location).first == "cpu")
+        CHECK_CUDA(cudaHostRegister(((void *)desc.addr), desc.length,
+                                    cudaHostRegisterDefault));
 #endif
     if (options.shm_path.empty())
         return Status::OK();  // Return sliently but not regard it as valid
@@ -250,6 +257,11 @@ Status ShmTransport::addMemoryBuffer(BufferDesc &desc,
 Status ShmTransport::removeMemoryBuffer(BufferDesc &desc) {
     desc.shm_path.clear();
     // desc.shm_offset = 0;
+#ifdef USE_CUDA
+    if (parseLocation(desc.location).first == "cpu") {
+        cudaHostUnregister((void *)desc.addr);
+    }
+#endif
     return Status::OK();
 }
 

@@ -223,7 +223,7 @@ void GdsTransport::queryOutstandingTasks(SubBatchRef batch,
     for (int task_id = 0; task_id < gds_batch->runner->size(); ++task_id) {
         TransferStatus status;
         getTransferStatus(batch, task_id, status);
-        if (status.s != TransferStatusEnum::COMPLETED) {
+        if (status.s == TransferStatusEnum::PENDING) {
             task_id_list.push_back(task_id);
         }
     }

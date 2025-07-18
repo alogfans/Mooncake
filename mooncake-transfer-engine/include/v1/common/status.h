@@ -49,6 +49,18 @@
             return Status::InternalError(std::string(#call) + ": " +          \
                                          cudaGetErrorString(err) + LOC_MARK); \
     } while (0)
+
+#define CHECK_CU(call)                                                  \
+    do {                                                                \
+        auto err = call;                                                \
+        if (err != CUDA_SUCCESS) {                                      \
+            const char** pstr = nullptr;                                \
+            cuGetErrorName(err, pstr);                                  \
+            return Status::InternalError(std::string(#call) + ": " +    \
+                                         (pstr ? *pstr : "<unknown>") + \
+                                         LOC_MARK);                     \
+        }                                                               \
+    } while (0)
 #endif
 
 namespace mooncake {
@@ -83,8 +95,8 @@ class Status final {
     ~Status() { delete[] message_; }
 
     // Constructs a Status object containing a status code and message.
-    // If 'code == Code::kOk', 'msg' is ignored and an object identical to an OK
-    // status is constructed.
+    // If 'code == Code::kOk', 'msg' is ignored and an object identical to
+    // an OK status is constructed.
     Status(Code code, std::string_view message);
 
     Status(const Status& s);
@@ -142,11 +154,11 @@ class Status final {
     // The code of the status.
     Code code_ = Code::kOk;
     // The error message of the status. Refer to the Status definition in
-    // RocksDB, we don't use 'std::string' type message but 'const char*' type
-    // one for the performance considerations. A memory allocation in the
-    // std::string construction could be avoid for the most cases that the
-    // Status is OK. And the total size of 'message_' is only 8 bytes on a
-    // x86-64 platform, while the size of a uninitialized strings with SSO
+    // RocksDB, we don't use 'std::string' type message but 'const char*'
+    // type one for the performance considerations. A memory allocation in
+    // the std::string construction could be avoid for the most cases that
+    // the Status is OK. And the total size of 'message_' is only 8 bytes on
+    // a x86-64 platform, while the size of a uninitialized strings with SSO
     // (Small String Optimization) will be 24 to 32 bytes big, excluding the
     // dynamically allocated memory.
     const char* message_ = nullptr;

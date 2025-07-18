@@ -41,26 +41,20 @@ static Status buildCUmemAllocationProp(CUmemAllocationProp &prop,
     prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
     prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
     CUdevice device;
-    CUresult result = cuDeviceGet(&device, device_id);
-    if (result != CUDA_SUCCESS)
-        return Status::InternalError("Failed to get cuda device index");
+    CHECK_CU(cuDeviceGet(&device, device_id));
     prop.location.id = device;
     int flag = 0;
-    auto errcode = cuDeviceGetAttribute(
+    CHECK_CU(cuDeviceGetAttribute(
         &flag, CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED,
-        device);
-    if (errcode != CUDA_SUCCESS)
-        return Status::InternalError("Failed to get cuda device attribute");
+        device));
     if (flag) prop.allocFlags.gpuDirectRDMACapable = 1;
     return Status::OK();
 }
 
 static Status roundGranularity(CUmemAllocationProp &prop, size_t granularity,
                                size_t &size) {
-    auto result = cuMemGetAllocationGranularity(
-        &granularity, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM);
-    if (result != CUDA_SUCCESS)
-        return Status::InternalError("Failed to get cuda alloc granularity");
+    CHECK_CU(cuMemGetAllocationGranularity(&granularity, &prop,
+                                           CU_MEM_ALLOC_GRANULARITY_MINIMUM));
     size = (size + granularity - 1) & ~(granularity - 1);
     if (size == 0) size = granularity;
     return Status::OK();
@@ -112,6 +106,9 @@ Status MnnvlTransport::install(std::string &local_segment_name,
     conf_ = conf;
     machine_id_ = metadata->segmentManager().getLocal()->machine_id;
 
+    async_memcpy_threshold_ =
+        conf_->get("transports/mnnvl/async_memcpy_threshold", 4) * 1024;
+
     installed_ = true;
     return Status::OK();
 }
@@ -133,6 +130,7 @@ Status MnnvlTransport::allocateSubBatch(SubBatchRef &batch, size_t max_size) {
     batch = mnnvl_batch;
     mnnvl_batch->task_list.reserve(max_size);
     mnnvl_batch->max_size = max_size;
+    CHECK_CUDA(cudaStreamCreate(&mnnvl_batch->stream));
     return Status::OK();
 }
 
@@ -140,6 +138,7 @@ Status MnnvlTransport::freeSubBatch(SubBatchRef &batch) {
     auto mnnvl_batch = dynamic_cast<MnnvlSubBatch *>(batch);
     if (!mnnvl_batch)
         return Status::InvalidArgument("Invalid MNNVL sub-batch" LOC_MARK);
+    CHECK_CUDA(cudaStreamDestroy(mnnvl_batch->stream));
     Slab<MnnvlSubBatch>::Get().deallocate(mnnvl_batch);
     batch = nullptr;
     return Status::OK();
@@ -165,26 +164,61 @@ Status MnnvlTransport::submitTransferTasks(
         task.target_addr = target_addr;
         task.request = request;
         task.status_word = TransferStatusEnum::PENDING;
-        startTransfer(&task);
+        startTransfer(&task, mnnvl_batch);
     }
     return Status::OK();
 }
 
-void MnnvlTransport::startTransfer(MnnvlTask *task) {
-    ThreadPool::Get().submit([task]() {
-        cudaError_t err;
-        if (task->request.opcode == Request::READ)
-            err = cudaMemcpy(task->request.source, (void *)task->target_addr,
-                             task->request.length, cudaMemcpyDefault);
-        else
-            err = cudaMemcpy((void *)task->target_addr, task->request.source,
-                             task->request.length, cudaMemcpyDefault);
-        if (err == cudaSuccess) {
+void MnnvlTransport::startTransfer(MnnvlTask *task, MnnvlSubBatch *batch) {
+    // cudaSetDevice(task->cuda_id);
+    cudaError_t err;
+    void *src = nullptr, *dst = nullptr;
+
+    // Determine direction and addresses
+    if (task->request.opcode == Request::READ) {
+        dst = task->request.source;       // read into source buffer
+        src = (void *)task->target_addr;  // from remote
+    } else {
+        src = task->request.source;  // write from source buffer
+        dst = (void *)task->target_addr;
+    }
+
+    bool is_async = (task->request.length >= async_memcpy_threshold_);
+
+    // Determine memory types
+    cudaPointerAttributes src_attr, dst_attr;
+    cudaMemoryType src_type = cudaMemoryTypeHost;
+    cudaMemoryType dst_type = cudaMemoryTypeHost;
+    if (cudaPointerGetAttributes(&src_attr, src) == cudaSuccess)
+        src_type = src_attr.type;
+    if (cudaPointerGetAttributes(&dst_attr, dst) == cudaSuccess)
+        dst_type = dst_attr.type;
+
+    cudaMemcpyKind kind = cudaMemcpyDefault;  // let CUDA infer if possible
+    if (src_type == cudaMemoryTypeDevice && dst_type == cudaMemoryTypeHost)
+        kind = cudaMemcpyDeviceToHost;
+    else if (src_type == cudaMemoryTypeHost && dst_type == cudaMemoryTypeDevice)
+        kind = cudaMemcpyHostToDevice;
+    else if (src_type == cudaMemoryTypeDevice &&
+             dst_type == cudaMemoryTypeDevice)
+        kind = cudaMemcpyDeviceToDevice;
+    else if (src_type == cudaMemoryTypeHost && dst_type == cudaMemoryTypeHost)
+        kind = cudaMemcpyHostToHost;
+
+    // Select copy method
+    if (!is_async) {
+        err = cudaMemcpy(dst, src, task->request.length, kind);
+        if (err != cudaSuccess)
+            task->status_word = TransferStatusEnum::FAILED;
+        else {
             task->transferred_bytes = task->request.length;
             task->status_word = TransferStatusEnum::COMPLETED;
-        } else
-            task->status_word = TransferStatusEnum::FAILED;
-    });
+        }
+    } else {
+        err = cudaMemcpyAsync(dst, src, task->request.length, kind,
+                              batch->stream);
+        if (err != cudaSuccess) task->status_word = TransferStatusEnum::FAILED;
+    }
 }
 
 Status MnnvlTransport::getTransferStatus(SubBatchRef batch, int task_id,
@@ -195,6 +229,16 @@ Status MnnvlTransport::getTransferStatus(SubBatchRef batch, int task_id,
     }
     auto &task = mnnvl_batch->task_list[task_id];
     status = TransferStatus{task.status_word, task.transferred_bytes};
+    if (task.status_word == TransferStatusEnum::PENDING) {
+        auto err = cudaStreamQuery(mnnvl_batch->stream);
+        if (err == cudaSuccess) {
+            cudaStreamSynchronize(mnnvl_batch->stream);
+            task.transferred_bytes = task.request.length;
+            task.status_word = TransferStatusEnum::COMPLETED;
+        } else if (err != cudaErrorNotReady) {
+            task.status_word = TransferStatusEnum::FAILED;
+        }
+    }
     return Status::OK();
 }
 
@@ -205,8 +249,7 @@ void MnnvlTransport::queryOutstandingTasks(SubBatchRef batch,
     for (int task_id = 0; task_id < (int)mnnvl_batch->task_list.size();
          ++task_id) {
         auto &task = mnnvl_batch->task_list[task_id];
-        if (task.status_word != TransferStatusEnum::COMPLETED &&
-            task.status_word != TransferStatusEnum::FAILED) {
+        if (task.status_word == TransferStatusEnum::PENDING) {
             task_id_list.push_back(task_id);
         }
     }
@@ -231,11 +274,8 @@ Status MnnvlTransport::addMemoryBuffer(BufferDesc &desc,
     CHECK_STATUS(roundGranularity(prop, granularity, desc.length));
 
     CUmemFabricHandle export_handle;
-    result = cuMemExportToShareableHandle(&export_handle, handle,
-                                          CU_MEM_HANDLE_TYPE_FABRIC, 0);
-    if (result != CUDA_SUCCESS)
-        return Status::InternalError("Failed to export shareable handle");
-
+    CHECK_CU(cuMemExportToShareableHandle(&export_handle, handle,
+                                          CU_MEM_HANDLE_TYPE_FABRIC, 0));
     desc.mnnvl_handle =
         serializeBinaryData(&export_handle, sizeof(CUmemFabricHandle));
 
@@ -264,20 +304,29 @@ Status MnnvlTransport::allocateLocalMemory(void **addr, size_t size,
     void *ptr = nullptr;
     auto result = cuMemCreate(&handle, size, &prop, 0);
     if (result != CUDA_SUCCESS) {
-        return Status::InternalError("Failed to create cuda memory");
+        const char **pstr = nullptr;
+        cuGetErrorName(result, pstr);
+        return Status::InternalError(std::string("cuMemCreate") + ": " +
+                                     (pstr ? *pstr : "<unknown>") + LOC_MARK);
     }
 
     result = cuMemAddressReserve((CUdeviceptr *)&ptr, size, granularity, 0, 0);
     if (result != CUDA_SUCCESS) {
         cuMemRelease(handle);
-        return Status::InternalError("Failed to reserve cuda address space");
+        const char **pstr = nullptr;
+        cuGetErrorName(result, pstr);
+        return Status::InternalError(std::string("cuMemAddressReserve") + ": " +
+                                     (pstr ? *pstr : "<unknown>") + LOC_MARK);
     }
 
     result = cuMemMap((CUdeviceptr)ptr, size, 0, handle, 0);
     if (result != CUDA_SUCCESS) {
         cuMemAddressFree((CUdeviceptr)ptr, size);
         cuMemRelease(handle);
-        return Status::InternalError("Failed to map cuda memory address space");
+        const char **pstr = nullptr;
+        cuGetErrorName(result, pstr);
+        return Status::InternalError(std::string("cuMemMap") + ": " +
+                                     (pstr ? *pstr : "<unknown>") + LOC_MARK);
     }
 
     int device_count;
@@ -294,7 +343,10 @@ Status MnnvlTransport::allocateLocalMemory(void **addr, size_t size,
         cuMemUnmap((CUdeviceptr)ptr, size);
         cuMemAddressFree((CUdeviceptr)ptr, size);
         cuMemRelease(handle);
-        return Status::InternalError("Failed to set cuda memory access");
+        const char **pstr = nullptr;
+        cuGetErrorName(result, pstr);
+        return Status::InternalError(std::string("cuMemSetAccess") + ": " +
+                                     (pstr ? *pstr : "<unknown>") + LOC_MARK);
     }
 
     *addr = ptr;
@@ -320,26 +372,27 @@ Status MnnvlTransport::freeLocalMemory(void *addr, size_t size) {
 Status MnnvlTransport::relocateSharedMemoryAddress(uint64_t &dest_addr,
                                                    uint64_t length,
                                                    uint64_t target_id) {
-    {
+    thread_local HashMap tl_relocate_map;
+    if (tl_relocate_map.empty()) {
         RWSpinlock::ReadGuard guard(relocate_lock_);
-        auto &relocate_map = relocate_map_[target_id];
-        for (auto &entry : relocate_map) {
-            if (entry.first <= dest_addr &&
-                dest_addr + length <= entry.first + entry.second.length) {
-                auto mnnvl_addr = entry.second.mnnvl_addr;
-                dest_addr = dest_addr - entry.first + ((uint64_t)mnnvl_addr);
-                return Status::OK();
-            }
+        tl_relocate_map = relocate_map_;
+    }
+
+    auto &relocate_map = tl_relocate_map[target_id];
+    for (auto &entry : relocate_map) {
+        if (entry.first <= dest_addr &&
+            dest_addr + length <= entry.first + entry.second.length) {
+            auto mnnvl_addr = entry.second.mnnvl_addr;
+            dest_addr = dest_addr - entry.first + ((uint64_t)mnnvl_addr);
+            return Status::OK();
         }
     }
 
     RWSpinlock::WriteGuard guard(relocate_lock_);
     SegmentDescRef desc;
-    auto status = metadata_->segmentManager().getRemote(desc, target_id);
-    if (!status.ok()) return status;
+    CHECK_STATUS(metadata_->segmentManager().getRemote(desc, target_id));
     int index = 0;
     auto &detail = std::get<MemorySegmentDesc>(desc->detail);
-    auto &relocate_map = relocate_map_[target_id];
     for (auto &entry : detail.buffers) {
         if (!entry.mnnvl_handle.empty() && entry.addr <= dest_addr &&
             dest_addr + length <= entry.addr + entry.length) {
@@ -355,25 +408,12 @@ Status MnnvlTransport::relocateSharedMemoryAddress(uint64_t &dest_addr,
                        sizeof(export_handle));
                 void *mnnvl_addr = nullptr;
                 CUmemGenericAllocationHandle handle;
-                auto result = cuMemImportFromShareableHandle(
-                    &handle, &export_handle, CU_MEM_HANDLE_TYPE_FABRIC);
-                if (result != CUDA_SUCCESS) {
-                    return Status::InternalError(
-                        "Failed to import from shareable handle");
-                }
-                result = cuMemAddressReserve((CUdeviceptr *)&mnnvl_addr,
-                                             entry.length, 0, 0, 0);
-                if (result != CUDA_SUCCESS) {
-                    return Status::InternalError(
-                        "Failed to reserve memory address space");
-                }
-                result = cuMemMap((CUdeviceptr)mnnvl_addr, entry.length, 0,
-                                  handle, 0);
-                if (result != CUDA_SUCCESS) {
-                    return Status::InternalError(
-                        "Failed to map memory address space");
-                }
-
+                CHECK_CU(cuMemImportFromShareableHandle(
+                    &handle, &export_handle, CU_MEM_HANDLE_TYPE_FABRIC));
+                CHECK_CU(cuMemAddressReserve((CUdeviceptr *)&mnnvl_addr,
+                                             entry.length, 0, 0, 0));
+                CHECK_CU(cuMemMap((CUdeviceptr)mnnvl_addr, entry.length, 0,
+                                  handle, 0));
                 int device_count;
                 cudaGetDeviceCount(&device_count);
                 CUmemAccessDesc accessDesc[device_count];
@@ -384,15 +424,13 @@ Status MnnvlTransport::relocateSharedMemoryAddress(uint64_t &dest_addr,
                     accessDesc[device_id].flags =
                         CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
                 }
-                result = cuMemSetAccess((CUdeviceptr)mnnvl_addr, entry.length,
-                                        accessDesc, device_count);
-                if (result != CUDA_SUCCESS) {
-                    return Status::InternalError("Failed to set memory access");
-                }
-
+                CHECK_CU(cuMemSetAccess((CUdeviceptr)mnnvl_addr, entry.length,
+                                        accessDesc, device_count));
                 OpenedMnnvlEntry mnnvl_entry;
                 mnnvl_entry.mnnvl_addr = mnnvl_addr;
                 mnnvl_entry.length = entry.length;
+                auto location = parseLocation(entry.location);
+                mnnvl_entry.cuda_id = location.second;
                 relocate_map[entry.addr] = mnnvl_entry;
             }
             auto mnnvl_addr = relocate_map[entry.addr].mnnvl_addr;

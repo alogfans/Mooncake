@@ -15,6 +15,9 @@
 #ifndef MNNVL_TRANSPORT_H_
 #define MNNVL_TRANSPORT_H_
 
+#include <cuda.h>
+#include <cuda_runtime.h>
+
 #include <functional>
 #include <iostream>
 #include <queue>
@@ -32,11 +35,13 @@ struct MnnvlTask {
     volatile TransferStatusEnum status_word;
     volatile size_t transferred_bytes;
     uint64_t target_addr = 0;
+    int cuda_id = 0;
 };
 
 struct MnnvlSubBatch : public Transport::SubBatch {
     std::vector<MnnvlTask> task_list;
     size_t max_size;
+    cudaStream_t stream;
 };
 
 class MnnvlTransport : public Transport {
@@ -80,7 +85,7 @@ class MnnvlTransport : public Transport {
     virtual bool taskSupported(const Request &request);
 
    private:
-    void startTransfer(MnnvlTask *task);
+    void startTransfer(MnnvlTask *task, MnnvlSubBatch *batch);
 
     void *createSharedMemory(const std::string &path, size_t size);
 
@@ -96,6 +101,7 @@ class MnnvlTransport : public Transport {
     struct OpenedMnnvlEntry {
         void *mnnvl_addr;
         uint64_t length;
+        int cuda_id;
     };
 
     using HashMap =
@@ -110,6 +116,7 @@ class MnnvlTransport : public Transport {
 
     std::mutex allocate_mutex_;
     std::unordered_set<void *> allocate_set_;
+    uint64_t async_memcpy_threshold_;
 };
 }  // namespace v1
 }  // namespace mooncake
