@@ -18,3 +18,8 @@ if (USE_GDS)
   add_subdirectory(gds)
   target_sources(transport_v1 PUBLIC $<TARGET_OBJECTS:transport_gds_v1>)
 endif()
+
+if (USE_IO_URING)
+  add_subdirectory(io_uring)
+  target_sources(transport_v1 PUBLIC $<TARGET_OBJECTS:transport_io_uring_v1>)
+endif()
