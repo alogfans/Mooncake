@@ -17,6 +17,7 @@
 #include <jsoncpp/json/value.h>
 
 #include <cassert>
+#include <filesystem>
 #include <set>
 
 #include "v1/common.h"
@@ -42,7 +43,7 @@ Status SegmentManager::openRemote(SegmentID &handle,
         name_to_id_map_[segment_name] = handle;
         id_to_name_map_[handle] = segment_name;
     }
-    LOG(INFO) << handle << " " << segment_name;
+    LOG(INFO) << "Opened segment #" << handle << ": " << segment_name;
     return Status::OK();
 }
 
@@ -76,8 +77,11 @@ Status SegmentManager::getRemote(SegmentDescRef &desc, SegmentID handle) {
     }
 
     auto segment_name = id_to_name_map_[handle];
-    auto status = store_->getSegmentDesc(desc, segment_name);
-    if (!status.ok()) return status;
+    if (segment_name.starts_with(kLocalFileSegmentPrefix)) {
+        CHECK_STATUS(makeFileRemote(desc, segment_name));
+    } else {
+        CHECK_STATUS(store_->getSegmentDesc(desc, segment_name));
+    }
     id_to_desc_map_[handle] = desc;
     return Status::OK();
 }
@@ -123,6 +127,35 @@ bool SegmentManager::isSameMachine(SegmentID handle) {
         return id_to_desc_map_[handle]->machine_id == local_desc_->machine_id;
     }
     return false;
+}
+
+Status SegmentManager::makeFileRemote(SegmentDescRef &desc,
+                                      const std::string &segment_name) {
+    std::string path = segment_name.substr(kLocalFileSegmentPrefix.length());
+    if (!file_desc_basepath_.empty()) {
+        if (file_desc_basepath_.ends_with("/"))
+            path = file_desc_basepath_ + path;
+        else
+            path = file_desc_basepath_ + "/" + path;
+    }
+
+    struct stat st;
+    if (stat(path.c_str(), &st) || !S_ISREG(st.st_mode)) {
+        return Status::InvalidArgument(std::string("Invalid file path ") +
+                                       path);
+    }
+
+    desc = std::make_shared<SegmentDesc>();
+    desc->name = segment_name;
+    desc->type = SegmentType::File;
+    desc->machine_id = local_desc_->machine_id;
+    auto &detail = std::get<FileSegmentDesc>(desc->detail);
+    FileBufferDesc buffer;
+    buffer.path = path;
+    buffer.length = st.st_size;
+    buffer.offset = 0;
+    detail.buffers.push_back(buffer);
+    return Status::OK();
 }
 
 Status SegmentManager::synchronizeLocal() {

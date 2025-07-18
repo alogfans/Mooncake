@@ -39,7 +39,8 @@ class GdsFileContext {
         desc_.handle.fd = fd;
         auto result = cuFileHandleRegister(&handle_, &desc_);
         if (result.err != CU_FILE_SUCCESS) {
-            LOG(ERROR) << "Failed to register GDS file handle: " << result.err;
+            LOG(ERROR) << "Failed to register GDS file handle: Code "
+                       << result.err;
             return;
         }
         ready_ = true;
@@ -126,7 +127,9 @@ Status GdsTransport::allocateSubBatch(SubBatchRef &batch, size_t max_size) {
     gds_batch->io_events.resize(max_size);
     auto result = cuFileBatchIOSetUp(&gds_batch->handle, max_size);
     if (result.err != CU_FILE_SUCCESS)
-        return Status::InternalError("Failed to setup GDS batch IO" LOC_MARK);
+        return Status::InternalError(
+            std::string("Failed to setup GDS batch IO: Code ") +
+            std::to_string(result.err) + LOC_MARK);
     return Status::OK();
 }
 
@@ -197,7 +200,9 @@ Status GdsTransport::submitTransferTasks(
         cuFileBatchIOSubmit(gds_batch->handle, gds_batch->io_params.size(),
                             gds_batch->io_params.data(), 0);
     if (result.err != CU_FILE_SUCCESS)
-        return Status::InternalError("Failed to submit GDS batch IO");
+        return Status::InternalError(
+            std::string("Failed to submit GDS batch IO: Code ") +
+            std::to_string(result.err) + LOC_MARK);
     return Status::OK();
 }
 
@@ -210,7 +215,9 @@ Status GdsTransport::getTransferStatus(SubBatchRef batch, int task_id,
     auto result = cuFileBatchIOGetStatus(handle_, 0, &num_tasks,
                                          gds_batch->io_events.data(), nullptr);
     if (result.err != CU_FILE_SUCCESS)
-        return Status::InternalError("Failed to get GDS batch status");
+        return Status::InternalError(
+            std::string("Failed to get GDS batch status: Code ") +
+            std::to_string(result.err) + LOC_MARK);
     auto &event = gds_batch->io_events[task_id];
     status.s = parseTransferStatus(event.status);
     status.transferred_bytes += event.ret;
@@ -233,14 +240,18 @@ Status GdsTransport::addMemoryBuffer(BufferDesc &desc,
                                      const MemoryOptions &options) {
     auto result = cuFileBufRegister((void *)desc.addr, desc.length, 0);
     if (result.err != CU_FILE_SUCCESS)
-        return Status::InternalError("Failed to register GDS buffer");
+        return Status::InternalError(
+            std::string("Failed to register GDS buffer: Code ") +
+            std::to_string(result.err) + LOC_MARK);
     return Status::OK();
 }
 
 Status GdsTransport::removeMemoryBuffer(BufferDesc &desc) {
     auto result = cuFileBufDeregister((void *)desc.addr);
     if (result.err != CU_FILE_SUCCESS)
-        return Status::InternalError("Failed to register GDS buffer");
+        return Status::InternalError(
+            std::string("Failed to deregister GDS buffer: Code ") +
+            std::to_string(result.err) + LOC_MARK);
     return Status::OK();
 }
 

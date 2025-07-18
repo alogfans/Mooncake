@@ -114,6 +114,9 @@ class SegmentManager {
 
     Status deleteLocal();
 
+    Status makeFileRemote(SegmentDescRef &desc,
+                          const std::string &segment_name);
+
    private:
     RWSpinlock lock_;
     std::unordered_map<SegmentID, SegmentDescRef> id_to_desc_map_;
@@ -124,6 +127,8 @@ class SegmentManager {
     SegmentDescRef local_desc_;
 
     std::unique_ptr<MetadataStore> store_;
+
+    std::string file_desc_basepath_;
 };
 
 class RemoteSegmentCache {

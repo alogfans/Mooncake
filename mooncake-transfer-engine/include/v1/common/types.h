@@ -90,6 +90,8 @@ struct MemoryOptions {
     size_t shm_offset = 0;
 };
 
+const std::string kLocalFileSegmentPrefix = "file://";
+
 }  // namespace v1
 }  // namespace mooncake
 
