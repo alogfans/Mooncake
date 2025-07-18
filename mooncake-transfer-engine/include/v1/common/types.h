@@ -79,8 +79,8 @@ struct BufferEntry {
     size_t shm_offset = 0;
 };
 
-enum TransportType { RDMA = 0, SHM, GDS, MNNVL, TCP };
-const static int kSupportedTransportTypes = 5;
+enum TransportType { RDMA = 0, SHM, GDS, MNNVL, TCP, IOURING };
+const static int kSupportedTransportTypes = 6;
 
 struct MemoryOptions {
     Location location = kWildcardLocation;

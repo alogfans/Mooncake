@@ -16,14 +16,13 @@
 #define IO_URING_TRANSPORT_H_
 
 #include <bits/stdint-uintn.h>
+#include <liburing.h>
 
 #include <cstddef>
 #include <memory>
 #include <string>
 #include <unordered_map>
 #include <utility>
-
-#include <liburing.h>
 
 #include "v1/metadata/metadata.h"
 #include "v1/transport/transport.h"
@@ -37,6 +36,11 @@ struct IOUringTask {
     Request request;
     volatile TransferStatusEnum status_word;
     volatile size_t transferred_bytes;
+    void *buffer = nullptr;
+
+    ~IOUringTask() {
+        if (buffer) free(buffer);
+    }
 };
 
 struct IOUringSubBatch : public Transport::SubBatch {
@@ -78,7 +82,7 @@ class IOUringTransport : public Transport {
 
     virtual const char *getName() const { return "io-uring"; }
 
-    virtual bool taskSupported(const Request &request) { return false; }
+    virtual bool taskSupported(const Request &request);
 
    private:
     std::string getIOUringFilePath(SegmentID handle);

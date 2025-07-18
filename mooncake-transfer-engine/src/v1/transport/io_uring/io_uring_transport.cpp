@@ -30,10 +30,18 @@ class IOUringFileContext {
    public:
     explicit IOUringFileContext(const std::string &path) : ready_(false) {
         fd_ = open(path.c_str(), O_RDWR | O_DIRECT);
+        if (fd_ >= 0) {
+            ready_ = true;
+            return;
+        }
+
+        fd_ = open(path.c_str(), O_RDWR);
         if (fd_ < 0) {
             PLOG(ERROR) << "Failed to open file " << path;
             return;
         }
+
+        LOG(WARNING) << "File " << path << " opened in Buffered I/O mode";
         ready_ = true;
     }
 
@@ -155,13 +163,24 @@ Status IOUringTransport::submitTransferTasks(
         if (!sqe)
             return Status::InternalError("io_uring_get_sqe failed" LOC_MARK);
 
-        if (request.opcode == Request::READ)
-            io_uring_prep_read(sqe, context->getHandle(), request.source,
-                               request.length, request.target_offset);
-        else if (request.opcode == Request::WRITE)
-            io_uring_prep_write(sqe, context->getHandle(), request.source,
-                                request.length, request.target_offset);
-
+        if (isCudaMemory(request.source)) {
+            task.buffer = malloc(request.length);
+            if (request.opcode == Request::READ)
+                io_uring_prep_read(sqe, context->getHandle(), task.buffer,
+                                   request.length, request.target_offset);
+            else if (request.opcode == Request::WRITE) {
+                genericMemcpy(task.buffer, request.source, request.length);
+                io_uring_prep_write(sqe, context->getHandle(), task.buffer,
+                                    request.length, request.target_offset);
+            }
+        } else {
+            if (request.opcode == Request::READ)
+                io_uring_prep_read(sqe, context->getHandle(), request.source,
+                                   request.length, request.target_offset);
+            else if (request.opcode == Request::WRITE)
+                io_uring_prep_write(sqe, context->getHandle(), request.source,
+                                    request.length, request.target_offset);
+        }
         sqe->user_data = (uintptr_t)&task;
     }
 
@@ -190,6 +209,13 @@ Status IOUringTransport::getTransferStatus(SubBatchRef batch, int task_id,
                 if (cqe->res < 0)
                     task->status_word = TransferStatusEnum::FAILED;
                 else {
+                    if (task->buffer) {
+                        if (task->request.opcode == Request::READ)
+                            genericMemcpy(task->request.source, task->buffer,
+                                          task->request.length);
+                        free(task->buffer);
+                        task->buffer = nullptr;
+                    }
                     task->status_word = TransferStatusEnum::COMPLETED;
                     task->transferred_bytes = task->request.length;
                 }
@@ -220,6 +246,15 @@ Status IOUringTransport::addMemoryBuffer(BufferDesc &desc,
 
 Status IOUringTransport::removeMemoryBuffer(BufferDesc &desc) {
     return Status::OK();
+}
+
+bool IOUringTransport::taskSupported(const Request &request) {
+    if (request.target_id == LOCAL_SEGMENT_ID) return false;
+    SegmentDescRef desc;
+    auto status =
+        metadata_->segmentManager().getRemote(desc, request.target_id);
+    if (!status.ok()) return false;
+    return desc->type == SegmentType::File;
 }
 
 }  // namespace v1

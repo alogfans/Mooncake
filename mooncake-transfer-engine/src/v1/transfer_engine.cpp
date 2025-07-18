@@ -26,6 +26,9 @@
 #ifdef USE_GDS
 #include "v1/transport/gds/gds_transport.h"
 #endif
+#ifdef USE_IO_URING
+#include "v1/transport/io_uring/io_uring_transport.h"
+#endif
 #include "v1/utility/ip.h"
 
 namespace mooncake {
@@ -159,6 +162,11 @@ Status TransferEngine::construct() {
 #ifdef USE_GDS
     if (conf_->get("transports/gds/enable", false))
         transport_list_[GDS] = std::make_unique<GdsTransport>();
+#endif
+
+#ifdef USE_IO_URING
+    if (conf_->get("transports/io_uring/enable", false))
+        transport_list_[IOURING] = std::make_unique<IOUringTransport>();
 #endif
 
     std::string transport_string;
@@ -334,6 +342,9 @@ void TransferEngine::lazyFreeBatch() {
 }
 
 TransportType TransferEngine::getTransportType(const Request &request) {
+    if (transport_list_[IOURING] &&
+        transport_list_[IOURING]->taskSupported(request))
+        return IOURING;
     if (transport_list_[SHM] && transport_list_[SHM]->taskSupported(request))
         return SHM;
     if (transport_list_[RDMA])
