@@ -140,15 +140,14 @@ Status SegmentManager::makeFileRemote(SegmentDescRef &desc,
     }
 
     struct stat st;
-    if (stat(path.c_str(), &st) || !S_ISREG(st.st_mode)) {
-        return Status::InvalidArgument(std::string("Invalid file path ") +
-                                       path);
-    }
+    if (stat(path.c_str(), &st) || !S_ISREG(st.st_mode))
+        return Status::InvalidArgument(std::string("Invalid path: ") + path);
 
     desc = std::make_shared<SegmentDesc>();
     desc->name = segment_name;
     desc->type = SegmentType::File;
     desc->machine_id = local_desc_->machine_id;
+    desc->detail = FileSegmentDesc{};
     auto &detail = std::get<FileSegmentDesc>(desc->detail);
     FileBufferDesc buffer;
     buffer.path = path;

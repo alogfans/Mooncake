@@ -212,7 +212,7 @@ Status GdsTransport::getTransferStatus(SubBatchRef batch, int task_id,
     unsigned num_tasks = gds_batch->io_params.size();
     if (task_id < 0 || task_id >= (int)num_tasks)
         return Status::InvalidArgument("Invalid task ID");
-    auto result = cuFileBatchIOGetStatus(handle_, 0, &num_tasks,
+    auto result = cuFileBatchIOGetStatus(gds_batch->handle, 0, &num_tasks,
                                          gds_batch->io_events.data(), nullptr);
     if (result.err != CU_FILE_SUCCESS)
         return Status::InternalError(
@@ -227,7 +227,7 @@ Status GdsTransport::getTransferStatus(SubBatchRef batch, int task_id,
 void GdsTransport::queryOutstandingTasks(SubBatchRef batch,
                                          std::vector<int> &task_id_list) {
     auto gds_batch = dynamic_cast<GdsSubBatch *>(batch);
-    for (int task_id = 0; task_id < gds_batch->runner->size(); ++task_id) {
+    for (int task_id = 0; task_id < gds_batch->io_params.size(); ++task_id) {
         TransferStatus status;
         getTransferStatus(batch, task_id, status);
         if (status.s == TransferStatusEnum::PENDING) {

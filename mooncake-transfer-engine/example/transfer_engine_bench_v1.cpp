@@ -100,11 +100,12 @@ std::atomic<size_t> total_batch_count(0);
 uint64_t getStartAddress(TransferEngine *engine, SegmentID handle,
                          int thread_id) {
     auto segment_desc = engine->getSegmentDesc(handle);
-    if (!segment_desc || segment_desc->type != SegmentType::Memory) {
-        LOG(ERROR) << "Invalid args: cannot find memory segment "
+    if (!segment_desc) {
+        LOG(ERROR) << "Invalid args: cannot find segment "
                    << FLAGS_remote_segment << ", please recheck";
         exit(EXIT_FAILURE);
     }
+    if (segment_desc->type == SegmentType::File) return 0;
     auto &detail = std::get<MemorySegmentDesc>(segment_desc->detail);
     if (detail.buffers.empty()) {
         LOG(ERROR) << "Invalid args: remote segment " << FLAGS_remote_segment
