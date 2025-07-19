@@ -447,6 +447,7 @@ bool ShmTransport::taskSupported(const Request &request) {
         metadata_->segmentManager().getRemote(desc, request.target_id);
     if (!status.ok()) return false;
     if (desc->machine_id != machine_id_) return false;
+    if (desc->type != SegmentType::Memory) return false;
     auto &detail = std::get<MemorySegmentDesc>(desc->detail);
     for (auto &entry : detail.buffers) {
         if (!entry.shm_path.empty() && entry.addr <= request.target_offset &&

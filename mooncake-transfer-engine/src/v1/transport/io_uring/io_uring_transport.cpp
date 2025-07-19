@@ -136,6 +136,7 @@ Status IOUringTransport::submitTransferTasks(
         auto &task =
             io_uring_batch->task_list[io_uring_batch->task_list.size() - 1];
         task.request = request;
+        task.status_word = TransferStatusEnum::PENDING;
         IOUringFileContext *context = nullptr;
         {
             RWSpinlock::ReadGuard guard(file_context_lock_);
@@ -185,7 +186,7 @@ Status IOUringTransport::submitTransferTasks(
     }
 
     int rc = io_uring_submit(&io_uring_batch->ring);
-    if (rc)
+    if (rc != (int32_t)request_list.size())
         return Status::InternalError(
             std::string("io_uring_submit failed: Code ") + std::to_string(rc) +
             LOC_MARK);

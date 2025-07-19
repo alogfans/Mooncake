@@ -165,7 +165,7 @@ Status TransferEngine::construct() {
 #endif
 
 #ifdef USE_IO_URING
-    if (conf_->get("transports/io_uring/enable", false))
+    if (conf_->get("transports/io_uring/enable", true))
         transport_list_[IOURING] = std::make_unique<IOUringTransport>();
 #endif
 

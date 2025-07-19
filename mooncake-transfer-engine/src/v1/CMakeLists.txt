@@ -37,5 +37,6 @@ if (USE_CUDA)
 endif()
 
 if (USE_IO_URING)
+  add_definitions(-DUSE_IO_URING)
   target_link_libraries(transfer_engine_v1 PUBLIC uring)
 endif()

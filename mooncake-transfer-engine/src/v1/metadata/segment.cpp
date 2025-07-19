@@ -147,13 +147,13 @@ Status SegmentManager::makeFileRemote(SegmentDescRef &desc,
     desc->name = segment_name;
     desc->type = SegmentType::File;
     desc->machine_id = local_desc_->machine_id;
-    desc->detail = FileSegmentDesc{};
-    auto &detail = std::get<FileSegmentDesc>(desc->detail);
+    FileSegmentDesc detail;
     FileBufferDesc buffer;
     buffer.path = path;
     buffer.length = st.st_size;
     buffer.offset = 0;
     detail.buffers.push_back(buffer);
+    desc->detail = detail;
     return Status::OK();
 }
 
