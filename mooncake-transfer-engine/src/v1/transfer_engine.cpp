@@ -17,9 +17,13 @@
 #include <fstream>
 #include <random>
 
+#include "v1/metadata/metadata.h"
+#include "v1/metadata/segment.h"
 #include "v1/transport/rdma/rdma_transport.h"
 #include "v1/transport/shm/shm_transport.h"
 #include "v1/transport/tcp/tcp_transport.h"
+#include "v1/transport/transport.h"
+#include "v1/utility/memory_location.h"
 #ifdef USE_CUDA
 #include "v1/transport/mnnvl/mnnvl_transport.h"
 #endif

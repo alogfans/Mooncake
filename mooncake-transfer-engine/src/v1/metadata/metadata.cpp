@@ -223,20 +223,21 @@ Status CentralMetadataStore::deleteSegmentDesc(
     return plugin_->remove(getFullMetadataKey(segment_name));
 }
 
+thread_local CoroRpcAgent tl_rpc_agent;
+
 Status P2PMetadataStore::getSegmentDesc(SegmentDescRef &desc,
                                         const std::string &segment_name) {
-    RpcRawData request, response;
+    std::string request, response;
     auto status =
-        AsioRpcClient::Call(segment_name, GetSegmentDesc, request, response);
+        tl_rpc_agent.call(segment_name, GetSegmentDesc, request, response);
     if (!status.ok()) return status;
-    auto jstr = std::string(response.data(), response.size());
-    if (jstr.empty()) {
+    if (response.empty()) {
         return Status::InvalidEntry(std::string("Segment ") + segment_name +
                                     "not found" + LOC_MARK);
     }
 
     Json::Value j;
-    if (Json::Reader{}.parse(jstr, j)) {
+    if (Json::Reader{}.parse(response, j)) {
         desc = importSegmentDesc(j);
         if (!desc)
             return Status::MalformedJson(
@@ -281,22 +282,19 @@ static Status importBootstrapDesc(const Json::Value &root,
     }
 }
 
-Status serializeBootstrapDesc(const BootstrapDesc &desc, RpcRawData &stream) {
+Status serializeBootstrapDesc(const BootstrapDesc &desc, std::string &stream) {
     auto json = exportBootstrapDesc(desc);
-    const std::string value = Json::FastWriter{}.write(json);
-    stream.resize(value.size());
-    memcpy(stream.data(), value.c_str(), value.size());
+    stream = Json::FastWriter{}.write(json);
     return Status::OK();
 }
 
-Status deserializeBootstrapDesc(BootstrapDesc &desc, const RpcRawData &stream) {
-    auto value = std::string(stream.data(), stream.size());
-    if (value.empty())
+Status deserializeBootstrapDesc(BootstrapDesc &desc,
+                                const std::string &stream) {
+    if (stream.empty())
         return Status::MalformedJson(
             "Failed to import handshake message from json" LOC_MARK);
-    // LOG(INFO) << value;
     Json::Value peer_json;
-    if (Json::Reader{}.parse(value, peer_json))
+    if (Json::Reader{}.parse(stream, peer_json))
         return importBootstrapDesc(peer_json, desc);
     return Status::MalformedJson(
         "Failed to import handshake message from json" LOC_MARK);
@@ -305,11 +303,11 @@ Status deserializeBootstrapDesc(BootstrapDesc &desc, const RpcRawData &stream) {
 Status RpcClient::bootstrap(const std::string &server_addr,
                             const BootstrapDesc &request,
                             BootstrapDesc &response) {
-    RpcRawData request_raw, response_raw;
+    std::string request_raw, response_raw;
     auto status = serializeBootstrapDesc(request, request_raw);
     if (!status.ok()) return status;
-    status = AsioRpcClient::Call(server_addr, BootstrapRdma, request_raw,
-                                 response_raw);
+    status = tl_rpc_agent.call(server_addr, BootstrapRdma, request_raw,
+                               response_raw);
     if (!status.ok()) return status;
     return deserializeBootstrapDesc(response, response_raw);
 }
@@ -317,22 +315,22 @@ Status RpcClient::bootstrap(const std::string &server_addr,
 Status RpcClient::sendData(const std::string &server_addr,
                            uint64_t peer_mem_addr, void *local_mem_addr,
                            size_t length) {
-    RpcRawData request, response;
+    std::string request, response;
     XferDataDesc desc{peer_mem_addr, length};
     request.resize(sizeof(XferDataDesc) + length);
     memcpy(&request[0], &desc, sizeof(desc));
     genericMemcpy(&request[sizeof(desc)], local_mem_addr, length);
-    return AsioRpcClient::Call(server_addr, SendData, request, response);
+    return tl_rpc_agent.call(server_addr, SendData, request, response);
 }
 
 Status RpcClient::recvData(const std::string &server_addr,
                            uint64_t peer_mem_addr, void *local_mem_addr,
                            size_t length) {
-    RpcRawData request, response;
+    std::string request, response;
     XferDataDesc desc{peer_mem_addr, length};
     request.resize(sizeof(XferDataDesc) + length);
     memcpy(&request[0], &desc, sizeof(desc));
-    auto status = AsioRpcClient::Call(server_addr, RecvData, request, response);
+    auto status = tl_rpc_agent.call(server_addr, RecvData, request, response);
     if (!status.ok()) return status;
     genericMemcpy(local_mem_addr, response.data(), length);
     return Status::OK();
@@ -340,10 +338,10 @@ Status RpcClient::recvData(const std::string &server_addr,
 
 Status RpcClient::notify(const std::string &server_addr,
                          const NotifyMessage &message) {
-    RpcRawData request, response;
+    std::string request, response;
     request.resize(message.size());
     memcpy(&request[0], message.c_str(), message.size());
-    return AsioRpcClient::Call(server_addr, Notify, request, response);
+    return tl_rpc_agent.call(server_addr, Notify, request, response);
 }
 
 MetadataService::MetadataService(const std::string &type,
@@ -356,26 +354,26 @@ MetadataService::MetadataService(const std::string &type,
         auto agent = std::make_unique<CentralMetadataStore>(type, servers);
         manager_ = std::make_unique<SegmentManager>(std::move(agent));
     }
-    rpc_server_ = std::make_shared<AsioRpcServer>();
+    rpc_server_ = std::make_shared<CoroRpcAgent>();
     rpc_server_->registerFunction(
         GetSegmentDesc,
-        [this](const RpcRawData &request, RpcRawData &response) {
+        [this](const std::string_view &request, std::string &response) {
             onGetSegmentDesc(request, response);
         });
     rpc_server_->registerFunction(
-        BootstrapRdma, [this](const RpcRawData &request, RpcRawData &response) {
+        BootstrapRdma, [this](const std::string_view &request, std::string &response) {
             onBootstrapRdma(request, response);
         });
     rpc_server_->registerFunction(
-        SendData, [this](const RpcRawData &request, RpcRawData &response) {
+        SendData, [this](const std::string_view &request, std::string &response) {
             onSendData(request, response);
         });
     rpc_server_->registerFunction(
-        RecvData, [this](const RpcRawData &request, RpcRawData &response) {
+        RecvData, [this](const std::string_view &request, std::string &response) {
             onRecvData(request, response);
         });
     rpc_server_->registerFunction(
-        Notify, [this](const RpcRawData &request, RpcRawData &response) {
+        Notify, [this](const std::string_view &request, std::string &response) {
             onNotify(request, response);
         });
 }
@@ -386,41 +384,39 @@ Status MetadataService::start(uint16_t &port, bool ipv6_) {
     return rpc_server_->start(port, ipv6_);
 }
 
-void MetadataService::onGetSegmentDesc(const RpcRawData &request,
-                                       RpcRawData &response) {
+void MetadataService::onGetSegmentDesc(const std::string_view &request,
+                                       std::string &response) {
     auto local_json = exportSegmentDesc(*manager_->getLocal());
-    const std::string value = Json::FastWriter{}.write(local_json);
-    response.resize(value.size());
-    memcpy(response.data(), value.c_str(), value.size());
+    response = Json::FastWriter{}.write(local_json);
 }
 
-void MetadataService::onBootstrapRdma(const RpcRawData &request,
-                                      RpcRawData &response) {
+void MetadataService::onBootstrapRdma(const std::string_view &request,
+                                      std::string &response) {
     BootstrapDesc request_desc, response_desc;
-    auto status = deserializeBootstrapDesc(request_desc, request);
+    std::string mutable_request(request);
+    auto status = deserializeBootstrapDesc(request_desc, mutable_request);
     assert(status.ok());
     if (bootstrap_callback_) bootstrap_callback_(request_desc, response_desc);
     serializeBootstrapDesc(response_desc, response);
-    // LOG(INFO) << std::string(response.data(), response.size());
 }
 
-void MetadataService::onSendData(const RpcRawData &request,
-                                 RpcRawData &response) {
+void MetadataService::onSendData(const std::string_view &request,
+                                 std::string &response) {
     XferDataDesc *desc = (XferDataDesc *)request.data();
     // TODO check validity before copying
     genericMemcpy((void *)desc->peer_mem_addr, &desc[1], desc->length);
 }
 
-void MetadataService::onRecvData(const RpcRawData &request,
-                                 RpcRawData &response) {
+void MetadataService::onRecvData(const std::string_view &request,
+                                 std::string &response) {
     XferDataDesc *desc = (XferDataDesc *)request.data();
     // TODO check validity before copying
     response.resize(desc->length);
     genericMemcpy(response.data(), (void *)desc->peer_mem_addr, desc->length);
 }
 
-void MetadataService::onNotify(const RpcRawData &request,
-                               RpcRawData &response) {
+void MetadataService::onNotify(const std::string_view &request,
+                               std::string &response) {
     std::string message(request.data(), request.size());
     if (notify_callback_) notify_callback_(message);
 }

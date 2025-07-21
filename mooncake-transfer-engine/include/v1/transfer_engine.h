@@ -26,15 +26,19 @@
 #include <vector>
 
 #include "v1/common.h"
-#include "v1/metadata/metadata.h"
-#include "v1/metadata/segment.h"
-#include "v1/transport/transport.h"
-#include "v1/utility/memory_location.h"
 
 namespace mooncake {
 namespace v1 {
 
 class Batch;
+class BatchSet;
+class Topology;
+class Transport;
+class SegmentDesc;
+class AllocatedMemory;
+class MetadataService;
+class LocalSegmentTracker;
+
 class TransferEngine {
    public:
     TransferEngine();
@@ -99,7 +103,7 @@ class TransferEngine {
 
     Status getTransferStatus(BatchID batch_id,
                              std::vector<TransferStatus> &status_list);
-    
+
     Status getTransferStatus(BatchID batch_id, TransferStatus &overall_status);
 
     std::shared_ptr<SegmentDesc> getSegmentDesc(SegmentID handle);

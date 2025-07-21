@@ -89,9 +89,6 @@ class P2PMetadataStore : public MetadataStore {
     virtual Status deleteSegmentDesc(const std::string &segment_name) {
         return Status::OK();  // no operation in purpose
     }
-
-   private:
-    std::unique_ptr<AsioRpcClient> client_;
 };
 
 struct BootstrapDesc {
@@ -156,19 +153,21 @@ class MetadataService {
     Status start(uint16_t &port, bool ipv6_ = false);
 
    private:
-    void onGetSegmentDesc(const RpcRawData &request, RpcRawData &response);
+    void onGetSegmentDesc(const std::string_view &request,
+                          std::string &response);
 
-    void onBootstrapRdma(const RpcRawData &request, RpcRawData &response);
+    void onBootstrapRdma(const std::string_view &request,
+                         std::string &response);
 
-    void onSendData(const RpcRawData &request, RpcRawData &response);
+    void onSendData(const std::string_view &request, std::string &response);
 
-    void onRecvData(const RpcRawData &request, RpcRawData &response);
+    void onRecvData(const std::string_view &request, std::string &response);
 
-    void onNotify(const RpcRawData &request, RpcRawData &response);
+    void onNotify(const std::string_view &request, std::string &response);
 
    private:
     std::unique_ptr<SegmentManager> manager_;
-    std::shared_ptr<AsioRpcServer> rpc_server_;
+    std::shared_ptr<CoroRpcAgent> rpc_server_;
 
     OnReceiveBootstrap bootstrap_callback_;
     OnNotify notify_callback_;

@@ -24,6 +24,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <ylt/coro_rpc/coro_rpc_client.hpp>
+#include <ylt/coro_rpc/coro_rpc_server.hpp>
 
 #include "v1/common.h"
 #include "ylt/coro_io/coro_io.hpp"
@@ -31,12 +33,6 @@
 namespace mooncake {
 namespace v1 {
 
-// AsioRpcServer and AsioRpcClient replaces the naive Socket-based
-// handshake service in older versions. This provides higher reliablity
-// and more features (such as the last-resort method of data transfer)
-
-using RpcRawData = std::vector<char>;
-enum RpcErrorCode { OK = 0, ErrIncompleted, ErrInvalidFunc, ErrConnectFailed };
 enum RpcFuncID {
     GetSegmentDesc = 1,
     BootstrapRdma,
@@ -45,47 +41,41 @@ enum RpcFuncID {
     Notify
 };
 
-class AsioRpcServer {
+class CoroRpcAgent {
    public:
-    AsioRpcServer();
+    CoroRpcAgent();
 
-    ~AsioRpcServer();
+    virtual ~CoroRpcAgent();
 
-    AsioRpcServer(const AsioRpcServer &) = delete;
-    AsioRpcServer &operator=(const AsioRpcServer &) = delete;
+    CoroRpcAgent(const CoroRpcAgent &) = delete;
+    CoroRpcAgent &operator=(const CoroRpcAgent &) = delete;
 
    public:
-    using Function = std::function<void(const RpcRawData & /* request */,
-                                        RpcRawData & /* response */)>;
+    using Function = std::function<void(const std::string_view & /* request */,
+                                        std::string & /* response */)>;
     Status registerFunction(int func_id, const Function &func);
 
     Status start(uint16_t &port, bool ipv6 = false);
 
     Status stop();
 
-    int process(int func_id, const RpcRawData &request, RpcRawData &response);
+    Status call(const std::string &server_addr, int func_id,
+                const std::string_view &request, std::string &response);
 
    private:
-    void doAccept();
+    void process(int func_id);
 
    private:
-    std::atomic<bool> running_;
-    asio::io_context io_context_;
-    std::unique_ptr<asio::ip::tcp::acceptor> acceptor_;
+    coro_rpc::coro_rpc_server *server_ = nullptr;
+
+    std::mutex sessions_mutex_;
+    std::unordered_map<std::string, coro_rpc::coro_rpc_client *> sessions_;
+    std::atomic<int> uid_{0};
+
     std::mutex func_map_mutex_;
     std::unordered_map<int, Function> func_map_;
-    std::thread worker_;
-};
 
-class AsioRpcClient {
-   public:
-    static Status Call(const std::string &server_addr, int func_id,
-                       const RpcRawData &request, RpcRawData &response);
-
-   public:
-    static RpcErrorCode do_call(const std::string &server_addr, int func_id,
-                                const RpcRawData &request,
-                                RpcRawData &response);
+    std::atomic<bool> running_{false};
 };
 
 }  // namespace v1
