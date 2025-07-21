@@ -224,18 +224,6 @@ Status GdsTransport::getTransferStatus(SubBatchRef batch, int task_id,
     return Status::OK();
 }
 
-void GdsTransport::queryOutstandingTasks(SubBatchRef batch,
-                                         std::vector<int> &task_id_list) {
-    auto gds_batch = dynamic_cast<GdsSubBatch *>(batch);
-    for (int task_id = 0; task_id < gds_batch->io_params.size(); ++task_id) {
-        TransferStatus status;
-        getTransferStatus(batch, task_id, status);
-        if (status.s == TransferStatusEnum::PENDING) {
-            task_id_list.push_back(task_id);
-        }
-    }
-}
-
 Status GdsTransport::addMemoryBuffer(BufferDesc &desc,
                                      const MemoryOptions &options) {
     auto result = cuFileBufRegister((void *)desc.addr, desc.length, 0);

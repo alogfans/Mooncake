@@ -238,19 +238,6 @@ Status RdmaTransport::getTransferStatus(SubBatchRef batch, int task_id,
     return Status::OK();
 }
 
-void RdmaTransport::queryOutstandingTasks(SubBatchRef batch,
-                                          std::vector<int> &task_id_list) {
-    auto rdma_batch = dynamic_cast<RdmaSubBatch *>(batch);
-    if (!rdma_batch) return;
-    for (int task_id = 0; task_id < (int)rdma_batch->task_list.size();
-         ++task_id) {
-        auto &task = rdma_batch->task_list[task_id];
-        if (task.success_slices + task.failed_slices < task.num_slices) {
-            task_id_list.push_back(task_id);
-        }
-    }
-}
-
 Status RdmaTransport::addMemoryBuffer(BufferDesc &desc,
                                       const MemoryOptions &options) {
     return local_buffer_manager_.addBuffer(desc, options);

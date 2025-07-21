@@ -227,19 +227,6 @@ Status IOUringTransport::getTransferStatus(SubBatchRef batch, int task_id,
     return Status::OK();
 }
 
-void IOUringTransport::queryOutstandingTasks(SubBatchRef batch,
-                                             std::vector<int> &task_id_list) {
-    auto io_uring_batch = dynamic_cast<IOUringSubBatch *>(batch);
-    if (!io_uring_batch) return;
-    for (int task_id = 0; task_id < (int)io_uring_batch->task_list.size();
-         ++task_id) {
-        auto &task = io_uring_batch->task_list[task_id];
-        if (task.status_word == TransferStatusEnum::PENDING) {
-            task_id_list.push_back(task_id);
-        }
-    }
-}
-
 Status IOUringTransport::addMemoryBuffer(BufferDesc &desc,
                                          const MemoryOptions &options) {
     return Status::OK();

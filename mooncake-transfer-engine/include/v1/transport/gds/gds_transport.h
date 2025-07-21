@@ -63,9 +63,6 @@ class GdsTransport : public Transport {
     virtual Status getTransferStatus(SubBatchRef batch, int task_id,
                                      TransferStatus &status);
 
-    virtual void queryOutstandingTasks(SubBatchRef batch,
-                                       std::vector<int> &task_id_list);
-
     virtual Status addMemoryBuffer(BufferDesc &desc,
                                    const MemoryOptions &options);
 

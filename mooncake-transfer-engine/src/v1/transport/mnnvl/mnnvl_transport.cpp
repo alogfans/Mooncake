@@ -242,19 +242,6 @@ Status MnnvlTransport::getTransferStatus(SubBatchRef batch, int task_id,
     return Status::OK();
 }
 
-void MnnvlTransport::queryOutstandingTasks(SubBatchRef batch,
-                                           std::vector<int> &task_id_list) {
-    auto mnnvl_batch = dynamic_cast<MnnvlSubBatch *>(batch);
-    if (!mnnvl_batch) return;
-    for (int task_id = 0; task_id < (int)mnnvl_batch->task_list.size();
-         ++task_id) {
-        auto &task = mnnvl_batch->task_list[task_id];
-        if (task.status_word == TransferStatusEnum::PENDING) {
-            task_id_list.push_back(task_id);
-        }
-    }
-}
-
 Status MnnvlTransport::addMemoryBuffer(BufferDesc &desc,
                                        const MemoryOptions &options) {
     auto location = parseLocation(desc.location);

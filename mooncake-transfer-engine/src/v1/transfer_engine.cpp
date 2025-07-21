@@ -313,32 +313,27 @@ Status TransferEngine::freeBatch(BatchID batch_id) {
     return Status::OK();
 }
 
-void TransferEngine::lazyFreeBatch() {
+Status TransferEngine::lazyFreeBatch() {
     auto &batch_set = batch_set_.get();
     for (auto it = batch_set.freelist.begin();
          it != batch_set.freelist.end();) {
         auto &batch = *it;
-        bool has_task = false;
+        TransferStatus overall_status;
+        CHECK_STATUS(getTransferStatus((BatchID)batch, overall_status));
+        if (overall_status.s == WAITING) {
+            it++;
+            continue;
+        }
         for (size_t type = 0; type < kSupportedTransportTypes; ++type) {
             auto &transport = transport_list_[type];
             auto &sub_batch = batch->sub_batch[type];
-            if (!transport || !sub_batch) continue;
-            std::vector<int> task_id_list;
-            transport->queryOutstandingTasks(sub_batch, task_id_list);
-            if (task_id_list.empty()) {
-                transport->freeSubBatch(sub_batch);
-            } else {
-                has_task = true;
-            }
+            if (transport && sub_batch) transport->freeSubBatch(sub_batch);
         }
-        if (!has_task) {
-            batch_set.active.erase(batch);
-            Slab<Batch>::Get().deallocate(batch);
-            it = batch_set.freelist.erase(it);
-        } else {
-            ++it;
-        }
+        batch_set.active.erase(batch);
+        Slab<Batch>::Get().deallocate(batch);
+        it = batch_set.freelist.erase(it);
     }
+    return Status::OK();
 }
 
 TransportType TransferEngine::getTransportType(const Request &request) {
@@ -430,11 +425,41 @@ Status TransferEngine::getTransferStatus(
         if (!transport || !sub_batch) {
             return Status::InvalidArgument("Transport not available" LOC_MARK);
         }
-        TransferStatus xfer_status;
+        TransferStatus task_status;
         CHECK_STATUS(
-            transport->getTransferStatus(sub_batch, sub_task_id, xfer_status));
-        status_list.push_back(xfer_status);
+            transport->getTransferStatus(sub_batch, sub_task_id, task_status));
+        status_list.push_back(task_status);
     }
+    return Status::OK();
+}
+
+Status TransferEngine::getTransferStatus(BatchID batch_id,
+                                         TransferStatus &overall_status) {
+    if (!batch_id) return Status::InvalidArgument("Invalid batch ID" LOC_MARK);
+    Batch *batch = (Batch *)(batch_id);
+    overall_status.s = WAITING;
+    overall_status.transferred_bytes = 0;
+    size_t success_tasks = 0;
+    for (size_t task_id = 0; task_id < batch->task_id_lookup.size();
+         ++task_id) {
+        auto [type, sub_task_id] = batch->task_id_lookup[task_id];
+        auto &transport = transport_list_[type];
+        auto &sub_batch = batch->sub_batch[type];
+        if (!transport || !sub_batch) {
+            return Status::InvalidArgument("Transport not available" LOC_MARK);
+        }
+        TransferStatus task_status;
+        CHECK_STATUS(
+            transport->getTransferStatus(sub_batch, sub_task_id, task_status));
+        if (task_status.s == COMPLETED) {
+            success_tasks++;
+            overall_status.transferred_bytes += task_status.transferred_bytes;
+        } else {
+            overall_status.s = task_status.s;
+        }
+    }
+    if (success_tasks == batch->task_id_lookup.size())
+        overall_status.s = COMPLETED;
     return Status::OK();
 }
 

@@ -78,9 +78,6 @@ class Transport {
             "getTransferStatus not implemented" LOC_MARK);
     }
 
-    virtual void queryOutstandingTasks(SubBatchRef batch,
-                                       std::vector<int> &task_id_list) {}
-
     virtual Status allocateLocalMemory(void **addr, size_t size,
                                        MemoryOptions &options) {
         return genericAllocateLocalMemory(addr, size, options);

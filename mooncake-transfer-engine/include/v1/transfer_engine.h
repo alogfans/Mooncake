@@ -99,6 +99,8 @@ class TransferEngine {
 
     Status getTransferStatus(BatchID batch_id,
                              std::vector<TransferStatus> &status_list);
+    
+    Status getTransferStatus(BatchID batch_id, TransferStatus &overall_status);
 
     std::shared_ptr<SegmentDesc> getSegmentDesc(SegmentID handle);
 
@@ -109,7 +111,7 @@ class TransferEngine {
 
     Status setupLocalSegment();
 
-    void lazyFreeBatch();
+    Status lazyFreeBatch();
 
     TransportType getTransportType(const Request &request);
 

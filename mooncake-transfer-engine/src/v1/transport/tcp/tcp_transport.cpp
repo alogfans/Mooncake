@@ -111,20 +111,6 @@ Status TcpTransport::getTransferStatus(SubBatchRef batch, int task_id,
     return Status::OK();
 }
 
-void TcpTransport::queryOutstandingTasks(SubBatchRef batch,
-                                         std::vector<int> &task_id_list) {
-    auto tcp_batch = dynamic_cast<TcpSubBatch *>(batch);
-    if (!tcp_batch) return;
-    for (int task_id = 0; task_id < (int)tcp_batch->task_list.size();
-         ++task_id) {
-        auto &task = tcp_batch->task_list[task_id];
-        if (task.status_word != TransferStatusEnum::COMPLETED ||
-            task.status_word != TransferStatusEnum::FAILED) {
-            task_id_list.push_back(task_id);
-        }
-    }
-}
-
 Status TcpTransport::addMemoryBuffer(BufferDesc &desc,
                                      const MemoryOptions &options) {
     return Status::OK();
