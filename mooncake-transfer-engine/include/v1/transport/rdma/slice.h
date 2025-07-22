@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "v1/transport/transport.h"
+#include "v1/memory/slab.h"
 
 namespace mooncake {
 namespace v1 {

@@ -1,6 +1,7 @@
 file(GLOB TEV1_ENGINE_SOURCES "*.cpp")
 
 add_subdirectory(common)
+add_subdirectory(memory)
 add_subdirectory(metadata)
 add_subdirectory(transport)
 add_subdirectory(utility)
@@ -28,7 +29,7 @@ endif()
 target_link_libraries(
     transfer_engine_v1
     PUBLIC
-    common_v1 utility_v1 transport_v1 transport_rdma_v1 ibverbs glog gflags pthread jsoncpp numa boost_thread
+    common_v1 memory_v1 utility_v1 transport_v1 transport_rdma_v1 ibverbs glog gflags pthread jsoncpp numa boost_thread
     )
 
 if (USE_CUDA)

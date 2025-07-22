@@ -1,4 +1,4 @@
-// Copyright 2025 KVCache.AI
+// Copyright 2024 KVCache.AI
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,16 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef TEV1_COMMON_H
-#define TEV1_COMMON_H
+#ifndef MEMORY_LOCATION_H
+#define MEMORY_LOCATION_H
 
-#include "v1/common/types.h"
-#include "v1/common/slab.h"
-#include "v1/common/common.h"
-#include "v1/common/concurrency.h"
-#include "v1/common/random.h"
-#include "v1/common/status.h"
-#include "v1/common/config_manager.h"
-#include "v1/common/thread_storage.h"
+#include <glog/logging.h>
 
-#endif // TEV1_COMMON_H
+#include <memory>
+#include <string>
+
+const int pagesize = 4096;
+
+namespace mooncake {
+namespace v1 {
+struct MemoryLocationEntry {
+    uint64_t start;
+    size_t len;
+    std::string location;
+};
+
+const std::vector<MemoryLocationEntry> getMemoryLocation(void *start,
+                                                         size_t len);
+}  // namespace v1
+}  // namespace mooncake
+
+#endif  // MEMORY_LOCATION_H

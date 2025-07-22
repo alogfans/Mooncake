@@ -1,4 +1,4 @@
-// Copyright 2024 KVCache.AI
+// Copyright 2025 KVCache.AI
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,29 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef MEMORY_LOCATION_H
-#define MEMORY_LOCATION_H
+#ifndef ALLOCATOR_H
+#define ALLOCATOR_H
 
-#include <glog/logging.h>
-
-#include <memory>
-#include <string>
-
-#include "v1/common.h"
-
-const int pagesize = 4096;
+#include "v1/common/status.h"
+#include "v1/common/types.h"
 
 namespace mooncake {
 namespace v1 {
-struct MemoryLocationEntry {
-    uint64_t start;
-    size_t len;
-    std::string location;
-};
 
-const std::vector<MemoryLocationEntry> getMemoryLocation(void *start,
-                                                         size_t len);
+std::pair<std::string, int> parseLocation(const std::string &location);
+
+Status genericAllocateLocalMemory(void **pptr, size_t size,
+                                  MemoryOptions &options);
+
+Status genericFreeLocalMemory(void *ptr, size_t size);
+
 }  // namespace v1
 }  // namespace mooncake
 
-#endif  // MEMORY_LOCATION_H
+#endif  // ALLOCATOR_H

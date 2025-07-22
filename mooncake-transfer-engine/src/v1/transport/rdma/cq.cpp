@@ -49,7 +49,7 @@ int RdmaCQ::construct(RdmaContext *context, int cqe_limit, int index) {
                         comp_vector);
     if (!cq_) {
         PLOG(ERROR) << "Failed to create completion queue";
-        return ERR_CONTEXT;
+        return -1;
     }
     return 0;
 }

@@ -1,4 +1,4 @@
-// Copyright 2024 KVCache.AI
+// Copyright 2025 KVCache.AI
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,22 +20,28 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
-// error code of internal components
-#define ERR_DEVICE_NOT_FOUND (-6)
-#define ERR_SOCKET (-102)
-#define ERR_ENDPOINT (-201)
-#define ERR_CONTEXT (-202)
-#define ERR_NUMA (-300)
-#define ERR_CLOCK (-301)
+#if defined(__x86_64__)
+#include <immintrin.h>
+#define PAUSE() _mm_pause()
+#else
+#define PAUSE()
+#endif
+
+#ifndef likely
+#define likely(x) __glibc_likely(x)
+#define unlikely(x) __glibc_unlikely(x)
+#endif
 
 namespace mooncake {
 namespace v1 {
 
 using BatchID = uint64_t;
 using SegmentID = uint64_t;
-
 using NotifyMessage = std::string;
+
+const static SegmentID LOCAL_SEGMENT_ID = 0;
 
 struct Request {
     enum OpCode { READ, WRITE };
@@ -70,15 +76,6 @@ enum Permission {
 using Location = std::string;
 const static std::string kWildcardLocation = "*";
 
-struct BufferEntry {
-    void *addr;
-    size_t length;
-    Location location = kWildcardLocation;
-    Permission visibility = kGlobalReadWrite;
-    std::string shm_path = "";
-    size_t shm_offset = 0;
-};
-
 enum TransportType { RDMA = 0, SHM, GDS, MNNVL, TCP, IOURING };
 const static int kSupportedTransportTypes = 6;
 
@@ -91,6 +88,16 @@ struct MemoryOptions {
 };
 
 const std::string kLocalFileSegmentPrefix = "file://";
+
+struct SegmentInfo {
+    enum Type { Memory, File };
+    struct Buffer {
+        uint64_t base, length;
+        Location location;
+    };
+    Type type;
+    std::vector<Buffer> buffers;
+};
 
 }  // namespace v1
 }  // namespace mooncake

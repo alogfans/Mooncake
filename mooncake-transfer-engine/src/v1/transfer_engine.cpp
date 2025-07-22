@@ -17,13 +17,14 @@
 #include <fstream>
 #include <random>
 
+#include "v1/common/status.h"
+#include "v1/memory/location.h"
 #include "v1/metadata/metadata.h"
 #include "v1/metadata/segment.h"
 #include "v1/transport/rdma/rdma_transport.h"
 #include "v1/transport/shm/shm_transport.h"
 #include "v1/transport/tcp/tcp_transport.h"
 #include "v1/transport/transport.h"
-#include "v1/utility/memory_location.h"
 #ifdef USE_CUDA
 #include "v1/transport/mnnvl/mnnvl_transport.h"
 #endif
@@ -34,6 +35,7 @@
 #include "v1/transport/io_uring/io_uring_transport.h"
 #endif
 #include "v1/utility/ip.h"
+#include "v1/utility/random.h"
 
 namespace mooncake {
 namespace v1 {
@@ -237,15 +239,49 @@ Status TransferEngine::importRemoteSegment(SegmentID &handle,
         "importRemoteSegment not implemented" LOC_MARK);
 }
 
-Status TransferEngine::openRemoteSegment(SegmentID &handle,
-                                         const std::string &segment_name) {
+Status TransferEngine::openSegment(SegmentID &handle,
+                                   const std::string &segment_name) {
     if (segment_name.empty())
         return Status::InvalidArgument("Invalid segment name" LOC_MARK);
+    if (segment_name == local_segment_name_) {
+        handle = LOCAL_SEGMENT_ID;
+        return Status::OK();
+    }
     return metadata_->segmentManager().openRemote(handle, segment_name);
 }
 
-Status TransferEngine::closeRemoteSegment(SegmentID handle) {
+Status TransferEngine::closeSegment(SegmentID handle) {
+    if (handle == LOCAL_SEGMENT_ID) return Status::OK();
     return metadata_->segmentManager().closeRemote(handle);
+}
+
+Status TransferEngine::getSegmentInfo(SegmentID handle, SegmentInfo &info) {
+    SegmentDesc *desc = nullptr;
+    if (handle == LOCAL_SEGMENT_ID) {
+        desc = metadata_->segmentManager().getLocal().get();
+    } else {
+        CHECK_STATUS(metadata_->segmentManager().getRemoteCached(desc, handle));
+    }
+    if (desc->type == SegmentType::File) {
+        info.type = SegmentInfo::File;
+        auto &detail = std::get<FileSegmentDesc>(desc->detail);
+        for (auto &entry : detail.buffers) {
+            info.buffers.emplace_back(
+                SegmentInfo::Buffer{.base = entry.offset,
+                                    .length = entry.length,
+                                    .location = kWildcardLocation});
+        }
+    } else {
+        info.type = SegmentInfo::Memory;
+        auto &detail = std::get<MemorySegmentDesc>(desc->detail);
+        for (auto &entry : detail.buffers) {
+            info.buffers.emplace_back(
+                SegmentInfo::Buffer{.base = (uint64_t)entry.addr,
+                                    .length = entry.length,
+                                    .location = entry.location});
+        }
+    }
+    return Status::OK();
 }
 
 Status TransferEngine::allocateLocalMemory(void **addr, size_t size,
@@ -465,18 +501,6 @@ Status TransferEngine::getTransferStatus(BatchID batch_id,
     if (success_tasks == batch->task_id_lookup.size())
         overall_status.s = COMPLETED;
     return Status::OK();
-}
-
-std::shared_ptr<SegmentDesc> TransferEngine::getSegmentDesc(SegmentID handle) {
-    auto &manager = metadata_->segmentManager();
-    std::shared_ptr<SegmentDesc> desc;
-    if (handle == LOCAL_SEGMENT_ID) return manager.getLocal();
-    auto status = manager.getRemote(desc, handle);
-    if (!status.ok()) {
-        LOG(ERROR) << "Failed to retrieve segment: " << status.ToString();
-        return nullptr;
-    }
-    return desc;
 }
 
 }  // namespace v1

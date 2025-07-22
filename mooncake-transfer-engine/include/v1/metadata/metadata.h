@@ -28,7 +28,6 @@
 #include <unordered_map>
 #include <variant>
 
-#include "v1/common.h"
 #include "v1/metadata/plugin.h"
 #include "v1/metadata/segment.h"
 #include "v1/utility/rpc.h"

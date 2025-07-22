@@ -17,6 +17,7 @@
 
 #include <jsoncpp/json/json.h>
 #include <v1/common/status.h>
+#include <v1/common/types.h>
 
 #include <filesystem>
 #include <fstream>

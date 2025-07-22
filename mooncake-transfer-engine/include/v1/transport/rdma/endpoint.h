@@ -19,6 +19,8 @@
 
 #include "context.h"
 
+#define ERR_ENDPOINT (-102)
+
 namespace mooncake {
 namespace v1 {
 class RdmaEndPoint {

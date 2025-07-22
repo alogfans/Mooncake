@@ -28,7 +28,8 @@
 #include <unordered_map>
 #include <variant>
 
-#include "v1/common.h"
+#include "v1/concurrency/rwlock.h"
+#include "v1/concurrency/tls.h"
 #include "v1/metadata/plugin.h"
 #include "v1/utility/rpc.h"
 #include "v1/utility/topology.h"

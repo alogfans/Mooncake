@@ -19,7 +19,8 @@
 #include <cassert>
 #include <set>
 
-#include "v1/common.h"
+#include "v1/common/status.h"
+#include "v1/utility/system.h"
 
 namespace mooncake {
 namespace v1 {
@@ -361,15 +362,18 @@ MetadataService::MetadataService(const std::string &type,
             onGetSegmentDesc(request, response);
         });
     rpc_server_->registerFunction(
-        BootstrapRdma, [this](const std::string_view &request, std::string &response) {
+        BootstrapRdma,
+        [this](const std::string_view &request, std::string &response) {
             onBootstrapRdma(request, response);
         });
     rpc_server_->registerFunction(
-        SendData, [this](const std::string_view &request, std::string &response) {
+        SendData,
+        [this](const std::string_view &request, std::string &response) {
             onSendData(request, response);
         });
     rpc_server_->registerFunction(
-        RecvData, [this](const std::string_view &request, std::string &response) {
+        RecvData,
+        [this](const std::string_view &request, std::string &response) {
             onRecvData(request, response);
         });
     rpc_server_->registerFunction(

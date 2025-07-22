@@ -18,7 +18,10 @@
 
 #include "v1/utility/rpc.h"
 
+#include <glog/logging.h>
+
 #include "v1/utility/ip.h"
+#include "v1/utility/random.h"
 
 namespace mooncake {
 namespace v1 {

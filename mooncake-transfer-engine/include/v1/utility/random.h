@@ -15,7 +15,9 @@
 #ifndef RANDOM_H
 #define RANDOM_H
 
-#include "v1/common/common.h"
+#include <atomic>
+
+#include "v1/utility/system.h"
 
 namespace mooncake {
 namespace v1 {

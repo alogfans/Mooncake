@@ -25,7 +25,10 @@
 #include <unordered_set>
 #include <vector>
 
-#include "v1/common.h"
+#include "v1/common/status.h"
+#include "v1/common/types.h"
+#include "v1/common/config.h"
+#include "v1/concurrency/tls.h"
 
 namespace mooncake {
 namespace v1 {
@@ -66,10 +69,11 @@ class TransferEngine {
     Status importRemoteSegment(SegmentID &handle,
                                const std::string &shared_handle);
 
-    Status openRemoteSegment(SegmentID &handle,
-                             const std::string &segment_name);
+    Status openSegment(SegmentID &handle, const std::string &segment_name);
 
-    Status closeRemoteSegment(SegmentID handle);
+    Status closeSegment(SegmentID handle);
+
+    Status getSegmentInfo(SegmentID handle, SegmentInfo &info);
 
    public:
     Status allocateLocalMemory(void **addr, size_t size,
@@ -105,8 +109,6 @@ class TransferEngine {
                              std::vector<TransferStatus> &status_list);
 
     Status getTransferStatus(BatchID batch_id, TransferStatus &overall_status);
-
-    std::shared_ptr<SegmentDesc> getSegmentDesc(SegmentID handle);
 
    private:
     Status construct();

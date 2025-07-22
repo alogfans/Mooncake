@@ -1,4 +1,4 @@
-// Copyright 2024 KVCache.AI
+// Copyright 2025 KVCache.AI
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef CONCURRENCY_H
-#define CONCURRENCY_H
+#ifndef RWLOCK_H
+#define RWLOCK_H
 
-#include <asio.hpp>
-#include <boost/thread.hpp>
+#include <atomic>
+#include <thread>
 
-#include "v1/common/common.h"
+#include "v1/common/types.h"
 
 namespace mooncake {
 namespace v1 {
@@ -146,66 +146,7 @@ class RWSpinlock {
     std::atomic<int64_t> lock_;
     uint64_t padding_[15];
 };
-
-class TicketLock {
-   public:
-    TicketLock() : next_ticket_(0), now_serving_(0) {}
-
-    void lock() {
-        int my_ticket = next_ticket_.fetch_add(1, std::memory_order_relaxed);
-        while (now_serving_.load(std::memory_order_acquire) != my_ticket) {
-            std::this_thread::yield();
-        }
-    }
-
-    void unlock() { now_serving_.fetch_add(1, std::memory_order_release); }
-
-   private:
-    std::atomic<int> next_ticket_;
-    std::atomic<int> now_serving_;
-    uint64_t padding_[14];
-};
-
-class ThreadPool {
-   public:
-    static ThreadPool &Get() {
-        static ThreadPool instance(4);
-        return instance;
-    }
-
-   public:
-    ThreadPool(size_t threadCount)
-        : ioService_(),
-          work_(asio::make_work_guard(ioService_)),
-          stopped_(false) {
-        for (size_t i = 0; i < threadCount; ++i) {
-            threads_.create_thread(
-                boost::bind(&asio::io_service::run, &ioService_));
-        }
-    }
-
-    ~ThreadPool() { stop(); }
-
-    void submit(std::function<void()> task) {
-        ioService_.post(std::move(task));
-    }
-
-    void stop() {
-        if (!stopped_) {
-            stopped_ = true;
-            ioService_.stop();
-            threads_.join_all();
-        }
-    }
-
-   private:
-    asio::io_service ioService_;
-    asio::executor_work_guard<asio::io_service::executor_type> work_;
-    boost::thread_group threads_;
-    bool stopped_;
-};
-
 }  // namespace v1
 }  // namespace mooncake
 
-#endif  // CONCURRENCY_H
+#endif  // RWLOCK_H

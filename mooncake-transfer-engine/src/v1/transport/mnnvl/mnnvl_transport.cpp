@@ -29,7 +29,8 @@
 #include <cuda_runtime.h>
 #endif
 
-#include "v1/common.h"
+#include "v1/common/status.h"
+#include "v1/memory/slab.h"
 #include "v1/metadata/metadata.h"
 
 namespace mooncake {

@@ -20,9 +20,10 @@
 #include <filesystem>
 #include <set>
 
-#include "v1/common.h"
+#include "v1/common/status.h"
 #include "v1/metadata/metadata.h"
-#include "v1/utility/memory_location.h"
+#include "v1/memory/location.h"
+#include "v1/utility/system.h"
 
 namespace mooncake {
 namespace v1 {

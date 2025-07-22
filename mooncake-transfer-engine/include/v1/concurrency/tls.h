@@ -12,15 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef THREAD_STORAGE_H
-#define THREAD_STORAGE_H
+#ifndef THREAD_LOCAL_STORAGE_H
+#define THREAD_LOCAL_STORAGE_H
 
 #include <functional>
 #include <mutex>
 #include <thread>
 #include <unordered_set>
-
-#include "v1/common/common.h"
 
 namespace mooncake {
 namespace v1 {
@@ -83,4 +81,4 @@ thread_local typename ThreadLocalStorage<T>::InstanceHolder*
 }  // namespace v1
 }  // namespace mooncake
 
-#endif  // THREAD_STORAGE_H
+#endif  // THREAD_LOCAL_STORAGE_H

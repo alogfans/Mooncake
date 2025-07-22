@@ -16,6 +16,7 @@
 
 #include <bits/stdint-uintn.h>
 #include <glog/logging.h>
+#include <sys/mman.h>
 
 #include <algorithm>
 #include <cassert>
@@ -24,8 +25,10 @@
 #include <iomanip>
 #include <memory>
 
-#include "v1/common.h"
+#include "v1/common/status.h"
+#include "v1/memory/slab.h"
 #include "v1/metadata/metadata.h"
+#include "v1/utility/random.h"
 
 namespace mooncake {
 namespace v1 {

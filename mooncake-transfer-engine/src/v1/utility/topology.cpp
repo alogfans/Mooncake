@@ -37,8 +37,9 @@
 #include <string.h>
 #include <sys/types.h>
 
-#include "v1/common.h"
-#include "v1/utility/memory_location.h"
+#include "v1/common/status.h"
+#include "v1/memory/location.h"
+#include "v1/utility/random.h"
 
 namespace mooncake {
 namespace v1 {
@@ -192,7 +193,8 @@ static std::vector<TopologyEntry> discoverCudaTopology(
         char pci_bus_id[20];
         err = cudaDeviceGetPCIBusId(pci_bus_id, sizeof(pci_bus_id), i);
         if (err != cudaSuccess) {
-            LOG(WARNING) << "cudaDeviceGetPCIBusId: " << cudaGetErrorString(err);
+            LOG(WARNING) << "cudaDeviceGetPCIBusId: "
+                         << cudaGetErrorString(err);
             continue;
         }
         for (char *ch = pci_bus_id; (*ch = tolower(*ch)); ch++);

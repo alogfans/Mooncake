@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "v1/utility/ip.h"
+#include <glog/logging.h>
 
 namespace mooncake {
 namespace v1 {

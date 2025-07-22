@@ -20,6 +20,8 @@
 
 #include "v1/transport/rdma/endpoint_store.h"
 #include "v1/utility/ip.h"
+#include "v1/utility/string_builder.h"
+#include "v1/utility/system.h"
 
 namespace mooncake {
 namespace v1 {
@@ -220,7 +222,7 @@ int Workers::doHandshake(std::shared_ptr<RdmaEndPoint> &endpoint,
         }
     }
 
-    return ERR_DEVICE_NOT_FOUND;
+    return ERR_ENDPOINT;
 }
 
 void Workers::asyncPollCq(int thread_id) {

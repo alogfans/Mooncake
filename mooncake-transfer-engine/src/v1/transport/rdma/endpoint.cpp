@@ -19,7 +19,7 @@
 #include <cassert>
 #include <cstddef>
 
-#include "v1/common.h"
+#include "v1/common/status.h"
 #include "v1/transport/rdma/context.h"
 
 #define ASSERT_STATUS(status)                                                \

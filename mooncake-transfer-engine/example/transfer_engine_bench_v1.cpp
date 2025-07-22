@@ -19,13 +19,14 @@
 #include <signal.h>
 #include <sys/time.h>
 
-#include "v1/common.h"
 #include "v1/transfer_engine.h"
-#include "v1/transport/transport.h"
+#include "v1/utility/random.h"
+#include "v1/utility/system.h"
 
 #ifdef USE_CUDA
 #include <cuda_runtime.h>
 #endif
+#include <numa.h>
 
 DEFINE_string(metadata_type, "p2p", "Metadata type: p2p|etcd|redis|http");
 DEFINE_string(metadata_servers, "",
@@ -99,21 +100,14 @@ std::atomic<size_t> total_batch_count(0);
 
 uint64_t getStartAddress(TransferEngine *engine, SegmentID handle,
                          int thread_id) {
-    auto segment_desc = engine->getSegmentDesc(handle);
-    if (!segment_desc) {
-        LOG(ERROR) << "Invalid args: cannot find segment "
+    SegmentInfo info;
+    auto status = engine->getSegmentInfo(handle, info);
+    if (!status.ok() || info.buffers.empty()) {
+        LOG(ERROR) << "Invalid args: cannot find buffers in "
                    << FLAGS_remote_segment << ", please recheck";
         exit(EXIT_FAILURE);
     }
-    if (segment_desc->type == SegmentType::File) return 0;
-    auto &detail = std::get<MemorySegmentDesc>(segment_desc->detail);
-    if (detail.buffers.empty()) {
-        LOG(ERROR) << "Invalid args: remote segment " << FLAGS_remote_segment
-                   << " no registered memory, please recheck";
-        exit(EXIT_FAILURE);
-    }
-
-    int buffer_id = thread_id % detail.buffers.size();
+    int buffer_id = thread_id % info.buffers.size();
     std::string location;
 #ifdef USE_CUDA
     if (FLAGS_use_dram && buffer_id < num_sockets) {
@@ -125,12 +119,9 @@ uint64_t getStartAddress(TransferEngine *engine, SegmentID handle,
 #else
     location = "cpu:" + std::to_string(buffer_id);
 #endif
-
-    for (auto &entry : detail.buffers) {
-        if (entry.location == location) return (uint64_t)entry.addr;
-    }
-
-    return (uint64_t)detail.buffers[0].addr;
+    for (auto &entry : info.buffers)
+        if (entry.location == location) return (uint64_t)entry.base;
+    return (uint64_t)info.buffers[0].base;
 }
 
 Status submitRequestSync(TransferEngine *engine, SegmentID handle,
@@ -306,7 +297,7 @@ int initiator() {
 
     SegmentID handle;
     assert(!FLAGS_remote_segment.empty());
-    CHECK_FAIL(engine->openRemoteSegment(handle, FLAGS_remote_segment));
+    CHECK_FAIL(engine->openSegment(handle, FLAGS_remote_segment));
     assert(handle);
 
     std::thread workers[FLAGS_threads];

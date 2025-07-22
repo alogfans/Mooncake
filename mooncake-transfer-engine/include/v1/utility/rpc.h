@@ -27,7 +27,7 @@
 #include <ylt/coro_rpc/coro_rpc_client.hpp>
 #include <ylt/coro_rpc/coro_rpc_server.hpp>
 
-#include "v1/common.h"
+#include "v1/common/status.h"
 #include "ylt/coro_io/coro_io.hpp"
 
 namespace mooncake {

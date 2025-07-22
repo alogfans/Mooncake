@@ -12,22 +12,35 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef ALLOCATOR_H
-#define ALLOCATOR_H
+#ifndef TICKET_LOCK_H_
+#define TICKET_LOCK_H_
 
-#include "v1/common.h"
+#include <atomic>
+#include <thread>
+
+#include "v1/common/types.h"
 
 namespace mooncake {
 namespace v1 {
+class TicketLock {
+   public:
+    TicketLock() : next_ticket_(0), now_serving_(0) {}
 
-std::pair<std::string, int> parseLocation(const std::string &location);
+    void lock() {
+        int my_ticket = next_ticket_.fetch_add(1, std::memory_order_relaxed);
+        while (now_serving_.load(std::memory_order_acquire) != my_ticket) {
+            std::this_thread::yield();
+        }
+    }
 
-Status genericAllocateLocalMemory(void **pptr, size_t size,
-                                  MemoryOptions &options);
+    void unlock() { now_serving_.fetch_add(1, std::memory_order_release); }
 
-Status genericFreeLocalMemory(void *ptr, size_t size);
-
+   private:
+    std::atomic<int> next_ticket_;
+    std::atomic<int> now_serving_;
+    uint64_t padding_[14];
+};
 }  // namespace v1
 }  // namespace mooncake
 
-#endif  // ALLOCATOR_H
+#endif  // TICKET_LOCK_H_

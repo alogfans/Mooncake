@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "v1/common/slab.h"
+#include "v1/memory/slab.h"
 
 #include <atomic>
 #include <unordered_map>

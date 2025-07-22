@@ -19,7 +19,7 @@
 #include <glog/logging.h>
 #include <infiniband/verbs.h>
 
-#include "v1/common.h"
+#include "v1/common/status.h"
 
 namespace mooncake {
 namespace v1 {

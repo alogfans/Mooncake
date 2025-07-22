@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "v1/common/config_manager.h"
+#include "v1/common/config.h"
 
 namespace mooncake {
 namespace v1 {

@@ -12,12 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "v1/utility/allocator.h"
+#include "v1/memory/allocator.h"
 
 #ifdef USE_CUDA
 #include <bits/stdint-uintn.h>
 #include <cuda_runtime.h>
 #endif
+#include <numa.h>
 
 namespace mooncake {
 namespace v1 {

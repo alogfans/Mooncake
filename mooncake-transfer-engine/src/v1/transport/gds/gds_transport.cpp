@@ -24,6 +24,8 @@
 #include <iomanip>
 #include <memory>
 
+#include "v1/memory/slab.h"
+
 namespace mooncake {
 namespace v1 {
 class GdsFileContext {
