@@ -158,8 +158,6 @@ class Workers {
         std::condition_variable cv;
         bool in_suspend = false;
 
-        std::unique_ptr<RemoteSegmentCache> cache;
-
         void notifyIfNeeded() {
             std::lock_guard<std::mutex> lock(mutex);
             if (in_suspend) {

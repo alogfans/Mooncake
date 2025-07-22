@@ -58,6 +58,24 @@ Status SegmentManager::closeRemote(SegmentID handle) {
     return Status::OK();
 }
 
+Status SegmentManager::getRemoteCached(SegmentDesc *&desc, SegmentID handle) {
+    auto &cache = tl_remote_cache_.get();
+    auto current_ts = getCurrentTimeInNano();
+    if (current_ts - cache.last_refresh > ttl_ms_ * 1000000) {
+        cache.id_to_desc_map.clear();
+        cache.last_refresh = current_ts;
+    }
+    if (!cache.id_to_desc_map.count(handle)) {
+        SegmentDescRef desc_ref;
+        auto status = getRemote(desc_ref, handle);
+        if (!status.ok()) return status;
+        cache.id_to_desc_map[handle] = std::move(desc_ref);
+    }
+    desc = cache.id_to_desc_map[handle].get();
+    assert(desc);
+    return Status::OK();
+}
+
 Status SegmentManager::getRemote(SegmentDescRef &desc, SegmentID handle) {
     {
         RWSpinlock::ReadGuard guard(lock_);
@@ -163,22 +181,6 @@ Status SegmentManager::synchronizeLocal() {
 
 Status SegmentManager::deleteLocal() {
     return store_->deleteSegmentDesc(local_desc_->name);
-}
-
-Status RemoteSegmentCache::get(SegmentDesc *&desc, SegmentID handle) {
-    auto current_timestamp = getCurrentTimeInNano();
-    if (current_timestamp - last_refresh_timestamp_ > ttl_ms_ * 1000000) {
-        id_to_desc_map_.clear();
-        last_refresh_timestamp_ = current_timestamp;
-    }
-    if (!id_to_desc_map_.count(handle)) {
-        SegmentDescRef desc_ref;
-        auto status = manager_.getRemote(desc_ref, handle);
-        if (!status.ok()) return status;
-        id_to_desc_map_[handle] = std::move(desc_ref);
-    }
-    desc = id_to_desc_map_[handle].get();
-    return Status::OK();
 }
 
 Status LocalSegmentTracker::query(uint64_t base, size_t length,

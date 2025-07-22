@@ -53,8 +53,6 @@ Status Workers::start() {
         num_workers_ = transport_->params_->workers.num_workers;
         worker_context_ = new WorkerContext[num_workers_];
         for (size_t id = 0; id < num_workers_; ++id) {
-            worker_context_[id].cache = std::make_unique<RemoteSegmentCache>(
-                transport_->metadata_->segmentManager());
             worker_context_[id].thread =
                 std::thread([this, id] { workerThread(id); });
         }
@@ -104,8 +102,8 @@ std::shared_ptr<RdmaEndPoint> Workers::getEndpoint(int thread_id,
     auto context = transport_->context_set_[path.local_device_id].get();
     std::shared_ptr<RdmaEndPoint> endpoint;
     SegmentDesc *desc = nullptr;
-    auto &cache = worker_context_[thread_id].cache;
-    auto status = cache->get(desc, path.remote_segment_id);
+    auto status = transport_->metadata_->segmentManager().getRemoteCached(
+        desc, path.remote_segment_id);
     if (!status.ok()) {
         LOG(ERROR) << "Failed to get remote segment: " << status.ToString();
         return nullptr;
@@ -346,7 +344,6 @@ void Workers::monitorThread() {
 }
 
 Status Workers::generatePostPath(int thread_id, RdmaSlice *slice) {
-    auto &cache = worker_context_[thread_id].cache;
     auto target_id = slice->task->request.target_id;
     std::vector<BufferQueryResult> local, remote;
     auto status = transport_->local_buffer_manager_.query(
@@ -360,7 +357,8 @@ Status Workers::generatePostPath(int thread_id, RdmaSlice *slice) {
         if (!status.ok()) return status;
     } else {
         SegmentDesc *desc = nullptr;
-        status = cache->get(desc, target_id);
+        status = transport_->metadata_->segmentManager().getRemoteCached(
+            desc, target_id);
         if (!status.ok()) return status;
         status = queryRemoteSegment(
             desc, AddressRange{(void *)slice->target_addr, slice->length},

@@ -149,8 +149,8 @@ void TcpTransport::startTransfer(TcpTask *task) {
 Status TcpTransport::findRemoteSegment(uint64_t dest_addr, uint64_t length,
                                        uint64_t target_id,
                                        std::string &rpc_server_addr) {
-    SegmentDescRef desc;
-    auto status = metadata_->segmentManager().getRemote(desc, target_id);
+    SegmentDesc *desc = nullptr;
+    auto status = metadata_->segmentManager().getRemoteCached(desc, target_id);
     if (!status.ok()) return status;
     auto &detail = std::get<MemorySegmentDesc>(desc->detail);
     for (auto &entry : detail.buffers) {
@@ -167,8 +167,8 @@ Status TcpTransport::findRemoteSegment(uint64_t dest_addr, uint64_t length,
 Status TcpTransport::sendNotify(SegmentID target_id,
                                 const NotifyMessage &message) {
     std::string rpc_server_addr;
-    SegmentDescRef desc;
-    auto status = metadata_->segmentManager().getRemote(desc, target_id);
+    SegmentDesc *desc = nullptr;
+    auto status = metadata_->segmentManager().getRemoteCached(desc, target_id);
     if (!status.ok()) return status;
     auto &detail = std::get<MemorySegmentDesc>(desc->detail);
     rpc_server_addr = detail.rpc_server_addr;

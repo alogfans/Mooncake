@@ -99,6 +99,8 @@ class SegmentManager {
 
     Status closeRemote(SegmentID handle);
 
+    Status getRemoteCached(SegmentDesc *&desc, SegmentID handle);
+
     Status getRemote(SegmentDescRef &desc, SegmentID handle);
 
     Status getRemote(SegmentDescRef &desc, const std::string &segment_name);
@@ -118,6 +120,12 @@ class SegmentManager {
                           const std::string &segment_name);
 
    private:
+    struct RemoteSegmentCache {
+        uint64_t last_refresh = 0;
+        std::unordered_map<SegmentID, SegmentDescRef> id_to_desc_map;
+    };
+
+   private:
     RWSpinlock lock_;
     std::unordered_map<SegmentID, SegmentDescRef> id_to_desc_map_;
     std::unordered_map<SegmentID, std::string> id_to_name_map_;
@@ -125,30 +133,12 @@ class SegmentManager {
     std::atomic<SegmentID> next_id_;
 
     SegmentDescRef local_desc_;
+    ThreadLocalStorage<RemoteSegmentCache> tl_remote_cache_;
 
     std::unique_ptr<MetadataStore> store_;
 
     std::string file_desc_basepath_;
-};
-
-class RemoteSegmentCache {
-   public:
-    RemoteSegmentCache(SegmentManager &manager, uint64_t ttl_ms = 500)
-        : manager_(manager), ttl_ms_(ttl_ms), last_refresh_timestamp_(0) {}
-
-    ~RemoteSegmentCache() {}
-
-    RemoteSegmentCache(const RemoteSegmentCache &) = delete;
-    RemoteSegmentCache &operator=(const RemoteSegmentCache &) = delete;
-
-   public:
-    Status get(SegmentDesc *&desc, SegmentID handle);
-
-   private:
-    SegmentManager &manager_;
-    const uint64_t ttl_ms_;
-    uint64_t last_refresh_timestamp_;
-    std::unordered_map<SegmentID, SegmentDescRef> id_to_desc_map_;
+    uint64_t ttl_ms_ = 500;
 };
 
 class LocalSegmentTracker {

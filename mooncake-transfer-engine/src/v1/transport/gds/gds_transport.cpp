@@ -144,8 +144,8 @@ Status GdsTransport::freeSubBatch(SubBatchRef &batch) {
 }
 
 std::string GdsTransport::getGdsFilePath(SegmentID target_id) {
-    SegmentDescRef desc;
-    auto status = metadata_->segmentManager().getRemote(desc, target_id);
+    SegmentDesc *desc = nullptr;
+    auto status = metadata_->segmentManager().getRemoteCached(desc, target_id);
     if (!status.ok()) return "";
     auto &detail = std::get<FileSegmentDesc>(desc->detail);
     if (detail.buffers.empty()) return "";

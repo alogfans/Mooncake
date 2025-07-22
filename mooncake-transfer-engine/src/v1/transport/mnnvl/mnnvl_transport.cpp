@@ -368,8 +368,8 @@ Status MnnvlTransport::relocateSharedMemoryAddress(uint64_t &dest_addr,
     }
 
     RWSpinlock::WriteGuard guard(relocate_lock_);
-    SegmentDescRef desc;
-    CHECK_STATUS(metadata_->segmentManager().getRemote(desc, target_id));
+    SegmentDesc *desc = nullptr;
+    CHECK_STATUS(metadata_->segmentManager().getRemoteCached(desc, target_id));
     int index = 0;
     auto &detail = std::get<MemorySegmentDesc>(desc->detail);
     for (auto &entry : detail.buffers) {
@@ -423,9 +423,9 @@ Status MnnvlTransport::relocateSharedMemoryAddress(uint64_t &dest_addr,
 }
 
 bool MnnvlTransport::taskSupported(const Request &request) {
-    SegmentDescRef desc;
+    SegmentDesc *desc = nullptr;
     auto status =
-        metadata_->segmentManager().getRemote(desc, request.target_id);
+        metadata_->segmentManager().getRemoteCached(desc, request.target_id);
     if (!status.ok()) return false;
     auto &detail = std::get<MemorySegmentDesc>(desc->detail);
     for (auto &entry : detail.buffers) {

@@ -115,8 +115,8 @@ Status IOUringTransport::freeSubBatch(SubBatchRef &batch) {
 }
 
 std::string IOUringTransport::getIOUringFilePath(SegmentID target_id) {
-    SegmentDescRef desc;
-    auto status = metadata_->segmentManager().getRemote(desc, target_id);
+    SegmentDesc *desc = nullptr;
+    auto status = metadata_->segmentManager().getRemoteCached(desc, target_id);
     if (!status.ok()) return "";
     auto &detail = std::get<FileSegmentDesc>(desc->detail);
     if (detail.buffers.empty()) return "";
@@ -238,9 +238,9 @@ Status IOUringTransport::removeMemoryBuffer(BufferDesc &desc) {
 
 bool IOUringTransport::taskSupported(const Request &request) {
     if (request.target_id == LOCAL_SEGMENT_ID) return false;
-    SegmentDescRef desc;
+    SegmentDesc *desc = nullptr;
     auto status =
-        metadata_->segmentManager().getRemote(desc, request.target_id);
+        metadata_->segmentManager().getRemoteCached(desc, request.target_id);
     if (!status.ok()) return false;
     return desc->type == SegmentType::File;
 }
