@@ -29,6 +29,7 @@
 #include "v1/memory/slab.h"
 #include "v1/metadata/metadata.h"
 #include "v1/utility/random.h"
+#include "v1/utility/string_builder.h"
 
 namespace mooncake {
 namespace v1 {
