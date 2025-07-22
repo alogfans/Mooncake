@@ -37,6 +37,8 @@
 #include <string.h>
 #include <sys/types.h>
 
+#include <unordered_set>
+
 #include "v1/common/status.h"
 #include "v1/memory/location.h"
 #include "v1/utility/random.h"

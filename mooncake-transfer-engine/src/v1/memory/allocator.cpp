@@ -19,6 +19,7 @@
 #include <cuda_runtime.h>
 #endif
 #include <numa.h>
+#include <glog/logging.h>
 
 namespace mooncake {
 namespace v1 {
