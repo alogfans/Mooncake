@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef MULTI_TRANSFER_ENGINE_H_
-#define MULTI_TRANSFER_ENGINE_H_
+#ifndef TRANSFER_ENGINE_V1_H_
+#define TRANSFER_ENGINE_V1_H_
 
 #include <array>
 #include <cstddef>

@@ -16,8 +16,8 @@
 // modifications.
 // https://github.com/facebook/rocksdb/blob/main/include/rocksdb/status.h
 
-#ifndef STATUS_H
-#define STATUS_H
+#ifndef V1_STATUS_H
+#define V1_STATUS_H
 
 #include <cstdint>
 #include <ostream>
@@ -196,4 +196,4 @@ std::ostream& operator<<(std::ostream& os, const Status& s);
 }  // namespace v1
 }  // namespace mooncake
 
-#endif  // STATUS_H
+#endif  // V1_STATUS_H

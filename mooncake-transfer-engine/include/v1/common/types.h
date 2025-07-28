@@ -41,7 +41,9 @@ using BatchID = uint64_t;
 using SegmentID = uint64_t;
 using NotifyMessage = std::string;
 
-const static SegmentID LOCAL_SEGMENT_ID = 0;
+#ifndef LOCAL_SEGMENT_ID
+#define LOCAL_SEGMENT_ID (0ull)
+#endif
 
 struct Request {
     enum OpCode { READ, WRITE };
