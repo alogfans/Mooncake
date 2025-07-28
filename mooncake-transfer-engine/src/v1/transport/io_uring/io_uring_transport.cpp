@@ -239,14 +239,5 @@ Status IOUringTransport::removeMemoryBuffer(BufferDesc &desc) {
     return Status::OK();
 }
 
-bool IOUringTransport::taskSupported(const Request &request) {
-    if (request.target_id == LOCAL_SEGMENT_ID) return false;
-    SegmentDesc *desc = nullptr;
-    auto status =
-        metadata_->segmentManager().getRemoteCached(desc, request.target_id);
-    if (!status.ok()) return false;
-    return desc->type == SegmentType::File;
-}
-
 }  // namespace v1
 }  // namespace mooncake

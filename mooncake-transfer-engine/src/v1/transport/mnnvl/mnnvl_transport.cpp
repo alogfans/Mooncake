@@ -424,21 +424,5 @@ Status MnnvlTransport::relocateSharedMemoryAddress(uint64_t &dest_addr,
         "Requested address is not in registered buffer" LOC_MARK);
 }
 
-bool MnnvlTransport::taskSupported(const Request &request) {
-    SegmentDesc *desc = nullptr;
-    auto status =
-        metadata_->segmentManager().getRemoteCached(desc, request.target_id);
-    if (!status.ok()) return false;
-    auto &detail = std::get<MemorySegmentDesc>(desc->detail);
-    for (auto &entry : detail.buffers) {
-        if (!entry.mnnvl_handle.empty() &&
-            entry.addr <= request.target_offset &&
-            request.target_offset + request.length <=
-                entry.addr + entry.length) {
-            return true;
-        }
-    }
-    return false;
-}
 }  // namespace v1
 }  // namespace mooncake

@@ -79,8 +79,6 @@ class MnnvlTransport : public Transport {
 
     virtual Status freeLocalMemory(void *addr, size_t size);
 
-    virtual bool taskSupported(const Request &request);
-
    private:
     void startTransfer(MnnvlTask *task, MnnvlSubBatch *batch);
 

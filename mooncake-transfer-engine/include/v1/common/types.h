@@ -39,7 +39,7 @@ namespace v1 {
 
 using BatchID = uint64_t;
 using SegmentID = uint64_t;
-using NotifyMessage = std::string;
+using Notification = std::string;
 
 #ifndef LOCAL_SEGMENT_ID
 #define LOCAL_SEGMENT_ID (0ull)
@@ -78,7 +78,7 @@ enum Permission {
 using Location = std::string;
 const static std::string kWildcardLocation = "*";
 
-enum TransportType { RDMA = 0, SHM, GDS, MNNVL, TCP, IOURING };
+enum TransportType { RDMA = 0, SHM, GDS, MNNVL, TCP, IOURING, UNSPEC };
 const static int kSupportedTransportTypes = 6;
 
 struct MemoryOptions {

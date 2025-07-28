@@ -26,24 +26,40 @@ using namespace mooncake;
 static bool g_enable_v1 = (getenv("MC_USE_TEV1") != nullptr);
 #define CAST(ptr) ((mooncake::v1::TransferEngine *)ptr)
 
+std::pair<std::string, std::string> parseConnectionString(
+    const std::string &conn_string) {
+    std::pair<std::string, std::string> result;
+    std::string proto = "etcd";
+    std::string domain;
+    std::size_t pos = conn_string.find("://");
+
+    if (pos != std::string::npos) {
+        proto = conn_string.substr(0, pos);
+        domain = conn_string.substr(pos + 3);
+    } else if (conn_string == P2PHANDSHAKE) {
+        proto = "p2p";
+        domain = "";
+    } else {
+        domain = conn_string;
+    }
+
+    result.first = proto;
+    result.second = domain;
+    return result;
+}
+
 transfer_engine_t createTransferEngine(const char *metadata_conn_string,
                                        const char *local_server_name,
                                        const char *ip_or_host_name,
                                        uint64_t rpc_port, int auto_discover) {
-    if (g_enable_v1 && strcmp(metadata_conn_string, "P2PHANDSHAKE"))
-        g_enable_v1 = false;
     if (g_enable_v1) {
+        auto conn_string = parseConnectionString(metadata_conn_string);
         auto config = std::make_shared<mooncake::v1::ConfigManager>();
-        std::string context;
-        context = "{ \"local_segment_name\": \"" +
-                  std::string(local_server_name) +
-                  "\",\n\"metadata_type\": \"p2p\"}";
-        auto status = config->loadConfigContent(context);
-        if (!status.ok()) {
-            LOG(WARNING) << "mc_create_engine: " << status.ToString()
-                         << ", fallback to default config";
-        }
-        auto engine = new mooncake::v1::TransferEngine();
+        config->set("local_segment_name", local_server_name);
+        config->set("metadata_type", conn_string.first);
+        config->set("metadata_servers", conn_string.second);
+        auto engine = new mooncake::v1::TransferEngine(config);
+        if (!engine->available()) return nullptr;
         return (transfer_engine_t)engine;
     }
     TransferEngine *native = new TransferEngine(auto_discover);

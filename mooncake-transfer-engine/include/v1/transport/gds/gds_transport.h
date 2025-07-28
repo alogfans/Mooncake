@@ -70,8 +70,6 @@ class GdsTransport : public Transport {
 
     virtual const char *getName() const { return "gds"; }
 
-    virtual bool taskSupported(const Request &request) { return false; }
-
    private:
     std::string getGdsFilePath(SegmentID handle);
 

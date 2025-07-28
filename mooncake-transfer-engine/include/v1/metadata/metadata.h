@@ -105,7 +105,7 @@ struct XferDataDesc {
 using OnReceiveBootstrap =
     std::function<int(const BootstrapDesc &request, BootstrapDesc &response)>;
 
-using OnNotify = std::function<int(const NotifyMessage &)>;
+using OnNotify = std::function<int(const Notification &)>;
 
 class RpcClient {
    public:
@@ -127,7 +127,7 @@ class RpcClient {
                            size_t length);
 
     static Status notify(const std::string &server_addr,
-                         const NotifyMessage &message);
+                         const Notification &message);
 };
 
 class MetadataService {

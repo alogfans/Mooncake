@@ -75,9 +75,15 @@ const Json::Value* ConfigManager::findValue(const std::string& key_path) const {
     return nullptr;
 }
 
+void ConfigManager::set(const std::string& key_path, const std::string& value) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    mutable_entries_[key_path] = value;
+}
+
 std::string ConfigManager::get(const std::string& key_path,
                                const std::string& default_value) const {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (mutable_entries_.count(key_path)) return mutable_entries_.at(key_path);
     if (const Json::Value* val = findValue(key_path)) {
         try {
             if (val && val->isString()) return val->asString();
@@ -90,6 +96,14 @@ std::string ConfigManager::get(const std::string& key_path,
 
 int ConfigManager::get(const std::string& key_path, int default_value) const {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (mutable_entries_.count(key_path)) {
+        try {
+            auto value = mutable_entries_.at(key_path);
+            return std::stoi(value);
+        } catch (...) {
+            return default_value;
+        }
+    }
     if (const Json::Value* val = findValue(key_path)) {
         try {
             if (val && val->isConvertibleTo(Json::ValueType::intValue))
@@ -101,8 +115,17 @@ int ConfigManager::get(const std::string& key_path, int default_value) const {
     return default_value;
 }
 
-uint32_t ConfigManager::get(const std::string& key_path, uint32_t default_value) const {
+uint32_t ConfigManager::get(const std::string& key_path,
+                            uint32_t default_value) const {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (mutable_entries_.count(key_path)) {
+        try {
+            auto value = mutable_entries_.at(key_path);
+            return std::stoul(value);
+        } catch (...) {
+            return default_value;
+        }
+    }
     if (const Json::Value* val = findValue(key_path)) {
         try {
             if (val && val->isConvertibleTo(Json::ValueType::intValue))
@@ -114,8 +137,17 @@ uint32_t ConfigManager::get(const std::string& key_path, uint32_t default_value)
     return default_value;
 }
 
-uint64_t ConfigManager::get(const std::string& key_path, uint64_t default_value) const {
+uint64_t ConfigManager::get(const std::string& key_path,
+                            uint64_t default_value) const {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (mutable_entries_.count(key_path)) {
+        try {
+            auto value = mutable_entries_.at(key_path);
+            return std::stoull(value);
+        } catch (...) {
+            return default_value;
+        }
+    }
     if (const Json::Value* val = findValue(key_path)) {
         try {
             if (val && val->isConvertibleTo(Json::ValueType::intValue))
@@ -129,6 +161,15 @@ uint64_t ConfigManager::get(const std::string& key_path, uint64_t default_value)
 
 double ConfigManager::get(const std::string& key_path,
                           double default_value) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (mutable_entries_.count(key_path)) {
+        try {
+            auto value = mutable_entries_.at(key_path);
+            return std::stod(value);
+        } catch (...) {
+            return default_value;
+        }
+    }
     if (const Json::Value* val = findValue(key_path)) {
         try {
             if (val && val->isConvertibleTo(Json::ValueType::realValue))
@@ -141,6 +182,10 @@ double ConfigManager::get(const std::string& key_path,
 }
 
 bool ConfigManager::get(const std::string& key_path, bool default_value) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (mutable_entries_.count(key_path)) {
+        return mutable_entries_.at(key_path) == "true";
+    }
     if (const Json::Value* val = findValue(key_path)) {
         try {
             if (val && val->isConvertibleTo(Json::ValueType::booleanValue))
@@ -155,6 +200,20 @@ bool ConfigManager::get(const std::string& key_path, bool default_value) const {
 std::vector<std::string> ConfigManager::getArray(
     const std::string& key_path) const {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (mutable_entries_.count(key_path)) {
+        std::vector<std::string> result;
+        auto rep = mutable_entries_.at(key_path);
+        Json::Value root;
+        Json::Reader reader;
+        try {
+            if (reader.parse(rep, root) && root.isArray())
+                for (const auto& item : root) result.push_back(item.asString());
+        } catch (...) {
+            return {};
+        }
+        return result;
+    }
+
     if (const Json::Value* val = findValue(key_path)) {
         if (val->isArray()) {
             std::vector<std::string> result;
@@ -173,6 +232,21 @@ std::vector<std::string> ConfigManager::getArray(
 
 std::vector<int> ConfigManager::getArrayInt(const std::string& key_path) const {
     std::lock_guard<std::mutex> lock(mutex_);
+
+    if (mutable_entries_.count(key_path)) {
+        std::vector<int> result;
+        auto rep = mutable_entries_.at(key_path);
+        Json::Value root;
+        Json::Reader reader;
+        try {
+            if (reader.parse(rep, root) && root.isArray())
+                for (const auto& item : root) result.push_back(item.asInt());
+        } catch (...) {
+            return {};
+        }
+        return result;
+    }
+
     if (const Json::Value* val = findValue(key_path)) {
         if (val->isArray()) {
             std::vector<int> result;

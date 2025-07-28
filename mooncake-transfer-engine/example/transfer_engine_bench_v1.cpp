@@ -276,17 +276,15 @@ void deallocateAllLocalMemory(const std::unique_ptr<TransferEngine> &engine,
                               std::vector<void *> &addr) {
     for (int i = 0; i < num_buffers; ++i) {
         CHECK_FAIL(engine->unregisterLocalMemory(addr[i], buffer_capacity));
-        CHECK_FAIL(engine->freeLocalMemory(addr[i], buffer_capacity));
+        CHECK_FAIL(engine->freeLocalMemory(addr[i]));
     }
 }
 
 std::shared_ptr<ConfigManager> loadConfig() {
     auto config = std::make_shared<ConfigManager>();
-    std::string context;
-    context = "{ \"local_segment_name\": \"" + FLAGS_local_segment +
-              "\",\n\"metadata_type\": \"" + FLAGS_metadata_type +
-              "\",\"metadata_servers\": \"" + FLAGS_metadata_servers + "\"}";
-    CHECK_FAIL(config->loadConfigContent(context));
+    config->set("local_segment_name", FLAGS_local_segment);
+    config->set("metadata_type", FLAGS_metadata_type);
+    config->set("metadata_servers", FLAGS_metadata_servers);
     return config;
 }
 

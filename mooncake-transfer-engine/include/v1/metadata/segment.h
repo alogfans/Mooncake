@@ -162,7 +162,7 @@ class LocalSegmentTracker {
     Status remove(uint64_t base, size_t length,
                   std::function<Status(BufferDesc &)> callback);
 
-    Status update(std::function<Status(BufferDesc &)> callback);
+    Status forEach(std::function<Status(BufferDesc &)> callback);
 
    private:
     SegmentDescRef local_desc_;

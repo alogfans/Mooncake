@@ -79,8 +79,6 @@ class IOUringTransport : public Transport {
 
     virtual const char *getName() const { return "io-uring"; }
 
-    virtual bool taskSupported(const Request &request);
-
    private:
     std::string getIOUringFilePath(SegmentID handle);
 

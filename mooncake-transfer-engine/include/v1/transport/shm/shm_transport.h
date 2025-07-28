@@ -83,8 +83,6 @@ class ShmTransport : public Transport {
 
     virtual Status freeLocalMemory(void *addr, size_t size);
 
-    virtual bool taskSupported(const Request &request);
-
    private:
     void startTransfer(ShmTask *task, ShmSubBatch *batch);
 

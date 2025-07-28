@@ -431,25 +431,6 @@ Status ShmTransport::relocateSharedMemoryAddress(uint64_t &dest_addr,
         "Requested address is not in registered buffer" LOC_MARK);
 }
 
-bool ShmTransport::taskSupported(const Request &request) {
-    if (request.target_id == LOCAL_SEGMENT_ID) return true;
-    SegmentDesc *desc = nullptr;
-    auto status =
-        metadata_->segmentManager().getRemoteCached(desc, request.target_id);
-    if (!status.ok()) return false;
-    if (desc->machine_id != machine_id_) return false;
-    if (desc->type != SegmentType::Memory) return false;
-    auto &detail = std::get<MemorySegmentDesc>(desc->detail);
-    for (auto &entry : detail.buffers) {
-        if (!entry.shm_path.empty() && entry.addr <= request.target_offset &&
-            request.target_offset + request.length <=
-                entry.addr + entry.length) {
-            return true;
-        }
-    }
-    return false;
-}
-
 Status ShmTransport::setPeerAccess() {
 #ifdef USE_CUDA
     int device_count = 0;

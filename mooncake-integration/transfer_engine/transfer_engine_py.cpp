@@ -123,9 +123,14 @@ int TransferEnginePy::initializeExt(const char *local_hostname,
                                     const char *metadata_type) {
     (void)(protocol);
     if (g_enable_v1) {
-        if (strcmp(metadata_type, P2PHANDSHAKE) == 0) return -1;
         auto config = std::make_shared<mooncake::v1::ConfigManager>();
+        if (strcmp(metadata_type, P2PHANDSHAKE)) {
+            config->set("local_segment_name", local_hostname);
+            config->set("metadata_type", metadata_type);
+            config->set("metadata_servers", metadata_server);
+        }
         engine_v1_ = std::make_unique<mooncake::v1::TransferEngine>(config);
+        if (!engine_v1_->available()) return -1;
         free_list_.resize(kSlabSizeKBTabLen);
 #ifndef USE_ASCEND
         doBuddyAllocate(kMaxClassId);

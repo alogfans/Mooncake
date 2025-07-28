@@ -25,16 +25,30 @@
         return -1;                               \
     }
 
-mc_engine_t mc_create_engine(const char *config_content) {
+struct Settings {
+    std::string path;
+    std::unordered_map<std::string, std::string> attrs;
+};
+
+thread_local Settings tl_settings;
+
+void mc_load_config_from_file(const char *path) { tl_settings.path = path; }
+
+void mc_set_config(const char *key, const char *value) {
+    tl_settings.attrs[key] = value;
+}
+
+mc_engine_t mc_create_engine() {
     auto config = std::make_shared<mooncake::v1::ConfigManager>();
-    if (config_content) {
-        auto status = config->loadConfigContent(config_content);
+    if (!tl_settings.path.empty()) {
+        auto status = config->loadConfigContent(tl_settings.path);
         if (!status.ok()) {
             LOG(WARNING) << "mc_create_engine: " << status.ToString()
                          << ", fallback to default config";
         }
     }
-    auto engine = new mooncake::v1::TransferEngine();
+    for (auto &attr : tl_settings.attrs) config->set(attr.first, attr.second);
+    auto engine = new mooncake::v1::TransferEngine(config);
     return (mc_engine_t)engine;
 }
 
@@ -115,7 +129,7 @@ int mc_get_segment_info(mc_engine_t engine, mc_segment_id_t handle,
         info->buffers[i].base = pinfo.buffers[i].base;
         info->buffers[i].length = pinfo.buffers[i].length;
         strncpy(info->buffers[i].location, pinfo.buffers[i].location.c_str(),
-                64);
+                63);
     }
 
     return 0;
@@ -140,10 +154,10 @@ int mc_allocate_memory(mc_engine_t engine, void **addr, size_t size,
     return 0;
 }
 
-int mc_free_memory(mc_engine_t engine, void *addr, size_t size) {
+int mc_free_memory(mc_engine_t engine, void *addr) {
     CHECK_POINTER(engine);
     CHECK_POINTER(addr);
-    auto status = CAST(engine)->freeLocalMemory(addr, size);
+    auto status = CAST(engine)->freeLocalMemory(addr);
     if (!status.ok()) {
         LOG(ERROR) << "mc_free_memory: " << status.ToString();
         return -1;
@@ -214,7 +228,7 @@ int mc_send_notifs(mc_engine_t engine, mc_segment_id_t handle,
                    const char *message) {
     CHECK_POINTER(engine);
     CHECK_POINTER(message);
-    auto status = CAST(engine)->sendNotify(handle, message);
+    auto status = CAST(engine)->sendNotification(handle, message);
     if (!status.ok()) {
         LOG(ERROR) << "mc_send_notifs: " << status.ToString();
         return -1;
@@ -225,8 +239,8 @@ int mc_send_notifs(mc_engine_t engine, mc_segment_id_t handle,
 int mc_recv_notifs(mc_engine_t engine, mc_notifi_info *info) {
     CHECK_POINTER(engine);
     CHECK_POINTER(info);
-    std::vector<mooncake::v1::NotifyMessage> notify_list;
-    auto status = CAST(engine)->getNotifyList(notify_list);
+    std::vector<mooncake::v1::Notification> notify_list;
+    auto status = CAST(engine)->receiveNotification(notify_list);
     if (!status.ok()) {
         LOG(ERROR) << "mc_recv_notifs: " << status.ToString();
         return -1;
@@ -242,7 +256,7 @@ int mc_recv_notifs(mc_engine_t engine, mc_notifi_info *info) {
 
         for (int i = 0; i < info->num_records; ++i) {
             info->records[i].handle = 0;
-            strncpy(info->records[i].content, notify_list[i].c_str(), 4096);
+            strncpy(info->records[i].content, notify_list[i].c_str(), 4095);
         }
     }
     return 0;

@@ -198,6 +198,13 @@ Status TransferEngine::construct() {
 }
 
 Status TransferEngine::deconstruct() {
+    local_segment_tracker_->forEach([&](BufferDesc &desc) -> Status {
+        for (size_t type = 0; type < kSupportedTransportTypes; ++type) {
+            if (transport_list_[type])
+                transport_list_[type]->removeMemoryBuffer(desc);
+        }
+        return Status::OK();
+    });
     for (auto &transport : transport_list_) transport.reset();
     local_segment_tracker_.reset();
     metadata_->segmentManager().deleteLocal();
@@ -285,6 +292,28 @@ Status TransferEngine::getSegmentInfo(SegmentID handle, SegmentInfo &info) {
 }
 
 Status TransferEngine::allocateLocalMemory(void **addr, size_t size,
+                                           Location location) {
+    MemoryOptions options;
+    options.location = location;
+    if (location == kWildcardLocation || location.starts_with("cpu")) {
+        if (transport_list_[RDMA])
+            options.type = RDMA;
+        else if (transport_list_[SHM])
+            options.type = SHM;
+        else
+            options.type = TCP;
+    } else {
+        if (transport_list_[MNNVL])
+            options.type = MNNVL;
+        else if (transport_list_[RDMA])
+            options.type = RDMA;
+        else
+            options.type = TCP;
+    }
+    return allocateLocalMemory(addr, size, options);
+}
+
+Status TransferEngine::allocateLocalMemory(void **addr, size_t size,
                                            MemoryOptions &options) {
     auto &transport = transport_list_[options.type];
     if (!transport)
@@ -292,23 +321,44 @@ Status TransferEngine::allocateLocalMemory(void **addr, size_t size,
             "Not supported type in memory options" LOC_MARK);
     CHECK_STATUS(transport->allocateLocalMemory(addr, size, options));
     std::lock_guard<std::mutex> lock(mutex_);
-    AllocatedMemory entry{
-        .addr = *addr, .size = size, .transport = transport.get()};
+    AllocatedMemory entry{.addr = *addr,
+                          .size = size,
+                          .transport = transport.get(),
+                          .options = options};
     allocated_memory_.push_back(entry);
     return Status::OK();
 }
 
-Status TransferEngine::freeLocalMemory(void *addr, size_t size) {
+Status TransferEngine::freeLocalMemory(void *addr) {
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto it = allocated_memory_.begin(); it != allocated_memory_.end();
          ++it) {
-        if (it->addr == addr && it->size == size) {
-            auto status = it->transport->freeLocalMemory(addr, size);
+        if (it->addr == addr) {
+            auto status = it->transport->freeLocalMemory(addr, it->size);
             allocated_memory_.erase(it);
             return status;
         }
     }
     return Status::InvalidArgument("Address region not registered" LOC_MARK);
+}
+
+Status TransferEngine::registerLocalMemory(void *addr, size_t size,
+                                           Permission permission) {
+    MemoryOptions options;
+    {
+        // If the buffer is allocated by allocateLocalMemory, reuse the memory
+        // option with permission override (if needed)
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto it = allocated_memory_.begin(); it != allocated_memory_.end();
+             ++it) {
+            if (it->addr == addr) {
+                options = it->options;
+                break;
+            }
+        }
+    }
+    options.perm = permission;
+    return registerLocalMemory(addr, size, options);
 }
 
 Status TransferEngine::registerLocalMemory(void *addr, size_t size,
@@ -376,16 +426,47 @@ Status TransferEngine::lazyFreeBatch() {
     return Status::OK();
 }
 
+BufferDesc *getBufferDesc(SegmentDesc *remote_desc, const Request &request) {
+    auto &detail = std::get<MemorySegmentDesc>(remote_desc->detail);
+    for (auto &entry : detail.buffers) {
+        if (entry.addr <= request.target_offset &&
+            request.target_offset + request.length <=
+                entry.addr + entry.length) {
+            return &entry;
+        }
+    }
+    return nullptr;
+}
+
 TransportType TransferEngine::getTransportType(const Request &request) {
-    if (transport_list_[IOURING] &&
-        transport_list_[IOURING]->taskSupported(request))
-        return IOURING;
-    if (transport_list_[SHM] && transport_list_[SHM]->taskSupported(request))
-        return SHM;
-    if (transport_list_[RDMA])
-        return RDMA;
-    else
+    SegmentDesc *remote_desc;
+    auto status = metadata_->segmentManager().getRemoteCached(
+        remote_desc, request.target_id);
+    if (!status.ok()) return UNSPEC;
+    if (remote_desc->type == SegmentType::File) {
+        if (isCudaMemory(request.source) && transport_list_[GDS]) return GDS;
+        if (transport_list_[IOURING]) return IOURING;
+        return UNSPEC;
+    } else {
+        auto entry = getBufferDesc(remote_desc, request);
+        if (!entry) return TCP;
+        if (!entry->mnnvl_handle.empty() && transport_list_[MNNVL])
+            return MNNVL;
+        if (remote_desc->machine_id ==
+            metadata_->segmentManager().getLocal()->machine_id) {
+            if (entry->location.starts_with("cuda")) {
+                if (entry->shm_path.empty() && transport_list_[SHM]) return SHM;
+                if (transport_list_[RDMA]) return RDMA;
+            } else {
+                if (transport_list_[RDMA]) return RDMA;
+                if (transport_list_[SHM]) return SHM;
+            }
+            return TCP;
+        }
+        if (transport_list_[RDMA]) return RDMA;
         return TCP;
+    }
+    return UNSPEC;
 }
 
 Status TransferEngine::submitTransfer(
@@ -396,6 +477,9 @@ Status TransferEngine::submitTransfer(
     std::vector<Request> classified_request_list[kSupportedTransportTypes];
     for (auto &request : request_list) {
         auto transport_type = getTransportType(request);
+        if (transport_type == UNSPEC)
+            return Status::InvalidArgument(
+                "Invalid target segment ID" LOC_MARK);
         auto &sub_task_id = batch->next_sub_task_id[transport_type];
         classified_request_list[transport_type].push_back(request);
         batch->task_id_lookup.push_back(
@@ -418,23 +502,24 @@ Status TransferEngine::submitTransfer(
     return Status::OK();
 }
 
-Status TransferEngine::sendNotify(SegmentID target_id,
-                                  const NotifyMessage &notify) {
+Status TransferEngine::sendNotification(SegmentID target_id,
+                                        const Notification &notifi) {
     for (size_t type = 0; type < kSupportedTransportTypes; ++type) {
         auto &transport = transport_list_[type];
-        if (!transport || !transport->hasNotifyFeature()) continue;
-        return transport->sendNotify(target_id, notify);
+        if (!transport || !transport->supportNotification()) continue;
+        return transport->sendNotification(target_id, notifi);
     }
-    return Status::InvalidArgument("Notify feature not supported" LOC_MARK);
+    return Status::InvalidArgument("Notification not supported" LOC_MARK);
 }
 
-Status TransferEngine::getNotifyList(std::vector<NotifyMessage> &notify_list) {
+Status TransferEngine::receiveNotification(
+    std::vector<Notification> &notifi_list) {
     for (size_t type = 0; type < kSupportedTransportTypes; ++type) {
         auto &transport = transport_list_[type];
-        if (!transport || !transport->hasNotifyFeature()) continue;
-        return transport->getNotifyList(notify_list);
+        if (!transport || !transport->supportNotification()) continue;
+        return transport->receiveNotification(notifi_list);
     }
-    return Status::InvalidArgument("Notify feature not supported" LOC_MARK);
+    return Status::InvalidArgument("Notification not supported" LOC_MARK);
 }
 
 Status TransferEngine::getTransferStatus(BatchID batch_id, size_t task_id,

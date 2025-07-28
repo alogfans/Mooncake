@@ -32,6 +32,8 @@ class ConfigManager {
 
     Status loadConfigContent(const std::string& content);
 
+    void set(const std::string& key_path, const std::string& value);
+
     std::string get(const std::string& key_path,
                     const char* default_value) const {
         return get(key_path, std::string(default_value));
@@ -59,6 +61,7 @@ class ConfigManager {
    private:
     Json::Value config_data_;
     std::filesystem::path config_path_;
+    std::unordered_map<std::string, std::string> mutable_entries_;
     mutable std::mutex mutex_;
 
     const Json::Value* findValue(const std::string& key_path) const;

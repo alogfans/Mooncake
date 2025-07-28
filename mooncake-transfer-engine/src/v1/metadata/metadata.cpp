@@ -338,7 +338,7 @@ Status RpcClient::recvData(const std::string &server_addr,
 }
 
 Status RpcClient::notify(const std::string &server_addr,
-                         const NotifyMessage &message) {
+                         const Notification &message) {
     std::string request, response;
     request.resize(message.size());
     memcpy(&request[0], message.c_str(), message.size());

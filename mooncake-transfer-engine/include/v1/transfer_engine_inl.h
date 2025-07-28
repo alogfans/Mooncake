@@ -85,7 +85,11 @@ struct mc_notifi_info {
     struct mc_notifi_record *records;
 };
 
-mc_engine_t mc_create_engine(const char *config_content);
+void mc_load_config_from_file(const char *path);
+
+void mc_set_config(const char *key, const char *value);
+
+mc_engine_t mc_create_engine();
 
 void mc_destroy_engine(mc_engine_t engine);
 
@@ -107,7 +111,7 @@ void mc_free_segment_info(mc_segment_info_t *info);
 int mc_allocate_memory(mc_engine_t engine, void **addr, size_t size,
                        const char *location);
 
-int mc_free_memory(mc_engine_t engine, void *addr, size_t size);
+int mc_free_memory(mc_engine_t engine, void *addr);
 
 int mc_register_memory(mc_engine_t engine, void *addr, size_t size);
 

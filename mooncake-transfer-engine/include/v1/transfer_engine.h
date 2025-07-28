@@ -25,9 +25,9 @@
 #include <unordered_set>
 #include <vector>
 
+#include "v1/common/config.h"
 #include "v1/common/status.h"
 #include "v1/common/types.h"
-#include "v1/common/config.h"
 #include "v1/concurrency/tls.h"
 
 namespace mooncake {
@@ -77,18 +77,21 @@ class TransferEngine {
 
    public:
     Status allocateLocalMemory(void **addr, size_t size,
+                               Location location = kWildcardLocation);
+
+    Status freeLocalMemory(void *addr);
+
+    Status registerLocalMemory(void *addr, size_t size,
+                               Permission permission = kGlobalReadWrite);
+
+    Status unregisterLocalMemory(void *addr, size_t size = 0);
+
+    // advanced buffer allocate function
+    Status allocateLocalMemory(void **addr, size_t size,
                                MemoryOptions &options);
-
-    Status freeLocalMemory(void *addr, size_t size);
-
-    Status registerLocalMemory(void *addr, size_t size) {
-        MemoryOptions options;
-        return registerLocalMemory(addr, size, options);
-    }
-
+    
+    // advanced buffer register function
     Status registerLocalMemory(void *addr, size_t size, MemoryOptions &options);
-
-    Status unregisterLocalMemory(void *addr, size_t size);
 
    public:
     BatchID allocateBatch(size_t batch_size);
@@ -98,9 +101,9 @@ class TransferEngine {
     Status submitTransfer(BatchID batch_id,
                           const std::vector<Request> &request_list);
 
-    Status sendNotify(SegmentID target_id, const NotifyMessage &notify);
+    Status sendNotification(SegmentID target_id, const Notification &notifi);
 
-    Status getNotifyList(std::vector<NotifyMessage> &notify_list);
+    Status receiveNotification(std::vector<Notification> &notifi_list);
 
     Status getTransferStatus(BatchID batch_id, size_t task_id,
                              TransferStatus &status);
@@ -126,6 +129,7 @@ class TransferEngine {
         void *addr;
         size_t size;
         Transport *transport;
+        MemoryOptions options;
     };
 
     struct BatchSet {

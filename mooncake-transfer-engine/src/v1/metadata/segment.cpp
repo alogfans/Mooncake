@@ -238,7 +238,7 @@ Status LocalSegmentTracker::remove(
     std::function<Status(BufferDesc &)> callback) {
     auto &detail = std::get<MemorySegmentDesc>(local_desc_->detail);
     for (auto it = detail.buffers.begin(); it != detail.buffers.end(); ++it) {
-        if (it->addr == base && it->length == length) {
+        if (it->addr == base && (!length || it->length == length)) {
             it->ref_count--;
             Status status = Status::OK();
             if (it->ref_count == 0) {
@@ -251,7 +251,7 @@ Status LocalSegmentTracker::remove(
     return Status::OK();
 }
 
-Status LocalSegmentTracker::update(
+Status LocalSegmentTracker::forEach(
     std::function<Status(BufferDesc &)> callback) {
     auto &detail = std::get<MemorySegmentDesc>(local_desc_->detail);
     for (auto &buf : detail.buffers) {
