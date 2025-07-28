@@ -102,13 +102,9 @@ class SegmentManager {
 
     Status getRemoteCached(SegmentDesc *&desc, SegmentID handle);
 
-    Status getRemote(SegmentDescRef &desc, SegmentID handle);
-
     Status getRemote(SegmentDescRef &desc, const std::string &segment_name);
 
     Status invalidateRemote(SegmentID handle);
-
-    bool isSameMachine(SegmentID handle);
 
    public:
     SegmentDescRef getLocal() { return local_desc_; }
@@ -116,6 +112,9 @@ class SegmentManager {
     Status synchronizeLocal();
 
     Status deleteLocal();
+
+   private:
+    Status getRemote(SegmentDescRef &desc, SegmentID handle);
 
     Status makeFileRemote(SegmentDescRef &desc,
                           const std::string &segment_name);
@@ -128,7 +127,6 @@ class SegmentManager {
 
    private:
     RWSpinlock lock_;
-    std::unordered_map<SegmentID, SegmentDescRef> id_to_desc_map_;
     std::unordered_map<SegmentID, std::string> id_to_name_map_;
     std::unordered_map<std::string, SegmentID> name_to_id_map_;
     std::atomic<SegmentID> next_id_;

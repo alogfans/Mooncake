@@ -21,8 +21,8 @@
 #include <set>
 
 #include "v1/common/status.h"
-#include "v1/metadata/metadata.h"
 #include "v1/memory/location.h"
+#include "v1/metadata/metadata.h"
 #include "v1/utility/system.h"
 
 namespace mooncake {
@@ -55,7 +55,6 @@ Status SegmentManager::closeRemote(SegmentID handle) {
     auto segment_name = id_to_name_map_[handle];
     name_to_id_map_.erase(segment_name);
     id_to_name_map_.erase(handle);
-    id_to_desc_map_.erase(handle);
     return Status::OK();
 }
 
@@ -78,74 +77,28 @@ Status SegmentManager::getRemoteCached(SegmentDesc *&desc, SegmentID handle) {
 }
 
 Status SegmentManager::getRemote(SegmentDescRef &desc, SegmentID handle) {
-    {
-        RWSpinlock::ReadGuard guard(lock_);
-        if (!id_to_name_map_.count(handle)) {
-            return Status::InvalidArgument("Invalid segment handle" LOC_MARK);
-        }
-        if (id_to_desc_map_.count(handle)) {
-            desc = id_to_desc_map_[handle];
-            return Status::OK();
-        }
-    }
-
     RWSpinlock::WriteGuard guard(lock_);
-    if (id_to_desc_map_.count(handle)) {
-        desc = id_to_desc_map_[handle];
-        return Status::OK();
+    if (!id_to_name_map_.count(handle)) {
+        return Status::InvalidArgument("Invalid segment handle" LOC_MARK);
     }
-
     auto segment_name = id_to_name_map_[handle];
     if (segment_name.starts_with(kLocalFileSegmentPrefix)) {
         CHECK_STATUS(makeFileRemote(desc, segment_name));
     } else {
         CHECK_STATUS(store_->getSegmentDesc(desc, segment_name));
     }
-    id_to_desc_map_[handle] = desc;
     return Status::OK();
 }
 
 Status SegmentManager::getRemote(SegmentDescRef &desc,
                                  const std::string &segment_name) {
-    {
-        RWSpinlock::ReadGuard guard(lock_);
-        if (!name_to_id_map_.count(segment_name))
-            return store_->getSegmentDesc(desc, segment_name);
-        auto handle = name_to_id_map_.at(segment_name);
-        if (id_to_desc_map_.count(handle)) {
-            desc = id_to_desc_map_[handle];
-            return Status::OK();
-        }
-    }
-
-    RWSpinlock::WriteGuard guard(lock_);
-    auto handle = name_to_id_map_.at(segment_name);
-    if (id_to_desc_map_.count(handle)) {
-        desc = id_to_desc_map_[handle];
-        return Status::OK();
-    }
-
-    auto status = store_->getSegmentDesc(desc, segment_name);
-    if (!status.ok()) return status;
-    id_to_desc_map_[handle] = desc;
-    return Status::OK();
+    return store_->getSegmentDesc(desc, segment_name);
 }
 
 Status SegmentManager::invalidateRemote(SegmentID handle) {
-    RWSpinlock::WriteGuard guard(lock_);
-    if (!id_to_name_map_.count(handle))
-        return Status::InvalidArgument("invalid segment handle" LOC_MARK);
-    if (id_to_desc_map_.count(handle)) id_to_desc_map_.erase(handle);
+    auto &cache = tl_remote_cache_.get();
+    if (cache.id_to_desc_map.count(handle)) cache.id_to_desc_map.erase(handle);
     return Status::OK();
-}
-
-bool SegmentManager::isSameMachine(SegmentID handle) {
-    if (handle == LOCAL_SEGMENT_ID) return true;
-    RWSpinlock::ReadGuard guard(lock_);
-    if (id_to_desc_map_.count(handle)) {
-        return id_to_desc_map_[handle]->machine_id == local_desc_->machine_id;
-    }
-    return false;
 }
 
 Status SegmentManager::makeFileRemote(SegmentDescRef &desc,

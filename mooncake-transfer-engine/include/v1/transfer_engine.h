@@ -89,7 +89,7 @@ class TransferEngine {
     // advanced buffer allocate function
     Status allocateLocalMemory(void **addr, size_t size,
                                MemoryOptions &options);
-    
+
     // advanced buffer register function
     Status registerLocalMemory(void *addr, size_t size, MemoryOptions &options);
 

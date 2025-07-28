@@ -31,14 +31,18 @@
 #ifdef USE_GDS
 #include "v1/transport/gds/gds_transport.h"
 #endif
-#ifdef USE_IO_URING
 #include "v1/transport/io_uring/io_uring_transport.h"
-#endif
 #include "v1/utility/ip.h"
 #include "v1/utility/random.h"
 
 namespace mooncake {
 namespace v1 {
+
+struct TaskInfo {
+    TransportType type;
+    int sub_task_id;
+    Request request;
+};
 
 struct Batch {
     Batch() : max_size(0) {
@@ -51,7 +55,7 @@ struct Batch {
     std::array<Transport::SubBatchRef, kSupportedTransportTypes> sub_batch;
     std::array<int, kSupportedTransportTypes> next_sub_task_id;
 
-    std::vector<std::pair<TransportType, size_t>> task_id_lookup;
+    std::vector<TaskInfo> task_list;
     size_t max_size;
 };
 
@@ -160,6 +164,9 @@ Status TransferEngine::construct() {
     if (conf_->get("transports/shm/enable", true))
         transport_list_[SHM] = std::make_unique<ShmTransport>();
 
+    if (conf_->get("transports/io_uring/enable", true))
+        transport_list_[IOURING] = std::make_unique<IOUringTransport>();
+
 #ifdef USE_CUDA
     if (conf_->get("transports/mnnvl/enable", false))
         transport_list_[MNNVL] = std::make_unique<MnnvlTransport>();
@@ -168,11 +175,6 @@ Status TransferEngine::construct() {
 #ifdef USE_GDS
     if (conf_->get("transports/gds/enable", false))
         transport_list_[GDS] = std::make_unique<GdsTransport>();
-#endif
-
-#ifdef USE_IO_URING
-    if (conf_->get("transports/io_uring/enable", true))
-        transport_list_[IOURING] = std::make_unique<IOUringTransport>();
 #endif
 
     std::string transport_string;
@@ -449,7 +451,7 @@ TransportType TransferEngine::getTransportType(const Request &request) {
         return UNSPEC;
     } else {
         auto entry = getBufferDesc(remote_desc, request);
-        if (!entry) return TCP;
+        if (!entry) return UNSPEC;
         if (!entry->mnnvl_handle.empty() && transport_list_[MNNVL])
             return MNNVL;
         if (remote_desc->machine_id ==
@@ -475,16 +477,25 @@ Status TransferEngine::submitTransfer(
     Batch *batch = (Batch *)(batch_id);
 
     std::vector<Request> classified_request_list[kSupportedTransportTypes];
+    std::vector<size_t> classified_task_id[kSupportedTransportTypes];
     for (auto &request : request_list) {
         auto transport_type = getTransportType(request);
-        if (transport_type == UNSPEC)
-            return Status::InvalidArgument(
-                "Invalid target segment ID" LOC_MARK);
-        auto &sub_task_id = batch->next_sub_task_id[transport_type];
-        classified_request_list[transport_type].push_back(request);
-        batch->task_id_lookup.push_back(
-            std::make_pair(transport_type, sub_task_id));
-        sub_task_id++;
+        if (transport_type == UNSPEC) {
+            metadata_->segmentManager().invalidateRemote(request.target_id);
+            transport_type = getTransportType(request);
+        }
+        if (transport_type == UNSPEC) {
+            batch->task_list.emplace_back(
+                TaskInfo{transport_type, -1, request});
+        } else {
+            auto &sub_task_id = batch->next_sub_task_id[transport_type];
+            classified_request_list[transport_type].push_back(request);
+            classified_task_id[transport_type].push_back(
+                batch->task_list.size());
+            batch->task_list.emplace_back(
+                TaskInfo{transport_type, sub_task_id, request});
+            sub_task_id++;
+        }
     }
 
     for (size_t type = 0; type < kSupportedTransportTypes; ++type) {
@@ -492,11 +503,21 @@ Status TransferEngine::submitTransfer(
         auto &transport = transport_list_[type];
         auto &sub_batch = batch->sub_batch[type];
         if (!sub_batch) {
-            CHECK_STATUS(
-                transport->allocateSubBatch(sub_batch, batch->max_size));
+            auto status =
+                transport->allocateSubBatch(sub_batch, batch->max_size);
+            if (!status.ok()) {
+                for (auto &task_id : classified_task_id[type])
+                    batch->task_list[task_id].type = UNSPEC;
+            }
         }
-        CHECK_STATUS(transport->submitTransferTasks(
-            sub_batch, classified_request_list[type]));
+
+        if (!sub_batch) continue;
+        auto status = transport->submitTransferTasks(
+            sub_batch, classified_request_list[type]);
+        if (!status.ok()) {
+            for (auto &task_id : classified_task_id[type])
+                batch->task_list[task_id].type = UNSPEC;
+        }
     }
 
     return Status::OK();
@@ -526,15 +547,20 @@ Status TransferEngine::getTransferStatus(BatchID batch_id, size_t task_id,
                                          TransferStatus &status) {
     if (!batch_id) return Status::InvalidArgument("Invalid batch ID" LOC_MARK);
     Batch *batch = (Batch *)(batch_id);
-    if (task_id >= batch->task_id_lookup.size())
+    if (task_id >= batch->task_list.size())
         return Status::InvalidArgument("Invalid task ID" LOC_MARK);
-    auto [type, sub_task_id] = batch->task_id_lookup[task_id];
-    auto &transport = transport_list_[type];
-    auto &sub_batch = batch->sub_batch[type];
+    auto &task = batch->task_list[task_id];
+    if (task.type == UNSPEC) {
+        status.s = FAILED;
+        status.transferred_bytes = 0;
+        return Status::OK();
+    }
+    auto &transport = transport_list_[task.type];
+    auto &sub_batch = batch->sub_batch[task.type];
     if (!transport || !sub_batch) {
         return Status::InvalidArgument("Transport not available" LOC_MARK);
     }
-    return transport->getTransferStatus(sub_batch, sub_task_id, status);
+    return transport->getTransferStatus(sub_batch, task.sub_task_id, status);
 }
 
 Status TransferEngine::getTransferStatus(
@@ -542,17 +568,23 @@ Status TransferEngine::getTransferStatus(
     if (!batch_id) return Status::InvalidArgument("Invalid batch ID" LOC_MARK);
     Batch *batch = (Batch *)(batch_id);
     status_list.clear();
-    for (size_t task_id = 0; task_id < batch->task_id_lookup.size();
-         ++task_id) {
-        auto [type, sub_task_id] = batch->task_id_lookup[task_id];
-        auto &transport = transport_list_[type];
-        auto &sub_batch = batch->sub_batch[type];
+    for (size_t task_id = 0; task_id < batch->task_list.size(); ++task_id) {
+        auto &task = batch->task_list[task_id];
+        if (task.type == UNSPEC) {
+            TransferStatus task_status;
+            task_status.s = FAILED;
+            task_status.transferred_bytes = 0;
+            status_list.push_back(task_status);
+            continue;
+        }
+        auto &transport = transport_list_[task.type];
+        auto &sub_batch = batch->sub_batch[task.type];
         if (!transport || !sub_batch) {
             return Status::InvalidArgument("Transport not available" LOC_MARK);
         }
         TransferStatus task_status;
-        CHECK_STATUS(
-            transport->getTransferStatus(sub_batch, sub_task_id, task_status));
+        CHECK_STATUS(transport->getTransferStatus(sub_batch, task.sub_task_id,
+                                                  task_status));
         status_list.push_back(task_status);
     }
     return Status::OK();
@@ -565,17 +597,20 @@ Status TransferEngine::getTransferStatus(BatchID batch_id,
     overall_status.s = WAITING;
     overall_status.transferred_bytes = 0;
     size_t success_tasks = 0;
-    for (size_t task_id = 0; task_id < batch->task_id_lookup.size();
-         ++task_id) {
-        auto [type, sub_task_id] = batch->task_id_lookup[task_id];
-        auto &transport = transport_list_[type];
-        auto &sub_batch = batch->sub_batch[type];
+    for (size_t task_id = 0; task_id < batch->task_list.size(); ++task_id) {
+        auto &task = batch->task_list[task_id];
+        if (task.type == UNSPEC) {
+            overall_status.s = FAILED;
+            continue;
+        }
+        auto &transport = transport_list_[task.type];
+        auto &sub_batch = batch->sub_batch[task.type];
         if (!transport || !sub_batch) {
             return Status::InvalidArgument("Transport not available" LOC_MARK);
         }
         TransferStatus task_status;
-        CHECK_STATUS(
-            transport->getTransferStatus(sub_batch, sub_task_id, task_status));
+        CHECK_STATUS(transport->getTransferStatus(sub_batch, task.sub_task_id,
+                                                  task_status));
         if (task_status.s == COMPLETED) {
             success_tasks++;
             overall_status.transferred_bytes += task_status.transferred_bytes;
@@ -583,8 +618,7 @@ Status TransferEngine::getTransferStatus(BatchID batch_id,
             overall_status.s = task_status.s;
         }
     }
-    if (success_tasks == batch->task_id_lookup.size())
-        overall_status.s = COMPLETED;
+    if (success_tasks == batch->task_list.size()) overall_status.s = COMPLETED;
     return Status::OK();
 }
 
