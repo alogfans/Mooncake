@@ -120,7 +120,7 @@ Status IOUringTransport::freeSubBatch(SubBatchRef &batch) {
 std::string IOUringTransport::getIOUringFilePath(SegmentID target_id) {
     SegmentDesc *desc = nullptr;
     auto status = metadata_->segmentManager().getRemoteCached(desc, target_id);
-    if (!status.ok()) return "";
+    if (!status.ok() || desc->type != SegmentType::File) return "";
     auto &detail = std::get<FileSegmentDesc>(desc->detail);
     if (detail.buffers.empty()) return "";
     return detail.buffers[0].path;

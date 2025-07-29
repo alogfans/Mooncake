@@ -295,7 +295,7 @@ int RdmaTransport::onSetupRdmaConnections(const BootstrapDesc &peer_desc,
     SegmentDescRef segment_desc;
     auto status =
         metadata_->segmentManager().getRemote(segment_desc, peer_server_name);
-    if (status.ok()) {
+    if (status.ok() && segment_desc->type == SegmentType::Memory) {
         auto &detail = std::get<MemorySegmentDesc>(segment_desc->detail);
         for (auto &nic : detail.devices)
             if (nic.name == peer_nic_name)

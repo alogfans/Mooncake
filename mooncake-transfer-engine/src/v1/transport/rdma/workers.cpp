@@ -106,7 +106,7 @@ std::shared_ptr<RdmaEndPoint> Workers::getEndpoint(int thread_id,
     SegmentDesc *desc = nullptr;
     auto status = transport_->metadata_->segmentManager().getRemoteCached(
         desc, path.remote_segment_id);
-    if (!status.ok()) {
+    if (!status.ok() || desc->type != SegmentType::Memory) {
         LOG(ERROR) << "Failed to get remote segment: " << status.ToString();
         return nullptr;
     }
@@ -202,8 +202,8 @@ int Workers::doHandshake(std::shared_ptr<RdmaEndPoint> &endpoint,
     } else {
         auto &manager = transport_->metadata_->segmentManager();
         auto status = manager.getRemote(segment_desc, peer_server_name);
-        if (!status.ok()) return ERR_ENDPOINT;
-
+        if (!status.ok() || segment_desc->type != SegmentType::Memory)
+            return ERR_ENDPOINT;
         auto &detail = std::get<MemorySegmentDesc>(segment_desc->detail);
         status =
             RpcClient::bootstrap(detail.rpc_server_addr, local_desc, peer_desc);

@@ -153,32 +153,33 @@ Status TcpTransport::findRemoteSegment(uint64_t dest_addr, uint64_t length,
     SegmentDesc *desc = nullptr;
     auto status = metadata_->segmentManager().getRemoteCached(desc, target_id);
     if (!status.ok()) return status;
+    auto buffer = getBufferDesc(desc, dest_addr, length);
+    if (!buffer)
+        return Status::InvalidArgument(
+            "Requested address is not in registered buffer" LOC_MARK);
     auto &detail = std::get<MemorySegmentDesc>(desc->detail);
-    for (auto &entry : detail.buffers) {
-        if (entry.addr <= dest_addr &&
-            dest_addr + length <= entry.addr + entry.length) {
-            rpc_server_addr = detail.rpc_server_addr;
-            return Status::OK();
-        }
-    }
-    return Status::InvalidArgument(
-        "Requested address is not in registered buffer" LOC_MARK);
+    rpc_server_addr = detail.rpc_server_addr;
+    return Status::OK();
 }
 
 Status TcpTransport::sendNotification(SegmentID target_id,
-                                const Notification &message) {
+                                      const Notification &message) {
     std::string rpc_server_addr;
     SegmentDesc *desc = nullptr;
     auto status = metadata_->segmentManager().getRemoteCached(desc, target_id);
     if (!status.ok()) return status;
+    if (desc->type != SegmentType::Memory)
+        return Status::InvalidArgument("Not memory-kind segment" LOC_MARK);
     auto &detail = std::get<MemorySegmentDesc>(desc->detail);
     rpc_server_addr = detail.rpc_server_addr;
     return RpcClient::notify(rpc_server_addr, message);
 }
 
-Status TcpTransport::receiveNotification(std::vector<Notification> &notify_list) {
+Status TcpTransport::receiveNotification(
+    std::vector<Notification> &notify_list) {
     RWSpinlock::ReadGuard guard(notify_lock_);
-    notify_list = notify_list_;
+    notify_list.clear();
+    notify_list.swap(notify_list_);
     return Status::OK();
 }
 

@@ -112,7 +112,7 @@ Status MnnvlTransport::install(std::string &local_segment_name,
         conf_->get("transports/mnnvl/async_memcpy_threshold", 4) * 1024;
 
     installed_ = true;
-    return Status::OK();
+    return setPeerAccess();
 }
 
 Status MnnvlTransport::uninstall() {
@@ -300,8 +300,9 @@ Status MnnvlTransport::allocateLocalMemory(void **addr, size_t size,
     result = cuMemAddressReserve((CUdeviceptr *)&ptr, size, granularity, 0, 0);
     if (result != CUDA_SUCCESS) {
         cuMemRelease(handle);
-        return Status::InternalError(std::string("cuMemAddressReserve: cuResult ") +
-                                     std::to_string(result) + LOC_MARK);
+        return Status::InternalError(
+            std::string("cuMemAddressReserve: cuResult ") +
+            std::to_string(result) + LOC_MARK);
     }
 
     result = cuMemMap((CUdeviceptr)ptr, size, 0, handle, 0);
@@ -372,56 +373,77 @@ Status MnnvlTransport::relocateSharedMemoryAddress(uint64_t &dest_addr,
     RWSpinlock::WriteGuard guard(relocate_lock_);
     SegmentDesc *desc = nullptr;
     CHECK_STATUS(metadata_->segmentManager().getRemoteCached(desc, target_id));
-    int index = 0;
-    auto &detail = std::get<MemorySegmentDesc>(desc->detail);
-    for (auto &entry : detail.buffers) {
-        if (!entry.mnnvl_handle.empty() && entry.addr <= dest_addr &&
-            dest_addr + length <= entry.addr + entry.length) {
-            if (!relocate_map.count(entry.addr)) {
-                std::vector<unsigned char> output_buffer;
-                deserializeBinaryData(entry.mnnvl_handle, output_buffer);
-                if (output_buffer.size() != sizeof(CUmemFabricHandle)) {
-                    return Status::InternalError(
-                        "Received MNNVL handle length incorrect");
-                }
-                CUmemFabricHandle export_handle;
-                memcpy(&export_handle, output_buffer.data(),
-                       sizeof(export_handle));
-                void *mnnvl_addr = nullptr;
-                CUmemGenericAllocationHandle handle;
-                CHECK_CU(cuMemImportFromShareableHandle(
-                    &handle, &export_handle, CU_MEM_HANDLE_TYPE_FABRIC));
-                CHECK_CU(cuMemAddressReserve((CUdeviceptr *)&mnnvl_addr,
-                                             entry.length, 0, 0, 0));
-                CHECK_CU(cuMemMap((CUdeviceptr)mnnvl_addr, entry.length, 0,
-                                  handle, 0));
-                int device_count;
-                cudaGetDeviceCount(&device_count);
-                CUmemAccessDesc accessDesc[device_count];
-                for (int device_id = 0; device_id < device_count; ++device_id) {
-                    accessDesc[device_id].location.type =
-                        CU_MEM_LOCATION_TYPE_DEVICE;
-                    accessDesc[device_id].location.id = device_id;
-                    accessDesc[device_id].flags =
-                        CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
-                }
-                CHECK_CU(cuMemSetAccess((CUdeviceptr)mnnvl_addr, entry.length,
-                                        accessDesc, device_count));
-                OpenedMnnvlEntry mnnvl_entry;
-                mnnvl_entry.mnnvl_addr = mnnvl_addr;
-                mnnvl_entry.length = entry.length;
-                auto location = parseLocation(entry.location);
-                mnnvl_entry.cuda_id = location.second;
-                relocate_map[entry.addr] = mnnvl_entry;
-            }
-            auto mnnvl_addr = relocate_map[entry.addr].mnnvl_addr;
-            dest_addr = dest_addr - entry.addr + ((uint64_t)mnnvl_addr);
-            return Status::OK();
+
+    auto buffer = getBufferDesc(desc, dest_addr, length);
+    if (!buffer || buffer->mnnvl_handle.empty())
+        return Status::InvalidArgument(
+            "Requested address is not in registered buffer" LOC_MARK);
+
+    if (!relocate_map.count(buffer->addr)) {
+        std::vector<unsigned char> output_buffer;
+        deserializeBinaryData(entry->mnnvl_handle, output_buffer);
+        if (output_buffer.size() != sizeof(CUmemFabricHandle)) {
+            return Status::InternalError(
+                "Received MNNVL handle length incorrect");
         }
-        index++;
+        CUmemFabricHandle export_handle;
+        memcpy(&export_handle, output_buffer.data(), sizeof(export_handle));
+        void *mnnvl_addr = nullptr;
+        CUmemGenericAllocationHandle handle;
+        CHECK_CU(cuMemImportFromShareableHandle(&handle, &export_handle,
+                                                CU_MEM_HANDLE_TYPE_FABRIC));
+        CHECK_CU(cuMemAddressReserve((CUdeviceptr *)&mnnvl_addr, entry->length,
+                                     0, 0, 0));
+        CHECK_CU(
+            cuMemMap((CUdeviceptr)mnnvl_addr, entry->length, 0, handle, 0));
+        int device_count;
+        cudaGetDeviceCount(&device_count);
+        CUmemAccessDesc accessDesc[device_count];
+        for (int device_id = 0; device_id < device_count; ++device_id) {
+            accessDesc[device_id].location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+            accessDesc[device_id].location.id = device_id;
+            accessDesc[device_id].flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+        }
+        CHECK_CU(cuMemSetAccess((CUdeviceptr)mnnvl_addr, entry->length,
+                                accessDesc, device_count));
+        OpenedMnnvlEntry mnnvl_entry;
+        mnnvl_entry.mnnvl_addr = mnnvl_addr;
+        mnnvl_entry.length = entry->length;
+        auto location = parseLocation(entry->location);
+        mnnvl_entry.cuda_id = location.second;
+        relocate_map[buffer->addr] = mnnvl_entry;
     }
-    return Status::InvalidArgument(
-        "Requested address is not in registered buffer" LOC_MARK);
+
+    auto mnnvl_addr = relocate_map[buffer->addr].mnnvl_addr;
+    dest_addr = dest_addr - buffer->addr + ((uint64_t)mnnvl_addr);
+    return Status::OK();
+}
+
+Status MnnvlTransport::setPeerAccess() {
+    int device_count = 0;
+    CHECK_CUDA(cudaGetDeviceCount(&device_count));
+    if (device_count < 2) return Status::OK();
+    for (int i = 0; i < device_count; ++i) {
+        cudaSetDevice(i);
+        for (int j = 0; j < device_count; ++j) {
+            if (i == j) continue;
+            int can_access = 0;
+            cudaDeviceCanAccessPeer(&can_access, i, j);
+            if (!can_access) {
+                continue;
+            }
+            cudaError_t err = cudaDeviceEnablePeerAccess(j, 0);
+            if (err != cudaSuccess) {
+                if (err == cudaErrorPeerAccessAlreadyEnabled) {
+                    cudaGetLastError();
+                } else {
+                    return Status::InternalError(
+                        "cudaDeviceEnablePeerAccess failed");
+                }
+            }
+        }
+    }
+    return Status::OK();
 }
 
 }  // namespace v1

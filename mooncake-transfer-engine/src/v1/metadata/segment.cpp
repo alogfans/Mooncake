@@ -144,6 +144,7 @@ Status SegmentManager::deleteLocal() {
 
 Status LocalSegmentTracker::query(uint64_t base, size_t length,
                                   std::vector<BufferDesc *> &result) {
+    assert(local_desc_->type == SegmentType::Memory);
     auto &detail = std::get<MemorySegmentDesc>(local_desc_->detail);
     assert(length);
     for (auto &buf : detail.buffers) {
@@ -163,6 +164,7 @@ Status LocalSegmentTracker::query(uint64_t base, size_t length,
 
 Status LocalSegmentTracker::add(uint64_t base, size_t length,
                                 std::function<Status(BufferDesc &)> callback) {
+    assert(local_desc_->type == SegmentType::Memory);
     auto &detail = std::get<MemorySegmentDesc>(local_desc_->detail);
     mutex_.lock();
     for (auto &buf : detail.buffers) {
@@ -199,6 +201,7 @@ Status LocalSegmentTracker::add(uint64_t base, size_t length,
 Status LocalSegmentTracker::remove(
     uint64_t base, size_t length,
     std::function<Status(BufferDesc &)> callback) {
+    assert(local_desc_->type == SegmentType::Memory);
     auto &detail = std::get<MemorySegmentDesc>(local_desc_->detail);
     mutex_.lock();
     for (auto it = detail.buffers.begin(); it != detail.buffers.end(); ++it) {
@@ -223,6 +226,7 @@ Status LocalSegmentTracker::remove(
 Status LocalSegmentTracker::forEach(
     std::function<Status(BufferDesc &)> callback) {
     std::lock_guard<std::mutex> lock(mutex_);
+    assert(local_desc_->type == SegmentType::Memory);
     auto &detail = std::get<MemorySegmentDesc>(local_desc_->detail);
     for (auto &buf : detail.buffers) {
         auto status = callback(buf);

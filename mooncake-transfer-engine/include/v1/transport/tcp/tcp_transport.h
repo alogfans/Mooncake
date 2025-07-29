@@ -15,7 +15,6 @@
 #ifndef TCP_TRANSPORT_H_
 #define TCP_TRANSPORT_H_
 
-#include <asio.hpp>
 #include <functional>
 #include <iostream>
 #include <queue>

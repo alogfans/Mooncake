@@ -41,7 +41,8 @@ Status LocalBufferManager::addBuffer(BufferDesc &desc,
     assert(desc.rkey.empty());
     for (auto &context : context_list_) {
         if (!context) continue;
-        auto mem_reg = context->registerMemReg((void *)desc.addr, desc.length, access);
+        auto mem_reg =
+            context->registerMemReg((void *)desc.addr, desc.length, access);
         if (!mem_reg)
             return Status::RdmaError(
                 "Failed to register memory region" LOC_MARK);
@@ -168,8 +169,10 @@ const std::string LocalBufferManager::deviceName(int id) {
 }
 
 Status queryRemoteSegment(SegmentDesc *desc, const AddressRange &range,
-                          std::vector<BufferQueryResult> &result, 
+                          std::vector<BufferQueryResult> &result,
                           int retry_count) {
+    if (desc->type != SegmentType::Memory)
+        return Status::InvalidArgument("Invalid remote segment type");
     auto &detail = std::get<MemorySegmentDesc>(desc->detail);
     auto &topo = detail.topology;
     result.clear();
