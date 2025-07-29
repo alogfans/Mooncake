@@ -317,7 +317,7 @@ Status RpcClient::sendData(const std::string &server_addr,
                            uint64_t peer_mem_addr, void *local_mem_addr,
                            size_t length) {
     std::string request, response;
-    XferDataDesc desc{peer_mem_addr, length};
+    XferDataDesc desc{htole64(peer_mem_addr), htole64(length)};
     request.resize(sizeof(XferDataDesc) + length);
     memcpy(&request[0], &desc, sizeof(desc));
     genericMemcpy(&request[sizeof(desc)], local_mem_addr, length);
@@ -328,7 +328,7 @@ Status RpcClient::recvData(const std::string &server_addr,
                            uint64_t peer_mem_addr, void *local_mem_addr,
                            size_t length) {
     std::string request, response;
-    XferDataDesc desc{peer_mem_addr, length};
+    XferDataDesc desc{htole64(peer_mem_addr), htole64(length)};
     request.resize(sizeof(XferDataDesc) + length);
     memcpy(&request[0], &desc, sizeof(desc));
     auto status = tl_rpc_agent.call(server_addr, RecvData, request, response);
@@ -407,16 +407,24 @@ void MetadataService::onBootstrapRdma(const std::string_view &request,
 void MetadataService::onSendData(const std::string_view &request,
                                  std::string &response) {
     XferDataDesc *desc = (XferDataDesc *)request.data();
-    // TODO check validity before copying
-    genericMemcpy((void *)desc->peer_mem_addr, &desc[1], desc->length);
+    auto local_desc = manager_->getLocal().get();
+    auto peer_mem_addr = le64toh(desc->peer_mem_addr);
+    auto length = le64toh(desc->length);
+    if (getBufferDesc(local_desc, peer_mem_addr, length)) {
+        genericMemcpy((void *)peer_mem_addr, &desc[1], length);
+    }
 }
 
 void MetadataService::onRecvData(const std::string_view &request,
                                  std::string &response) {
     XferDataDesc *desc = (XferDataDesc *)request.data();
-    // TODO check validity before copying
-    response.resize(desc->length);
-    genericMemcpy(response.data(), (void *)desc->peer_mem_addr, desc->length);
+    auto local_desc = manager_->getLocal().get();
+    auto peer_mem_addr = le64toh(desc->peer_mem_addr);
+    auto length = le64toh(desc->length);
+    response.resize(length);
+    if (getBufferDesc(local_desc, peer_mem_addr, length)) {
+        genericMemcpy(response.data(), (void *)peer_mem_addr, length);
+    }
 }
 
 void MetadataService::onNotify(const std::string_view &request,

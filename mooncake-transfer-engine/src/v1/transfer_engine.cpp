@@ -428,18 +428,6 @@ Status TransferEngine::lazyFreeBatch() {
     return Status::OK();
 }
 
-BufferDesc *getBufferDesc(SegmentDesc *remote_desc, const Request &request) {
-    auto &detail = std::get<MemorySegmentDesc>(remote_desc->detail);
-    for (auto &entry : detail.buffers) {
-        if (entry.addr <= request.target_offset &&
-            request.target_offset + request.length <=
-                entry.addr + entry.length) {
-            return &entry;
-        }
-    }
-    return nullptr;
-}
-
 TransportType TransferEngine::getTransportType(const Request &request) {
     SegmentDesc *remote_desc;
     auto status = metadata_->segmentManager().getRemoteCached(
@@ -450,7 +438,8 @@ TransportType TransferEngine::getTransportType(const Request &request) {
         if (transport_list_[IOURING]) return IOURING;
         return UNSPEC;
     } else {
-        auto entry = getBufferDesc(remote_desc, request);
+        auto entry =
+            getBufferDesc(remote_desc, request.target_offset, request.length);
         if (!entry) return UNSPEC;
         if (!entry->mnnvl_handle.empty() && transport_list_[MNNVL])
             return MNNVL;
@@ -471,6 +460,14 @@ TransportType TransferEngine::getTransportType(const Request &request) {
     return UNSPEC;
 }
 
+std::string printRequest(const Request &request) {
+    std::stringstream ss;
+    ss << "opcode " << request.opcode << " source " << request.source
+       << " target_id " << request.target_id << " target_offset "
+       << request.target_offset << " length " << request.length;
+    return ss.str();
+}
+
 Status TransferEngine::submitTransfer(
     BatchID batch_id, const std::vector<Request> &request_list) {
     if (!batch_id) return Status::InvalidArgument("Invalid batch ID" LOC_MARK);
@@ -485,6 +482,8 @@ Status TransferEngine::submitTransfer(
             transport_type = getTransportType(request);
         }
         if (transport_type == UNSPEC) {
+            LOG(WARNING) << "Unable to find registered buffer for request: "
+                         << printRequest(request);
             batch->task_list.emplace_back(
                 TaskInfo{transport_type, -1, request});
         } else {
@@ -506,15 +505,17 @@ Status TransferEngine::submitTransfer(
             auto status =
                 transport->allocateSubBatch(sub_batch, batch->max_size);
             if (!status.ok()) {
+                LOG(WARNING) << status.ToString();
                 for (auto &task_id : classified_task_id[type])
                     batch->task_list[task_id].type = UNSPEC;
+                continue;
             }
         }
-
-        if (!sub_batch) continue;
+        assert(sub_batch);
         auto status = transport->submitTransferTasks(
             sub_batch, classified_request_list[type]);
         if (!status.ok()) {
+            LOG(WARNING) << status.ToString();
             for (auto &task_id : classified_task_id[type])
                 batch->task_list[task_id].type = UNSPEC;
         }

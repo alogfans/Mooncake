@@ -28,7 +28,7 @@
 namespace mooncake {
 namespace v1 {
 SegmentManager::SegmentManager(std::unique_ptr<MetadataStore> agent)
-    : next_id_(1), store_(std::move(agent)) {
+    : next_id_(1), version_(0), store_(std::move(agent)) {
     local_desc_ = std::make_shared<SegmentDesc>();
 }
 
@@ -45,6 +45,7 @@ Status SegmentManager::openRemote(SegmentID &handle,
         id_to_name_map_[handle] = segment_name;
     }
     LOG(INFO) << "Opened segment #" << handle << ": " << segment_name;
+    version_.fetch_add(1, std::memory_order_relaxed);
     return Status::OK();
 }
 
@@ -55,15 +56,19 @@ Status SegmentManager::closeRemote(SegmentID handle) {
     auto segment_name = id_to_name_map_[handle];
     name_to_id_map_.erase(segment_name);
     id_to_name_map_.erase(handle);
+    version_.fetch_add(1, std::memory_order_relaxed);
     return Status::OK();
 }
 
 Status SegmentManager::getRemoteCached(SegmentDesc *&desc, SegmentID handle) {
     auto &cache = tl_remote_cache_.get();
     auto current_ts = getCurrentTimeInNano();
-    if (current_ts - cache.last_refresh > ttl_ms_ * 1000000) {
+    auto current_version = version_.load(std::memory_order_relaxed);
+    if (current_ts - cache.last_refresh > ttl_ms_ * 1000000 ||
+        cache.version != current_version) {
         cache.id_to_desc_map.clear();
         cache.last_refresh = current_ts;
+        cache.version = current_version;
     }
     if (!cache.id_to_desc_map.count(handle)) {
         SegmentDescRef desc_ref;
@@ -159,12 +164,15 @@ Status LocalSegmentTracker::query(uint64_t base, size_t length,
 Status LocalSegmentTracker::add(uint64_t base, size_t length,
                                 std::function<Status(BufferDesc &)> callback) {
     auto &detail = std::get<MemorySegmentDesc>(local_desc_->detail);
+    mutex_.lock();
     for (auto &buf : detail.buffers) {
         if (buf.addr == base && buf.length == length) {
             buf.ref_count++;
+            mutex_.unlock();
             return Status::OK();
         }
     }
+    mutex_.unlock();
     BufferDesc new_desc;
     new_desc.addr = base;
     new_desc.length = length;
@@ -176,6 +184,7 @@ Status LocalSegmentTracker::add(uint64_t base, size_t length,
     new_desc.ref_count = 1;
     auto status = callback(new_desc);
     if (!status.ok()) return status;
+    mutex_.lock();
     detail.buffers.push_back(new_desc);
     std::sort(detail.buffers.begin(), detail.buffers.end(),
               [](const BufferDesc &lhs, BufferDesc &rhs) -> bool {
@@ -183,6 +192,7 @@ Status LocalSegmentTracker::add(uint64_t base, size_t length,
                   if (lhs.addr > rhs.addr) return false;
                   return lhs.length > rhs.length;  // prefer large interval
               });
+    mutex_.unlock();
     return Status::OK();
 }
 
@@ -190,22 +200,29 @@ Status LocalSegmentTracker::remove(
     uint64_t base, size_t length,
     std::function<Status(BufferDesc &)> callback) {
     auto &detail = std::get<MemorySegmentDesc>(local_desc_->detail);
+    mutex_.lock();
     for (auto it = detail.buffers.begin(); it != detail.buffers.end(); ++it) {
         if (it->addr == base && (!length || it->length == length)) {
             it->ref_count--;
             Status status = Status::OK();
             if (it->ref_count == 0) {
-                status = callback(*it);
+                BufferDesc clone = *it;
                 detail.buffers.erase(it);
+                mutex_.unlock();
+                status = callback(clone);
+            } else {
+                mutex_.unlock();
             }
             return status;
         }
     }
+    mutex_.unlock();
     return Status::OK();
 }
 
 Status LocalSegmentTracker::forEach(
     std::function<Status(BufferDesc &)> callback) {
+    std::lock_guard<std::mutex> lock(mutex_);
     auto &detail = std::get<MemorySegmentDesc>(local_desc_->detail);
     for (auto &buf : detail.buffers) {
         auto status = callback(buf);

@@ -122,6 +122,7 @@ class SegmentManager {
    private:
     struct RemoteSegmentCache {
         uint64_t last_refresh = 0;
+        uint64_t version = 0;
         std::unordered_map<SegmentID, SegmentDescRef> id_to_desc_map;
     };
 
@@ -130,6 +131,8 @@ class SegmentManager {
     std::unordered_map<SegmentID, std::string> id_to_name_map_;
     std::unordered_map<std::string, SegmentID> name_to_id_map_;
     std::atomic<SegmentID> next_id_;
+
+    std::atomic<uint64_t> version_;
 
     SegmentDescRef local_desc_;
     ThreadLocalStorage<RemoteSegmentCache> tl_remote_cache_;
@@ -164,7 +167,20 @@ class LocalSegmentTracker {
 
    private:
     SegmentDescRef local_desc_;
+    std::mutex mutex_;
 };
+
+static inline BufferDesc *getBufferDesc(SegmentDesc *desc, uint64_t base,
+                                        uint64_t length) {
+    if (desc->type != SegmentType::Memory) return nullptr;
+    auto &detail = std::get<MemorySegmentDesc>(desc->detail);
+    for (auto &entry : detail.buffers) {
+        if (entry.addr <= base && base + length <= entry.addr + entry.length) {
+            return &entry;
+        }
+    }
+    return nullptr;
+}
 
 }  // namespace v1
 }  // namespace mooncake
