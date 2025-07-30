@@ -130,6 +130,29 @@ Status LocalBufferManager::clear() {
     return Status::OK();
 }
 
+Status LocalBufferManager::query(const BufferDesc *desc,
+                                 BufferQueryResult &result, int retry_count) {
+    AddressRange range((void *)desc->addr, desc->length);
+    if (!buffer_list_.count(range))
+        return Status::AddressNotRegistered(
+            "No matched buffer in given address range" LOC_MARK);
+    const auto &buffer = buffer_list_[range];
+    int device_id;
+    auto status = topology_->selectDevice(device_id, buffer.options.location,
+                                          retry_count);
+    if (!status.ok())
+        status =
+            topology_->selectDevice(device_id, kWildcardLocation, retry_count);
+    if (!status.ok()) return status;
+    auto context = context_list_[device_id];
+    assert(context);
+    auto mem_reg_id = buffer.mem_reg_map.at(context);
+    auto keys = context->queryMemRegKey(mem_reg_id);
+    result = BufferQueryResult{range.addr, range.length, keys.first,
+                               keys.second, device_id};
+    return Status::OK();
+}
+
 Status LocalBufferManager::query(const AddressRange &range,
                                  std::vector<BufferQueryResult> &result,
                                  int retry_count) {
@@ -153,7 +176,7 @@ Status LocalBufferManager::query(const AddressRange &range,
         auto mem_reg_id = buffer.second.mem_reg_map.at(context);
         auto keys = context->queryMemRegKey(mem_reg_id);
         result.push_back(BufferQueryResult{intersect.addr, intersect.length,
-                                           keys.first, device_id});
+                                           keys.first, keys.second, device_id});
     }
     if (result.empty()) {
         return Status::AddressNotRegistered(
@@ -186,7 +209,7 @@ Status queryRemoteSegment(SegmentDesc *desc, const AddressRange &range,
             status =
                 topo.selectDevice(device_id, kWildcardLocation, retry_count);
         if (!status.ok()) return status;
-        result.push_back(BufferQueryResult{intersect.addr, intersect.length,
+        result.push_back(BufferQueryResult{intersect.addr, intersect.length, 0,
                                            entry.rkey[device_id], device_id});
     }
     if (result.empty()) {

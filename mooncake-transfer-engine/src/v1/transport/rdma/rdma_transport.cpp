@@ -24,12 +24,12 @@
 #include <set>
 
 #include "v1/common/status.h"
+#include "v1/memory/location.h"
 #include "v1/transport/rdma/buffers.h"
 #include "v1/transport/rdma/endpoint_store.h"
 #include "v1/transport/rdma/workers.h"
-#include "v1/memory/location.h"
-#include "v1/utility/topology.h"
 #include "v1/utility/string_builder.h"
+#include "v1/utility/topology.h"
 
 #define SET_DEVICE(key, param) \
     param = conf->get("transports/rdma/device/" #key, param)
@@ -193,6 +193,7 @@ Status RdmaTransport::submitTransferTasks(
         rdma_batch->max_size)
         return Status::TooManyRequests("Exceed batch capacity" LOC_MARK);
     const size_t block_size = params_->workers.block_size;
+    const uint64_t max_slices = local_topology_->getHcaList().size();
     RdmaSliceList slice_list;
     RdmaSlice *slice_tail = nullptr;
     for (auto &request : request_list) {
@@ -202,6 +203,35 @@ Status RdmaTransport::submitTransferTasks(
         task.num_slices = 0;
         task.status_word = WAITING;
         task.transferred_bytes = 0;
+#ifndef LEGACY_SLICE_ALGORITHM
+        uint64_t total_blocks = (request.length + block_size - 1) / block_size;
+        uint64_t num_slices = std::min(max_slices, total_blocks);
+        uint64_t blocks_per_slice =
+            (total_blocks + num_slices - 1) / num_slices;
+        uint64_t slice_bytes = blocks_per_slice * block_size;
+        for (uint64_t slice_idx = 0; slice_idx < num_slices; ++slice_idx) {
+            uint64_t offset = slice_idx * slice_bytes;
+            if (offset >= request.length) break;
+            uint64_t remaining = request.length - offset;
+            auto slice = RdmaSliceStorage::Get().allocate();
+            slice->source_addr = (char *)request.source + offset;
+            slice->target_addr = request.target_offset + offset;
+            slice->length = std::min(slice_bytes, remaining);
+            slice->task = &task;
+            slice->retry_count = 0;
+            slice->endpoint_quota = nullptr;
+            slice->next = nullptr;
+            task.num_slices++;
+            slice_list.num_slices++;
+            if (slice_list.first) {
+                assert(slice_tail);
+                slice_tail->next = slice;
+                slice_tail = slice;
+            } else {
+                slice_list.first = slice_tail = slice;
+            }
+        }
+#else
         for (uint64_t offset = 0; offset < request.length;
              offset += block_size) {
             auto slice = RdmaSliceStorage::Get().allocate();
@@ -222,6 +252,7 @@ Status RdmaTransport::submitTransferTasks(
                 slice_list.first = slice_tail = slice;
             }
         }
+#endif
     }
     rdma_batch->slice_chain.push_back(slice_list.first);
     workers_->submit(slice_list);
@@ -301,10 +332,9 @@ int RdmaTransport::onSetupRdmaConnections(const BootstrapDesc &peer_desc,
             if (nic.name == peer_nic_name)
                 return endpoint->configurePeer(
                     nic.gid, nic.lid, peer_desc.qp_num, &local_desc.reply_msg);
-    } else {
-        LOG(INFO) << status.ToString();
     }
-    local_desc.reply_msg = "Unable to find RDMA device " + peer_nic_path_;
+    local_desc.reply_msg = "Unable to find RDMA device " + peer_nic_path_ +
+                           ": " + status.ToString();
     return ERR_ENDPOINT;
 }
 

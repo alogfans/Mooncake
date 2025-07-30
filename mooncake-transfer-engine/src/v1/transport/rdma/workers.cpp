@@ -347,6 +347,44 @@ void Workers::monitorThread() {
 
 Status Workers::generatePostPath(int thread_id, RdmaSlice *slice) {
     auto target_id = slice->task->request.target_id;
+#ifndef LEGACY_PATH_SELECTION
+    auto &segment_manager = transport_->metadata_->segmentManager();
+
+    auto local_segment_desc = segment_manager.getLocal().get();
+    auto local_buffer_desc = getBufferDesc(
+        local_segment_desc, (uint64_t)slice->source_addr, slice->length);
+    if (!local_buffer_desc) {
+        return Status::AddressNotRegistered(
+            "No matched buffer in given address range" LOC_MARK);
+    }
+    AddressRange range((void *)local_buffer_desc->addr,
+                       local_buffer_desc->length);
+    BufferQueryResult local;
+    CHECK_STATUS(transport_->local_buffer_manager_.query(
+        local_buffer_desc, local, slice->retry_count));
+    slice->source_lkey = local.lkey;
+    slice->source_dev_id = local.device_id;
+    if (target_id == LOCAL_SEGMENT_ID) {
+        slice->target_dev_id = local.device_id;
+        slice->target_rkey = local.rkey;
+        return Status::OK();
+    }
+
+    SegmentDesc *target_segment_desc = nullptr;
+    CHECK_STATUS(
+        segment_manager.getRemoteCached(target_segment_desc, target_id));
+    auto target_buffer_desc = getBufferDesc(
+        target_segment_desc, (uint64_t)slice->target_addr, slice->length);
+    if (!target_buffer_desc) {
+        return Status::AddressNotRegistered(
+            "No matched buffer in given address range" LOC_MARK);
+    }
+
+    // TODO Enable same name verification
+    slice->target_dev_id = local.device_id % target_buffer_desc->rkey.size();
+    slice->target_rkey = target_buffer_desc->rkey[slice->target_dev_id];
+    return Status::OK();
+#else
     std::vector<BufferQueryResult> local, remote;
     auto status = transport_->local_buffer_manager_.query(
         AddressRange{slice->source_addr, slice->length}, local,
@@ -368,11 +406,12 @@ Status Workers::generatePostPath(int thread_id, RdmaSlice *slice) {
         if (!status.ok()) return status;
     }
     assert(local.size() == 1 && remote.size() == 1);
-    slice->source_lkey = local[0].key;
-    slice->target_rkey = remote[0].key;
+    slice->source_lkey = local[0].lkey;
+    slice->target_rkey = remote[0].rkey;
     slice->source_dev_id = local[0].device_id;
     slice->target_dev_id = remote[0].device_id;
     return Status::OK();
+#endif
 }
 }  // namespace v1
 }  // namespace mooncake

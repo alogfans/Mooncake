@@ -73,7 +73,8 @@ struct AddressRange {
 struct BufferQueryResult {
     void *addr;
     size_t length;
-    uint32_t key;
+    uint32_t lkey;
+    uint32_t rkey;
     int device_id;
 };
 
@@ -98,6 +99,9 @@ class LocalBufferManager {
 
     Status clear();
 
+    Status query(const BufferDesc *desc, BufferQueryResult &result,
+                 int retry_count = 0);
+
     Status query(const AddressRange &range,
                  std::vector<BufferQueryResult> &result, int retry_count = 0);
 
@@ -117,7 +121,7 @@ class LocalBufferManager {
 };
 
 Status queryRemoteSegment(SegmentDesc *desc, const AddressRange &range,
-                          std::vector<BufferQueryResult> &result, 
+                          std::vector<BufferQueryResult> &result,
                           int retry_count = 0);
 
 }  // namespace v1
