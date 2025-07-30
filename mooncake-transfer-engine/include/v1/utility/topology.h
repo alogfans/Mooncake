@@ -27,29 +27,25 @@
 #include <thread>
 #include <unordered_map>
 
-#include "v1/common/status.h"
 #include "v1/common/config.h"
+#include "v1/common/status.h"
 
 namespace mooncake {
 namespace v1 {
+const static size_t DevicePriorityRanks = 3;
+
 struct TopologyEntry {
     std::string name;
-    std::vector<std::string> preferred_hca;
-    std::vector<std::string> avail_hca;
+    std::vector<std::string> device_list[DevicePriorityRanks];
 
     Json::Value toJson() const {
-        Json::Value matrix(Json::arrayValue);
-        Json::Value hca_list(Json::arrayValue);
-        for (auto &hca : preferred_hca) {
-            hca_list.append(hca);
+        Json::Value jmatrix(Json::arrayValue);
+        for (size_t rank = 0; rank < DevicePriorityRanks; ++rank) {
+            Json::Value jlist(Json::arrayValue);
+            for (auto &device : device_list[rank]) jlist.append(device);
+            jmatrix.append(jlist);
         }
-        matrix.append(hca_list);
-        hca_list.clear();
-        for (auto &hca : avail_hca) {
-            hca_list.append(hca);
-        }
-        matrix.append(hca_list);
-        return matrix;
+        return jmatrix;
     }
 };
 
@@ -81,19 +77,21 @@ class Topology {
 
     TopologyMatrix getMatrix() const { return matrix_; }
 
-    const std::vector<std::string> &getHcaList() const { return hca_list_; }
+    const std::vector<std::string> &getDeviceList() const {
+        return rdma_device_list_;
+    }
 
    private:
     Status resolve();
 
    private:
     TopologyMatrix matrix_;
-    std::vector<std::string> hca_list_;
+    std::vector<std::string> rdma_device_list_;
 
     struct ResolvedTopologyEntry {
-        std::vector<int> preferred_hca;
-        std::vector<int> avail_hca;
+        std::vector<int> device_list[DevicePriorityRanks];
     };
+
     std::unordered_map<std::string /* storage type */, ResolvedTopologyEntry>
         resolved_matrix_;
 };

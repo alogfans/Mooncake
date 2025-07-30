@@ -76,7 +76,7 @@ Status LocalBufferManager::addDevice(RdmaContext *context) {
     assert(topology_ && context);
     int index = 0;
     bool found = false;
-    for (auto &device : topology_->getHcaList()) {
+    for (auto &device : topology_->getDeviceList()) {
         if (device == context->name()) {
             if (context_list_[index])
                 return Status::InvalidArgument(

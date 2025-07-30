@@ -86,7 +86,7 @@ class LocalBufferManager {
 
     void setTopology(std::shared_ptr<Topology> &topology) {
         topology_ = topology;
-        context_list_.resize(topology->getHcaList().size(), nullptr);
+        context_list_.resize(topology->getRdmaDeviceList().size(), nullptr);
     }
 
     Status addBuffer(BufferDesc &desc, const MemoryOptions &options);

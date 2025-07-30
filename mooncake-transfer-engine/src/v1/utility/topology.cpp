@@ -114,7 +114,7 @@ static void filterInfiniBandDevices(std::vector<InfinibandDevice> &devices,
 }
 
 static std::vector<TopologyEntry> discoverCpuTopology(
-    const std::vector<InfinibandDevice> &all_hca) {
+    const std::vector<InfinibandDevice> &all_devices) {
     DIR *dir = opendir("/sys/devices/system/node");
     struct dirent *entry;
     std::vector<TopologyEntry> topology;
@@ -131,23 +131,31 @@ static std::vector<TopologyEntry> discoverCpuTopology(
             continue;
         }
         int node_id = atoi(entry->d_name + strlen(prefix));
-        std::vector<std::string> preferred_hca;
-        std::vector<std::string> avail_hca;
+
+        TopologyEntry entry;
+        entry.name = "cpu:" + std::to_string(node_id);
         // an HCA connected to the same cpu NUMA node is preferred
-        for (const auto &hca : all_hca) {
-            if (hca.numa_node == node_id) {
-                preferred_hca.push_back(hca.name);
+        for (const auto &device : all_devices) {
+            if (device.numa_node == node_id) {
+                entry.device_list[0].push_back(device.name);
             } else {
-                avail_hca.push_back(hca.name);
+                entry.device_list[2].push_back(device.name);
             }
         }
-        topology.push_back(
-            TopologyEntry{.name = "cpu:" + std::to_string(node_id),
-                          .preferred_hca = std::move(preferred_hca),
-                          .avail_hca = std::move(avail_hca)});
+        topology.push_back(std::move(entry));
     }
     (void)closedir(dir);
     return topology;
+}
+
+static int getNumaNodeFromPciDevice(const std::string &pci_bdf) {
+    std::string sysfs_path = "/sys/bus/pci/devices/" + pci_bdf + "/numa_node";
+    std::ifstream numa_file(sysfs_path);
+    if (!numa_file.is_open()) return -1;
+    int numa_node = -1;
+    numa_file >> numa_node;
+    if (numa_file.fail()) return -1;
+    return numa_node;
 }
 
 #ifdef USE_CUDA
@@ -183,7 +191,7 @@ static int getPciDistance(const char *bus1, const char *bus2) {
 }
 
 static std::vector<TopologyEntry> discoverCudaTopology(
-    const std::vector<InfinibandDevice> &all_hca) {
+    const std::vector<InfinibandDevice> &all_devices) {
     std::vector<TopologyEntry> topology;
     int device_count;
     auto err = cudaGetDeviceCount(&device_count);
@@ -200,38 +208,37 @@ static std::vector<TopologyEntry> discoverCudaTopology(
             continue;
         }
         for (char *ch = pci_bus_id; (*ch = tolower(*ch)); ch++);
-
-        std::vector<std::string> preferred_hca;
-        std::vector<std::string> avail_hca;
-
+        int numa_node = getNumaNodeFromPciDevice(pci_bus_id);
+        std::vector<std::string> nearest, same_socket, inter_socket;
         int min_distance = INT_MAX;
         std::unordered_map<int, std::vector<std::string>> distance_map;
-        for (const auto &hca : all_hca) {
-            int dist = getPciDistance(hca.pci_bus_id.c_str(), pci_bus_id);
-            distance_map[dist].push_back(hca.name);
+        for (const auto &device : all_devices) {
+            int dist = getPciDistance(device.pci_bus_id.c_str(), pci_bus_id);
+            distance_map[dist].push_back(device.name);
             min_distance = std::min(min_distance, dist);
         }
 
+        TopologyEntry entry;
+        entry.name = "cuda:" + std::to_string(i);
         if (distance_map.count(0)) {
             // Prefer NICs with distance 0 (e.g. same PCIe switch/RC)
-            preferred_hca = std::move(distance_map[0]);
+            entry.device_list[0] = std::move(distance_map[0]);
         } else if (distance_map.count(min_distance)) {
             // No exact match — fall back to NICs with closest PCIe distance
-            preferred_hca = std::move(distance_map[min_distance]);
+            entry.device_list[0] = std::move(distance_map[min_distance]);
         }
 
-        // Fill avail_hca with remaining NICs not in preferred_hca
-        std::unordered_set<std::string> preferred_set(preferred_hca.begin(),
-                                                      preferred_hca.end());
-        for (const auto &hca : all_hca) {
-            if (!preferred_set.count(hca.name)) {
-                avail_hca.push_back(hca.name);
-            }
+        std::unordered_set<std::string> preferred_set(preferred_device.begin(),
+                                                      preferred_device.end());
+        for (const auto &device : all_devices) {
+            if (preferred_set.count(device.name)) continue;
+            if (numa_node >= 0 && device.numa_id == numa_node)
+                entry.device_list[1].push_back(device.name);
+            else
+                entry.device_list[2].push_back(device.name);
         }
-        topology.push_back(
-            TopologyEntry{.name = "cuda:" + std::to_string(i),
-                          .preferred_hca = std::move(preferred_hca),
-                          .avail_hca = std::move(avail_hca)});
+
+        topology.push_back(std::move(entry));
     }
     return topology;
 }
@@ -246,19 +253,19 @@ bool Topology::empty() const { return matrix_.empty(); }
 
 void Topology::clear() {
     matrix_.clear();
-    hca_list_.clear();
+    rdma_device_list_.clear();
     resolved_matrix_.clear();
 }
 
 Status Topology::discover(std::shared_ptr<ConfigManager> conf) {
     matrix_.clear();
-    auto all_hca = listInfiniBandDevices();
-    if (conf) filterInfiniBandDevices(all_hca, conf);
-    for (auto &ent : discoverCpuTopology(all_hca)) {
+    auto all_device = listInfiniBandDevices();
+    if (conf) filterInfiniBandDevices(all_device, conf);
+    for (auto &ent : discoverCpuTopology(all_device)) {
         matrix_[ent.name] = ent;
     }
 #ifdef USE_CUDA
-    for (auto &ent : discoverCudaTopology(all_hca)) {
+    for (auto &ent : discoverCudaTopology(all_device)) {
         matrix_[ent.name] = ent;
     }
 #endif
@@ -278,16 +285,13 @@ Status Topology::parse(const std::string &topology_json) {
     matrix_.clear();
     for (const auto &key : root.getMemberNames()) {
         const Json::Value &value = root[key];
-        if (value.isArray() && value.size() == 2) {
+        if (value.isArray()) {
             TopologyEntry topo_entry;
             topo_entry.name = key;
-            for (const auto &array : value[0]) {
-                auto device_name = array.asString();
-                topo_entry.preferred_hca.push_back(device_name);
-            }
-            for (const auto &array : value[1]) {
-                auto device_name = array.asString();
-                topo_entry.avail_hca.push_back(device_name);
+            for (size_t rank = 0; rank < DevicePriorityRanks; ++rank) {
+                for (const auto &array : value[(int)rank]) {
+                    topo_entry.device_list[rank].push_back(array.asString());
+                }
             }
             matrix_[key] = topo_entry;
         } else {
@@ -322,53 +326,47 @@ Status Topology::selectDevice(int &device_id, const std::string storage_type,
     }
     auto &entry = resolved_matrix_[storage_type];
     if (retry_count == 0) {
-        if (!entry.preferred_hca.empty())
-            device_id = entry.preferred_hca[SimpleRandom::Get().next(
-                entry.preferred_hca.size())];
-        else
-            device_id = entry.avail_hca[SimpleRandom::Get().next(
-                entry.avail_hca.size())];
+        for (size_t rank = 0; rank < DevicePriorityRanks; ++rank) {
+            auto &list = entry.device_list[rank];
+            if (list.empty()) continue;
+            device_id = list[SimpleRandom::Get().next(list.size())];
+            return Status::OK();
+        }
     } else {
-        size_t index = (retry_count - 1) %
-                       (entry.preferred_hca.size() + entry.avail_hca.size());
-        if (index < entry.preferred_hca.size())
-            device_id = entry.preferred_hca[index];
-        else {
-            index -= entry.preferred_hca.size();
-            device_id = entry.avail_hca[index];
+        for (size_t rank = 0; rank < DevicePriorityRanks; ++rank) {
+            auto &list = entry.device_list[rank];
+            if (list.empty()) continue;
+            if (retry_count >= list.size())
+                retry_count -= list.size();
+            else {
+                device_id = list[retry_count];
+                return Status::OK();
+            }
         }
     }
+    device_id = 0;
     return Status::OK();
 }
 
 Status Topology::resolve() {
     resolved_matrix_.clear();
-    hca_list_.clear();
-    std::map<std::string, int> hca_id_map;
-    int next_hca_map_index = 0;
+    rdma_device_list_.clear();
+    std::map<std::string, int> device_id_map;
+    int next_device_map_index = 0;
     for (auto &entry : matrix_) {
-        for (auto &hca : entry.second.preferred_hca) {
-            if (!hca_id_map.count(hca)) {
-                hca_list_.push_back(hca);
-                hca_id_map[hca] = next_hca_map_index;
-                next_hca_map_index++;
-
-                resolved_matrix_[kWildcardLocation].preferred_hca.push_back(
-                    hca_id_map[hca]);
+        for (size_t rank = 0; rank < DevicePriorityRanks; ++rank) {
+            for (auto &device : entry.second.device_list[rank]) {
+                if (!device_id_map.count(device)) {
+                    rdma_device_list_.push_back(device);
+                    device_id_map[device] = next_device_map_index;
+                    next_device_map_index++;
+                    resolved_matrix_[kWildcardLocation]
+                        .device_list[rank]
+                        .push_back(device_id_map[device]);
+                }
+                resolved_matrix_[entry.first].device_list[rank].push_back(
+                    device_id_map[device]);
             }
-            resolved_matrix_[entry.first].preferred_hca.push_back(
-                hca_id_map[hca]);
-        }
-        for (auto &hca : entry.second.avail_hca) {
-            if (!hca_id_map.count(hca)) {
-                hca_list_.push_back(hca);
-                hca_id_map[hca] = next_hca_map_index;
-                next_hca_map_index++;
-
-                resolved_matrix_[kWildcardLocation].preferred_hca.push_back(
-                    hca_id_map[hca]);
-            }
-            resolved_matrix_[entry.first].avail_hca.push_back(hca_id_map[hca]);
         }
     }
     return Status::OK();
@@ -376,15 +374,12 @@ Status Topology::resolve() {
 
 Status Topology::disableDevice(const std::string &device_name) {
     for (auto &record : matrix_) {
-        auto &preferred_hca = record.second.preferred_hca;
-        auto preferred_hca_iter =
-            std::find(preferred_hca.begin(), preferred_hca.end(), device_name);
-        if (preferred_hca_iter != preferred_hca.end())
-            preferred_hca.erase(preferred_hca_iter);
-        auto &avail_hca = record.second.avail_hca;
-        auto avail_hca_iter =
-            std::find(avail_hca.begin(), avail_hca.end(), device_name);
-        if (avail_hca_iter != avail_hca.end()) avail_hca.erase(avail_hca_iter);
+        for (size_t rank = 0; rank < DevicePriorityRanks; ++rank) {
+            auto &device_list = record.second.device_list[rank];
+            auto iter =
+                std::find(device_list.begin(), device_list.end(), device_name);
+            if (iter != device_list.end()) device_list.erase(iter);
+        }
     }
     return resolve();
 }
