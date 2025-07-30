@@ -381,7 +381,7 @@ Status MnnvlTransport::relocateSharedMemoryAddress(uint64_t &dest_addr,
 
     if (!relocate_map.count(buffer->addr)) {
         std::vector<unsigned char> output_buffer;
-        deserializeBinaryData(entry->mnnvl_handle, output_buffer);
+        deserializeBinaryData(buffer->mnnvl_handle, output_buffer);
         if (output_buffer.size() != sizeof(CUmemFabricHandle)) {
             return Status::InternalError(
                 "Received MNNVL handle length incorrect");
@@ -392,10 +392,10 @@ Status MnnvlTransport::relocateSharedMemoryAddress(uint64_t &dest_addr,
         CUmemGenericAllocationHandle handle;
         CHECK_CU(cuMemImportFromShareableHandle(&handle, &export_handle,
                                                 CU_MEM_HANDLE_TYPE_FABRIC));
-        CHECK_CU(cuMemAddressReserve((CUdeviceptr *)&mnnvl_addr, entry->length,
+        CHECK_CU(cuMemAddressReserve((CUdeviceptr *)&mnnvl_addr, buffer->length,
                                      0, 0, 0));
         CHECK_CU(
-            cuMemMap((CUdeviceptr)mnnvl_addr, entry->length, 0, handle, 0));
+            cuMemMap((CUdeviceptr)mnnvl_addr, buffer->length, 0, handle, 0));
         int device_count;
         cudaGetDeviceCount(&device_count);
         CUmemAccessDesc accessDesc[device_count];
@@ -404,12 +404,12 @@ Status MnnvlTransport::relocateSharedMemoryAddress(uint64_t &dest_addr,
             accessDesc[device_id].location.id = device_id;
             accessDesc[device_id].flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
         }
-        CHECK_CU(cuMemSetAccess((CUdeviceptr)mnnvl_addr, entry->length,
+        CHECK_CU(cuMemSetAccess((CUdeviceptr)mnnvl_addr, buffer->length,
                                 accessDesc, device_count));
         OpenedMnnvlEntry mnnvl_entry;
         mnnvl_entry.mnnvl_addr = mnnvl_addr;
-        mnnvl_entry.length = entry->length;
-        auto location = parseLocation(entry->location);
+        mnnvl_entry.length = buffer->length;
+        auto location = parseLocation(buffer->location);
         mnnvl_entry.cuda_id = location.second;
         relocate_map[buffer->addr] = mnnvl_entry;
     }
