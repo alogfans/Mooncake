@@ -47,7 +47,9 @@ Status LocalBufferManager::addBuffer(BufferDesc &desc,
             return Status::RdmaError(
                 "Failed to register memory region" LOC_MARK);
         item.mem_reg_map[context] = mem_reg;
-        desc.rkey.push_back(context->queryMemRegKey(mem_reg).second);
+        auto keys = context->queryMemRegKey(mem_reg);
+        desc.lkey.push_back(keys.first);
+        desc.rkey.push_back(keys.second);
     }
     item.options = options;
     auto &location = item.options.location;
@@ -127,29 +129,6 @@ Status LocalBufferManager::clear() {
     }
     buffer_list_.clear();
     context_list_.clear();
-    return Status::OK();
-}
-
-Status LocalBufferManager::query(const BufferDesc *desc,
-                                 BufferQueryResult &result, int retry_count) {
-    AddressRange range((void *)desc->addr, desc->length);
-    if (!buffer_list_.count(range))
-        return Status::AddressNotRegistered(
-            "No matched buffer in given address range" LOC_MARK);
-    const auto &buffer = buffer_list_[range];
-    int device_id;
-    auto status = topology_->selectDevice(device_id, buffer.options.location,
-                                          retry_count);
-    if (!status.ok())
-        status =
-            topology_->selectDevice(device_id, kWildcardLocation, retry_count);
-    if (!status.ok()) return status;
-    auto context = context_list_[device_id];
-    assert(context);
-    auto mem_reg_id = buffer.mem_reg_map.at(context);
-    auto keys = context->queryMemRegKey(mem_reg_id);
-    result = BufferQueryResult{range.addr, range.length, keys.first,
-                               keys.second, device_id};
     return Status::OK();
 }
 

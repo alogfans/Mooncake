@@ -130,13 +130,14 @@ static std::vector<TopologyEntry> discoverCpuTopology(
             strncmp(entry->d_name, prefix, strlen(prefix)) != 0) {
             continue;
         }
-        int node_id = atoi(entry->d_name + strlen(prefix));
+        int numa_node = atoi(entry->d_name + strlen(prefix));
 
         TopologyEntry entry;
-        entry.name = "cpu:" + std::to_string(node_id);
+        entry.name = "cpu:" + std::to_string(numa_node);
+        entry.numa_node = numa_node;
         // an HCA connected to the same cpu NUMA node is preferred
         for (const auto &device : all_devices) {
-            if (device.numa_node == node_id) {
+            if (device.numa_node == numa_node) {
                 entry.device_list[0].push_back(device.name);
             } else {
                 entry.device_list[2].push_back(device.name);
@@ -220,6 +221,7 @@ static std::vector<TopologyEntry> discoverCudaTopology(
 
         TopologyEntry entry;
         entry.name = "cuda:" + std::to_string(i);
+        entry.numa_node = numa_node;
         if (distance_map.count(0)) {
             // Prefer NICs with distance 0 (e.g. same PCIe switch/RC)
             entry.device_list[0] = std::move(distance_map[0]);
@@ -228,11 +230,11 @@ static std::vector<TopologyEntry> discoverCudaTopology(
             entry.device_list[0] = std::move(distance_map[min_distance]);
         }
 
-        std::unordered_set<std::string> preferred_set(preferred_device.begin(),
-                                                      preferred_device.end());
+        std::unordered_set<std::string> preferred_set(
+            entry.device_list[0].begin(), entry.device_list[0].end());
         for (const auto &device : all_devices) {
             if (preferred_set.count(device.name)) continue;
-            if (numa_node >= 0 && device.numa_id == numa_node)
+            if (numa_node >= 0 && device.numa_node == numa_node)
                 entry.device_list[1].push_back(device.name);
             else
                 entry.device_list[2].push_back(device.name);
@@ -285,19 +287,39 @@ Status Topology::parse(const std::string &topology_json) {
     matrix_.clear();
     for (const auto &key : root.getMemberNames()) {
         const Json::Value &value = root[key];
+        TopologyEntry topo_entry;
+        topo_entry.name = key;
+
         if (value.isArray()) {
-            TopologyEntry topo_entry;
-            topo_entry.name = key;
+            // Old format (just arrays of devices)
             for (size_t rank = 0; rank < DevicePriorityRanks; ++rank) {
                 for (const auto &array : value[(int)rank]) {
                     topo_entry.device_list[rank].push_back(array.asString());
                 }
             }
-            matrix_[key] = topo_entry;
+        } else if (value.isObject() && value.isMember("devices")) {
+            // New format with numa_node
+            if (value.isMember("numa_node") && value["numa_node"].isInt()) {
+                topo_entry.numa_node = value["numa_node"].asInt();
+            }
+
+            const Json::Value &device_array = value["devices"];
+            if (!device_array.isArray()) {
+                return Status::MalformedJson(
+                    "Expected 'devices' to be an array" LOC_MARK);
+            }
+
+            for (size_t rank = 0; rank < DevicePriorityRanks; ++rank) {
+                for (const auto &array : device_array[(int)rank]) {
+                    topo_entry.device_list[rank].push_back(array.asString());
+                }
+            }
         } else {
             return Status::MalformedJson(
                 "Unrecognized format of topology json" LOC_MARK);
         }
+
+        matrix_[key] = topo_entry;
     }
 
     return resolve();
@@ -318,8 +340,8 @@ Json::Value Topology::toJson() const {
     return root;
 }
 
-Status Topology::selectDevice(int &device_id, const std::string storage_type,
-                              int retry_count) {
+Status Topology::selectDevice(int &device_id, const std::string &storage_type,
+                              int retry_count, int &rand_seed) {
     if (resolved_matrix_.count(storage_type) == 0) {
         auto msg = "No device found in storage type " + storage_type + LOC_MARK;
         return Status::DeviceNotFound(msg);
@@ -329,14 +351,16 @@ Status Topology::selectDevice(int &device_id, const std::string storage_type,
         for (size_t rank = 0; rank < DevicePriorityRanks; ++rank) {
             auto &list = entry.device_list[rank];
             if (list.empty()) continue;
-            device_id = list[SimpleRandom::Get().next(list.size())];
+            if (rand_seed < 0)
+                rand_seed = SimpleRandom::Get().next(32);
+            device_id = list[rand_seed % list.size()];
             return Status::OK();
         }
-    } 
+    }
     for (size_t rank = 0; rank < DevicePriorityRanks; ++rank) {
         auto &list = entry.device_list[rank];
         if (list.empty()) continue;
-        if (retry_count >= list.size())
+        if (retry_count >= (int)list.size())
             retry_count -= list.size();
         else {
             device_id = list[retry_count];

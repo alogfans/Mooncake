@@ -100,7 +100,7 @@ Status RdmaTransport::install(std::string &local_segment_name,
             "RDMA transport has been installed" LOC_MARK);
     }
 
-    if (local_topology == nullptr || local_topology->getRdmaDeviceList().empty()) {
+    if (local_topology == nullptr || local_topology->getDeviceList().empty()) {
         return Status::DeviceNotFound(
             "No RDMA device found in topology" LOC_MARK);
     }
@@ -114,7 +114,7 @@ Status RdmaTransport::install(std::string &local_segment_name,
     local_buffer_manager_.setTopology(local_topology);
     auto endpoint_store = std::make_shared<SIEVEEndpointStore>(
         params_->endpoint.endpoint_store_cap);
-    auto hca_list = local_topology_->getRdmaDeviceList();
+    auto hca_list = local_topology_->getDeviceList();
     for (auto &device_name : hca_list) {
         auto context = std::make_shared<RdmaContext>();
         int ret = context->construct(device_name, endpoint_store, params_);
@@ -193,7 +193,7 @@ Status RdmaTransport::submitTransferTasks(
         rdma_batch->max_size)
         return Status::TooManyRequests("Exceed batch capacity" LOC_MARK);
     const size_t block_size = params_->workers.block_size;
-    const uint64_t max_slices = local_topology_->getRdmaDeviceList().size();
+    const uint64_t max_slices = local_topology_->getDeviceList().size();
     RdmaSliceList slice_list;
     RdmaSlice *slice_tail = nullptr;
     for (auto &request : request_list) {

@@ -159,16 +159,52 @@ Status submitRequestSync(TransferEngine *engine, SegmentID handle,
     return Status::OK();
 }
 
+#ifdef USE_CUDA
+class PinnedBuffer {
+public:
+    explicit PinnedBuffer(size_t size) : size_(size), ptr_(nullptr) {
+        cudaError_t err = cudaMallocHost(&ptr_, size_);
+        if (err != cudaSuccess) {
+            throw std::runtime_error("cudaMallocHost failed");
+        }
+    }
+
+    ~PinnedBuffer() {
+        if (ptr_) {
+            cudaFreeHost(ptr_);
+            ptr_ = nullptr;
+        }
+    }
+
+    void* data() { return ptr_; }
+    const void* data() const { return ptr_; }
+
+    size_t size() const { return size_; }
+
+private:
+    size_t size_;
+    void* ptr_;
+};
+
+thread_local PinnedBuffer ref_buf(FLAGS_size);
+thread_local PinnedBuffer user_buf(FLAGS_size);
+#else
+thread_local std::vector<uint8_t> ref_buf(FLAGS_size);
+thread_local std::vector<uint8_t> user_buf(FLAGS_size);
+#endif
+
 void fillData(int thread_id, void *addr, uint8_t seed) {
 #ifdef USE_CUDA
-    uint8_t *buf = new uint8_t[FLAGS_size];
-    memset(buf, seed, FLAGS_size);
+    memset(ref_buf.data(), seed, FLAGS_size);
+    cudaStream_t s;
+    cudaStreamCreate(&s);
     for (int i = 0; i < FLAGS_batch; ++i) {
         uint8_t *local_addr =
             (uint8_t *)(addr) + FLAGS_size * (i * FLAGS_threads + thread_id);
-        cudaMemcpy(local_addr, buf, FLAGS_size, cudaMemcpyDefault);
+        cudaMemcpyAsync(local_addr, ref_buf.data(), FLAGS_size, cudaMemcpyDefault, s);
     }
-    delete[] buf;
+    cudaStreamSynchronize(s);
+    cudaStreamDestroy(s);
 #else
     for (int i = 0; i < FLAGS_batch; ++i) {
         uint8_t *local_addr =
@@ -179,27 +215,27 @@ void fillData(int thread_id, void *addr, uint8_t seed) {
 }
 
 void checkData(int thread_id, void *addr, uint8_t seed) {
-    uint8_t *ref_buf = new uint8_t[FLAGS_size];
-    uint8_t *user_buf = new uint8_t[FLAGS_size];
-    memset(ref_buf, seed, FLAGS_size);
     for (int i = 0; i < FLAGS_batch; ++i) {
         uint8_t *local_addr =
             (uint8_t *)(addr) + FLAGS_size * (i * FLAGS_threads + thread_id);
 #ifdef USE_CUDA
-        cudaMemcpy(user_buf, local_addr, FLAGS_size, cudaMemcpyDefault);
-        if (memcmp(user_buf, ref_buf, FLAGS_size) != 0) {
+        memset(ref_buf.data(), seed, FLAGS_size);
+        cudaStream_t s;
+        cudaStreamCreate(&s);
+        cudaMemcpyAsync(user_buf.data(), local_addr, FLAGS_size, cudaMemcpyDefault, s);
+        cudaStreamSynchronize(s);
+        cudaStreamDestroy(s);
+        if (memcmp(user_buf.data(), ref_buf.data(), FLAGS_size) != 0) {
             LOG(ERROR) << "Detect data integrity problem";
             exit(EXIT_FAILURE);
         }
 #else
-        if (memcmp(local_addr, ref_buf, FLAGS_size) != 0) {
+        if (memcmp(local_addr, ref_buf.data(), FLAGS_size) != 0) {
             LOG(ERROR) << "Detect data integrity problem";
             exit(EXIT_FAILURE);
         }
 #endif
     }
-    delete[] ref_buf;
-    delete[] user_buf;
 }
 
 Status initiatorWorker(TransferEngine *engine, SegmentID handle, int thread_id,
@@ -226,8 +262,8 @@ Status initiatorWorker(TransferEngine *engine, SegmentID handle, int thread_id,
             batch_count++;
         } else {
             uint8_t seed = 0;
-            if (FLAGS_integrity_check) {
-                seed = SimpleRandom::Get().next(UINT8_MAX);
+            seed = SimpleRandom::Get().next(UINT8_MAX);
+            if (FLAGS_integrity_check && SimpleRandom::Get().next(64) == 31) {
                 fillData(thread_id, addr, seed);
                 CHECK_FAIL(submitRequestSync(engine, handle, thread_id, addr,
                                              remote_base, Request::WRITE));

@@ -357,22 +357,24 @@ Status Workers::generatePostPath(int thread_id, RdmaSlice *slice) {
         return Status::AddressNotRegistered(
             "No matched buffer in given address range" LOC_MARK);
     }
-    AddressRange range((void *)local_buffer_desc->addr,
-                       local_buffer_desc->length);
-    BufferQueryResult local;
-    CHECK_STATUS(transport_->local_buffer_manager_.query(
-        local_buffer_desc, local, slice->retry_count));
-    slice->source_lkey = local.lkey;
-    slice->source_dev_id = local.device_id;
+
+    int device_id;
+    int rand_seed = -1;
+    CHECK_STATUS(transport_->local_topology_->selectDevice(
+        device_id, local_buffer_desc->location, slice->retry_count, rand_seed));
+    slice->source_dev_id = device_id;
+    slice->source_lkey = local_buffer_desc->lkey[device_id];
     if (target_id == LOCAL_SEGMENT_ID) {
-        slice->target_dev_id = local.device_id;
-        slice->target_rkey = local.rkey;
+        slice->target_dev_id = device_id;
+        slice->target_rkey = local_buffer_desc->rkey[device_id];
         return Status::OK();
     }
 
     SegmentDesc *target_segment_desc = nullptr;
     CHECK_STATUS(
         segment_manager.getRemoteCached(target_segment_desc, target_id));
+    auto &target_topology =
+        std::get<MemorySegmentDesc>(target_segment_desc->detail).topology;
     auto target_buffer_desc = getBufferDesc(
         target_segment_desc, (uint64_t)slice->target_addr, slice->length);
     if (!target_buffer_desc) {
@@ -380,8 +382,9 @@ Status Workers::generatePostPath(int thread_id, RdmaSlice *slice) {
             "No matched buffer in given address range" LOC_MARK);
     }
 
-    // TODO Enable same name verification
-    slice->target_dev_id = local.device_id % target_buffer_desc->rkey.size();
+    CHECK_STATUS(target_topology.selectDevice(
+        device_id, target_buffer_desc->location, slice->retry_count, rand_seed));
+    slice->target_dev_id = device_id;
     slice->target_rkey = target_buffer_desc->rkey[slice->target_dev_id];
     return Status::OK();
 #else

@@ -36,16 +36,20 @@ const static size_t DevicePriorityRanks = 3;
 
 struct TopologyEntry {
     std::string name;
+    int numa_node = 0;
     std::vector<std::string> device_list[DevicePriorityRanks];
 
     Json::Value toJson() const {
-        Json::Value jmatrix(Json::arrayValue);
+        Json::Value jout;
+        Json::Value jdevice(Json::arrayValue);
         for (size_t rank = 0; rank < DevicePriorityRanks; ++rank) {
             Json::Value jlist(Json::arrayValue);
             for (auto &device : device_list[rank]) jlist.append(device);
-            jmatrix.append(jlist);
+            jdevice.append(jlist);
         }
-        return jmatrix;
+        jout["numa_node"] = numa_node;
+        jout["devices"] = jdevice;
+        return jout;
     }
 };
 
@@ -72,10 +76,16 @@ class Topology {
 
     Json::Value toJson() const;
 
-    Status selectDevice(int &device_id, const std::string storage_type,
-                        int retry_count = 0);
+    Status selectDevice(int &device_id, const std::string &storage_type,
+                        int retry_count = 0) {
+        int rand_seed = -1;
+        return selectDevice(device_id, storage_type, retry_count, rand_seed);
+    }
 
-    TopologyMatrix getMatrix() const { return matrix_; }
+    Status selectDevice(int &device_id, const std::string &storage_type,
+                        int retry_count, int &rand_seed);
+
+    const TopologyMatrix &getMatrix() const { return matrix_; }
 
     const std::vector<std::string> &getDeviceList() const {
         return rdma_device_list_;
@@ -89,6 +99,7 @@ class Topology {
     std::vector<std::string> rdma_device_list_;
 
     struct ResolvedTopologyEntry {
+        int numa_node;
         std::vector<int> device_list[DevicePriorityRanks];
     };
 

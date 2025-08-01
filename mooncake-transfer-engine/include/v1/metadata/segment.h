@@ -54,6 +54,7 @@ struct BufferDesc {
     std::string mnnvl_handle;
 
     int ref_count;
+    std::vector<uint32_t> lkey;  // not uploaded, available in local only
 };
 
 struct FileBufferDesc {

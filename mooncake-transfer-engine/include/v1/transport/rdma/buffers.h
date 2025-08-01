@@ -86,7 +86,7 @@ class LocalBufferManager {
 
     void setTopology(std::shared_ptr<Topology> &topology) {
         topology_ = topology;
-        context_list_.resize(topology->getRdmaDeviceList().size(), nullptr);
+        context_list_.resize(topology->getDeviceList().size(), nullptr);
     }
 
     Status addBuffer(BufferDesc &desc, const MemoryOptions &options);
@@ -98,9 +98,6 @@ class LocalBufferManager {
     Status removeDevice(RdmaContext *context, bool do_unreg = true);
 
     Status clear();
-
-    Status query(const BufferDesc *desc, BufferQueryResult &result,
-                 int retry_count = 0);
 
     Status query(const AddressRange &range,
                  std::vector<BufferQueryResult> &result, int retry_count = 0);
