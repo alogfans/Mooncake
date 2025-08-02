@@ -17,6 +17,8 @@
 
 #include <list>
 #include <mutex>
+#include <array>
+#include <cstdlib>
 
 namespace mooncake {
 namespace v1 {

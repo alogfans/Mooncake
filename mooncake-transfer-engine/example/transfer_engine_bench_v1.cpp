@@ -37,6 +37,7 @@ DEFINE_string(local_segment, "",
 DEFINE_string(remote_segment, "", "Set the remote segment name (required)");
 DEFINE_bool(integrity_check, false, "Check data integrity if workload is mix");
 DEFINE_bool(shmfs, false, "Enable shmfs");
+DEFINE_bool(mnnvl, false, "Enable multi-node NVLink");
 
 DEFINE_int32(batch, 16, "Number of requests per batch");
 DEFINE_uint64(size, 65536, "Block size for each request");
@@ -297,6 +298,7 @@ void allocateAllLocalMemory(const std::unique_ptr<TransferEngine> &engine,
             int cuda_id = i;
             if (FLAGS_use_dram) cuda_id -= num_sockets;
             options.location = "cuda:" + std::to_string(cuda_id);
+            if (FLAGS_use_mnnvl) options.type = MNNVL;
         }
 #else
         options.location = "cpu:" + std::to_string(i);

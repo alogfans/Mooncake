@@ -333,7 +333,7 @@ Status MnnvlTransport::allocateLocalMemory(void **addr, size_t size,
 
     *addr = ptr;
     std::lock_guard<std::mutex> lock(allocate_mutex_);
-    allocate_set_.insert(addr);
+    allocate_set_.insert(*addr);
     return Status::OK();
 }
 

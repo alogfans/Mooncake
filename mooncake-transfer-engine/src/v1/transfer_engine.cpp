@@ -317,6 +317,7 @@ Status TransferEngine::allocateLocalMemory(void **addr, size_t size,
 
 Status TransferEngine::allocateLocalMemory(void **addr, size_t size,
                                            MemoryOptions &options) {
+    if (!transport_list_[options.type]) options.type = TCP;
     auto &transport = transport_list_[options.type];
     if (!transport)
         return Status::InvalidArgument(
@@ -348,8 +349,8 @@ Status TransferEngine::registerLocalMemory(void *addr, size_t size,
                                            Permission permission) {
     MemoryOptions options;
     {
-        // If the buffer is allocated by allocateLocalMemory, reuse the memory
-        // option with permission override (if needed)
+        // If the buffer is allocated by allocateLocalMemory, reuse the
+        // memory option with permission override (if needed)
         std::lock_guard<std::mutex> lock(mutex_);
         for (auto it = allocated_memory_.begin(); it != allocated_memory_.end();
              ++it) {
