@@ -298,7 +298,7 @@ void allocateAllLocalMemory(const std::unique_ptr<TransferEngine> &engine,
             int cuda_id = i;
             if (FLAGS_use_dram) cuda_id -= num_sockets;
             options.location = "cuda:" + std::to_string(cuda_id);
-            if (FLAGS_use_mnnvl) options.type = MNNVL;
+            if (FLAGS_mnnvl) options.type = MNNVL;
         }
 #else
         options.location = "cpu:" + std::to_string(i);
