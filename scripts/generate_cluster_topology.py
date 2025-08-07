@@ -5,9 +5,14 @@ import argparse
 import paramiko
 from tqdm import tqdm
 from itertools import product
+from collections import defaultdict, Counter
+import numpy as np
+from scipy.optimize import linear_sum_assignment
 
+
+# -------------------- Section 1: SSH + RDMA Testing --------------------
 def parse_args():
-    parser = argparse.ArgumentParser(description="RDMA connectivity test between two hosts.")
+    parser = argparse.ArgumentParser(description="Transfer Engine Cluster Topology Generator")
     parser.add_argument("--src-host", required=True, help="Source hostname")
     parser.add_argument("--dst-host", required=True, help="Destination hostname")
     parser.add_argument("--src-port", type=int, default=22, help="SSH port for source host")
@@ -81,7 +86,6 @@ def run_rdmatest(src, dst, dev1, dev2, use_sudo):
     cmd_prefix_src = numactl_prefix(dev1["numa_node"]) + prefix
     cmd_prefix_dst = numactl_prefix(dev2["numa_node"]) + prefix
 
-    # Start ib_write_bw server
     ssh_exec(dst["host"], dst["port"],
              f"{prefix}pkill ib_write_bw; {cmd_prefix_dst}nohup ib_write_bw --ib-dev={dev2['name']} > /tmp/bw_server.log 2>&1 &")
     time.sleep(0.5)
@@ -92,7 +96,6 @@ def run_rdmatest(src, dst, dev1, dev2, use_sudo):
     if bw_val is None:
         return None
 
-    # Start ib_read_lat server
     ssh_exec(dst["host"], dst["port"],
              f"{prefix}pkill ib_read_lat; {cmd_prefix_dst}nohup ib_read_lat --ib-dev={dev2['name']} > /tmp/lat_server.log 2>&1 &")
     time.sleep(0.5)
@@ -123,6 +126,84 @@ def save_results(filepath, results):
         json.dump(results, f, indent=2)
 
 
+# -------------------- Section 2: Partition Matching --------------------
+def build_partition_map(endpoints):
+    partition_map = defaultdict(list)
+    for ep in endpoints:
+        if not np.isfinite(ep.get("latency", float('inf'))):
+            continue
+        key = f"{ep['src_numa']}-{ep['dst_numa']}"
+        partition_map[key].append(ep)
+    return partition_map
+
+
+def solve_partition_group(pairs, allow_partial=False):
+    src_devs = sorted(set(ep['src_dev'] for ep in pairs))
+    dst_devs = sorted(set(ep['dst_dev'] for ep in pairs))
+
+    N_src = len(src_devs)
+    N_dst = len(dst_devs)
+    N = max(N_src, N_dst)
+
+    idx_src = {dev: i for i, dev in enumerate(src_devs)}
+    idx_dst = {dev: i for i, dev in enumerate(dst_devs)}
+
+    cost = np.full((N, N), 1e9)
+    valid = np.zeros((N, N), dtype=bool)
+    latency_map = {}
+
+    for ep in pairs:
+        i = idx_src[ep['src_dev']]
+        j = idx_dst[ep['dst_dev']]
+        cost[i, j] = ep['latency']
+        valid[i, j] = True
+        latency_map[(i, j)] = ep
+
+    finite_costs = cost[np.isfinite(cost)]
+    if len(finite_costs) == 0:
+        return []
+
+    min_cost = np.min(finite_costs)
+    max_cost = np.max(finite_costs)
+    norm = (cost - min_cost) / (max_cost - min_cost + 1e-6)
+
+    row_ind, col_ind = linear_sum_assignment(norm)
+
+    matched = []
+    used_src = Counter()
+    used_dst = Counter()
+    for i, j in zip(row_ind, col_ind):
+        if i < N_src and j < N_dst and valid[i, j]:
+            matched.append(latency_map[(i, j)])
+            used_src[src_devs[i]] += 1
+            used_dst[dst_devs[j]] += 1
+        elif not allow_partial:
+            return []
+
+    return matched
+
+
+def process_host_pair(record):
+    endpoints = record.get("endpoints", [])
+    partition_map = build_partition_map(endpoints)
+    result = {}
+
+    for part_key, part_eps in partition_map.items():
+        optimal = solve_partition_group(part_eps)
+        if optimal:
+            result[part_key] = optimal
+
+        used_src = set(ep['src_dev'] for ep in optimal)
+        used_dst = set(ep['dst_dev'] for ep in optimal)
+        extras = [ep for ep in part_eps if ep['src_dev'] not in used_src and ep['dst_dev'] not in used_dst]
+        extra_opt = solve_partition_group(extras, allow_partial=True)
+        if extra_opt:
+            result[part_key + "_extra"] = extra_opt
+
+    record['partition_matchings'] = result
+
+
+# -------------------- Main Orchestration --------------------
 def main():
     args = parse_args()
 
@@ -169,8 +250,11 @@ def main():
     else:
         all_results.append(new_entry)
 
+    for record in all_results:
+        process_host_pair(record)
+
     save_results(result_file, all_results)
-    print(f"\nResults written to {result_file}")
+    print(f"\nRDMA test results written to {result_file}")
 
 
 if __name__ == "__main__":

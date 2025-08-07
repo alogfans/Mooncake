@@ -23,8 +23,6 @@
 #include "v1/common/status.h"
 
 struct Endpoint {
-    std::string src_dev;
-    std::string dst_dev;
     int src_numa;
     int dst_numa;
     double bandwidth;
