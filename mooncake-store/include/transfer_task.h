@@ -13,9 +13,9 @@
 #include <thread>
 #include <vector>
 
-#ifndef MOONCAKE_USE_V1
-#define MOONCAKE_USE_V1
-#endif
+// #ifndef MOONCAKE_USE_V1
+// #define MOONCAKE_USE_V1
+// #endif
 
 #ifdef MOONCAKE_USE_V1
 #include "v1/transfer_engine.h"

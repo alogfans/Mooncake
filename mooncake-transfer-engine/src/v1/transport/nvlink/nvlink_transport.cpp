@@ -54,7 +54,7 @@ Status NVLinkTransport::install(std::string &local_segment_name,
     machine_id_ = metadata->segmentManager().getLocal()->machine_id;
     installed_ = true;
     async_memcpy_threshold_ =
-        conf_->get("transports/nvlink/async_memcpy_threshold", 0) * 1024;
+        conf_->get("transports/nvlink/async_memcpy_threshold", 1024) * 1024;
     host_register_ =
         conf_->get("transports/nvlink/host_register", false);
     caps.dram_to_gpu = true;

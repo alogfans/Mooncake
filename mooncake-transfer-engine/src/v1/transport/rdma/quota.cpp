@@ -52,6 +52,14 @@ struct TlsDeviceInfo {
 
 thread_local std::unordered_map<int, TlsDeviceInfo> tl_device_info;
 
+Status DeviceQuota::assign(int dev_id, uint64_t length) {
+    tl_device_info[dev_id].active_bytes += length;
+    if (local_weight_ < 1 - 1e-6)
+        devices_[dev_id].active_bytes.fetch_add(length,
+                                                std::memory_order_relaxed);
+    return Status::OK();
+}
+
 Status DeviceQuota::allocate(uint64_t length, const std::string& location,
                              int& chosen_dev_id) {
     auto entry = local_topology_->getMemEntry(location);
@@ -126,6 +134,39 @@ Status DeviceQuota::allocate(uint64_t length, const std::string& location,
 }
 
 Status DeviceQuota::release(int dev_id, uint64_t length, double latency) {
+#ifdef RAIL_LATENCY
+    {
+        thread_local double total_latency[16] = {0.0};
+        thread_local int count[16] = {0};
+        count[dev_id]++;
+        total_latency[dev_id] += latency;
+        static thread_local double last_print_time = 0.0;
+        double now = getCurrentTimeInNano();
+        if (now - last_print_time >= 1000000000) {
+            last_print_time = now;
+            int total_slices = 0;
+            for (int i = 0; i < 16; i++) total_slices += count[i];
+            if (total_slices > 0) {
+                std::ostringstream oss;
+                for (int i = 0; i < 16; i++) {
+                    if (count[i] == 0) continue;
+
+                    double avg_lat = total_latency[i] / count[i];
+                    double usage = 100.0 * count[i] / total_slices;
+
+                    oss << "NIC" << i
+                        << " avg=" << avg_lat << "ms"
+                        << " usage=" << usage << "%; ";
+                }
+                LOG(INFO) << oss.str();
+            }
+            for (int i = 0; i < 16; i++) {
+                total_latency[i] = 0.0;
+                count[i] = 0;
+            }
+        }
+    }
+#endif
     if (!enable_quota_) return Status::OK();
     auto it = devices_.find(dev_id);
     if (it == devices_.end())
@@ -138,7 +179,7 @@ Status DeviceQuota::release(int dev_id, uint64_t length, double latency) {
         dev.active_bytes.fetch_sub(length, std::memory_order_relaxed);
     tl_dev.active_bytes -= length;
 
-    if (!update_quota_params_) return Status::OK();
+    if (!update_quota_params_ || latency < 0) return Status::OK();
 
     double bw = dev.bw_gbps * 1e9 / 8;
     double theory_time = static_cast<double>(length) / bw;
@@ -156,7 +197,7 @@ Status DeviceQuota::release(int dev_id, uint64_t length, double latency) {
 
     double adapt_alpha = alpha_;
     if (std::abs(err) > 0.05 * pred_time)
-        adapt_alpha = std::min(1.0, alpha_ * 5.0);
+        adapt_alpha = std::min(1.0, alpha_ * std::abs(err) / pred_time * 100);
 
     double delta0 = adapt_alpha * err;
     double delta1 = adapt_alpha * rel_err;

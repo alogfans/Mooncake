@@ -27,6 +27,8 @@
 #include "v1/common/status.h"
 #include "v1/runtime/topology.h"
 
+// #define FAULT_INJECT
+
 namespace mooncake {
 namespace v1 {
 
@@ -78,10 +80,12 @@ class DeviceQuota {
 
     Status enableSharedQuota(const std::string &shm_name);
 
+    Status assign(int dev_id, uint64_t length);
+
     Status allocate(uint64_t length, const std::string &location,
                     int &chosen_dev_id);
 
-    Status release(int dev_id, uint64_t length, double latency);
+    Status release(int dev_id, uint64_t length, double latency = -1.0);
 
     void setDiffusionActiveBytes(int dev_id, uint64_t value) {
         devices_[dev_id].diffusion_active_bytes.store(
@@ -113,7 +117,11 @@ class DeviceQuota {
     double local_weight_ = 0.9;
     uint64_t diffusion_interval_ = 10 * 1000000ull;
     std::shared_ptr<SharedQuotaManager> shared_quota_;
+#ifdef FAULT_INJECT
+    bool enable_quota_ = false;
+#else
     bool enable_quota_ = true;
+#endif
     bool update_quota_params_ = true;
 };
 

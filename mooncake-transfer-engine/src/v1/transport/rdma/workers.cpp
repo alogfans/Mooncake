@@ -186,7 +186,8 @@ void Workers::disableEndpoint(RdmaSlice *slice) {
         auto &rail = worker.rails[desc->machine_id];
         rail.markFailed(slice->source_dev_id, slice->target_dev_id);
     }
-    if (slice->ep_weak_ptr) slice->ep_weak_ptr->reset();
+    // TODO problem need to fix
+    // if (slice->ep_weak_ptr) slice->ep_weak_ptr->reset();
 }
 
 void Workers::asyncPostSend() {
@@ -291,11 +292,18 @@ void Workers::asyncPollCq() {
                 (slice->submit_ts - slice->enqueue_ts) / 1000.0;
             double inflight_lat = (poll_ts - slice->submit_ts) / 1000.0;
             double overall_lat_sec = (poll_ts - slice->enqueue_ts) / 1e9;
-            if (slice->retry_count == 0) {
-                device_quota_->release(slice->source_dev_id, slice->length,
-                                       overall_lat_sec);
-            }
+            device_quota_->release(slice->source_dev_id, slice->length,
+                                   overall_lat_sec);
             if (slice->word != PENDING) continue;
+#ifdef FAULT_INJECT
+            auto fault_dev_str = getenv("RDMA_FAULT_DEVICE");
+            int fault_dev = fault_dev_str ? atoi(fault_dev_str) : -1;
+            if (fault_dev != -1 && slice->source_dev_id == fault_dev) {
+                LOG(INFO) << "Injecting failure for slice " << slice
+                          << " on device " << fault_dev;
+                wc[i].status = IBV_WC_GENERAL_ERR;
+            }
+#endif
             if (wc[i].status != IBV_WC_SUCCESS) {
                 if (wc[i].status != IBV_WC_WR_FLUSH_ERR) {
                     // TE handles them automatically
@@ -303,6 +311,7 @@ void Workers::asyncPollCq() {
                               << " (opcode: " << slice->task->request.opcode
                               << ", source_addr: " << (void *)slice->source_addr
                               << ", dest_addr: " << (void *)slice->target_addr
+                              << ", target_id: " << slice->task->request.target_id
                               << ", length: " << slice->length
                               << ", local_nic: " << context->name()
                               << "): " << ibv_wc_status_str(wc[i].status);
@@ -494,6 +503,10 @@ Status Workers::selectOptimalDevice(RouteHint &source, RouteHint &target,
     if (slice->target_dev_id < 0) {
         int mapped_dev_id = rail.findBestRemoteDevice(
             slice->source_dev_id, target.topo_entry->numa_node);
+        if (mapped_dev_id < 0 || !rail.available(slice->source_dev_id, mapped_dev_id)) {
+            device_quota_->release(slice->source_dev_id, slice->length);
+            return selectFallbackDevice(source, target, slice);
+        }
         for (size_t rank = 0; rank < Topology::DevicePriorityRanks - 1; ++rank) {
             if (rank && always_tier1_) break;
             const auto &list = target.topo_entry->device_list[rank];
@@ -513,23 +526,6 @@ Status Workers::selectOptimalDevice(RouteHint &source, RouteHint &target,
             break;
         }
     }
-    /*
-    if (slice->target_dev_id < 0) {
-        int mapped_dev_id = rail.findBestRemoteDevice(
-            slice->source_dev_id, target.topo_entry->numa_node);
-        for (size_t rank = 0; rank < Topology::DevicePriorityRanks; ++rank) {
-            auto &list = target.topo_entry->device_list[rank];
-            if (list.empty()) continue;
-            auto it = std::find(list.begin(), list.end(), mapped_dev_id);
-            if (it != list.end()) {
-                slice->target_dev_id = mapped_dev_id;
-                break;
-            }
-            slice->target_dev_id = list[SimpleRandom::Get().next(list.size())];
-            break;
-        }
-    }
-    */
 
     if (slice->target_dev_id < 0)
         return Status::DeviceNotFound(
@@ -550,48 +546,100 @@ int Workers::getDeviceByFlatIndex(const RouteHint &hint, size_t flat_idx) {
     return -1;
 }
 
-Status Workers::selectFallbackDevice(RouteHint &source, RouteHint &target,
+Status Workers::selectFallbackDevice(RouteHint &source, RouteHint &target, 
                                      RdmaSlice *slice) {
     bool same_machine =
         (source.segment->machine_id == target.segment->machine_id);
 
-    size_t src_total = 0;
-    for (size_t srank = 0; srank < Topology::DevicePriorityRanks; ++srank)
-        src_total += source.topo_entry->device_list[srank].size();
+    const auto &src_lists = source.topo_entry->device_list;
+    const auto &dst_lists = target.topo_entry->device_list;
 
-    size_t dst_total = 0;
-    for (size_t trank = 0; trank < Topology::DevicePriorityRanks; ++trank)
-        dst_total += target.topo_entry->device_list[trank].size();
+    size_t total_combos = 0;
+    for (size_t srank = 0; srank < Topology::DevicePriorityRanks; ++srank) {
+        for (size_t trank = 0; trank < Topology::DevicePriorityRanks; ++trank) {
+            total_combos += src_lists[srank].size() * dst_lists[trank].size();
+        }
+    }
 
-    size_t total_combos = src_total * dst_total;
-    if ((size_t)slice->retry_count >= total_combos)
+    if ((size_t)slice->retry_count >= total_combos) {
         return Status::DeviceNotFound("No available path" LOC_MARK);
+    }
 
-    size_t idx = slice->retry_count;
-    while (idx < total_combos) {
-        size_t src_idx = idx / dst_total;
-        size_t dst_idx = idx % dst_total;
-        int sdev = getDeviceByFlatIndex(source, src_idx);
-        int tdev = getDeviceByFlatIndex(target, dst_idx);
-        bool reachable = true;
-
-        if (same_machine) {
-            reachable = (sdev == tdev);  // loopback is safe
-        } else {
-            auto &worker = worker_context_[tl_wid];
-            auto &rail = worker.rails[target.segment->machine_id];
-            reachable = rail.available(sdev, tdev);
+    for (size_t cost = 0; cost < Topology::DevicePriorityRanks; ++cost) {
+        size_t count_this_cost = 0;
+        for (size_t srank = 0; srank < Topology::DevicePriorityRanks; ++srank) {
+            for (size_t trank = 0; trank < Topology::DevicePriorityRanks; ++trank) {
+                if (std::max(srank, trank) != cost) continue;
+                count_this_cost +=
+                    src_lists[srank].size() * dst_lists[trank].size();
+            }
+        }
+        if (count_this_cost == 0) {
+            continue;
         }
 
-        if (reachable) {
+        size_t start = static_cast<size_t>(slice->retry_count) % count_this_cost;
+
+        for (size_t step = 0; step < count_this_cost; ++step) {
+            size_t idx_in_cost = (start + step) % count_this_cost;
+
+            size_t offset = idx_in_cost;
+            int chosen_srank = -1, chosen_trank = -1;
+            size_t si = 0, ti = 0;
+
+            bool found_block = false;
+            for (size_t srank = 0; srank < Topology::DevicePriorityRanks && !found_block; ++srank) {
+                for (size_t trank = 0; trank < Topology::DevicePriorityRanks && !found_block; ++trank) {
+                    if (std::max(srank, trank) != cost) continue;
+
+                    const auto &src_vec = src_lists[srank];
+                    const auto &dst_vec = dst_lists[trank];
+                    size_t block = src_vec.size() * dst_vec.size();
+                    if (block == 0) continue;
+
+                    if (offset >= block) {
+                        offset -= block;
+                        continue;
+                    }
+
+                    chosen_srank = static_cast<int>(srank);
+                    chosen_trank = static_cast<int>(trank);
+                    si = offset / dst_vec.size();
+                    ti = offset % dst_vec.size();
+                    found_block = true;
+                }
+            }
+
+            if (!found_block) {
+                continue;
+            }
+
+            const auto &src_vec = src_lists[chosen_srank];
+            const auto &dst_vec = dst_lists[chosen_trank];
+            int sdev = src_vec[si];
+            int tdev = dst_vec[ti];
+
+            bool reachable = true;
+            if (same_machine) {
+                reachable = (sdev == tdev);
+            } else {
+                auto &worker = worker_context_[tl_wid];
+                auto &rail = worker.rails[target.segment->machine_id];
+                reachable = rail.available(sdev, tdev);
+            }
+
+            if (!reachable) {
+                continue;
+            }
+
             slice->source_dev_id = sdev;
             slice->target_dev_id = tdev;
             slice->source_lkey = source.buffer->lkey[slice->source_dev_id];
             slice->target_rkey = target.buffer->rkey[slice->target_dev_id];
+
+            CHECK_STATUS(device_quota_->assign(slice->source_dev_id, slice->length));
             return Status::OK();
         }
-
-        ++idx;
     }
 
     return Status::DeviceNotFound("No available path" LOC_MARK);

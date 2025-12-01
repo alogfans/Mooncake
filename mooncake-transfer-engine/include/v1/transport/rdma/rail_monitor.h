@@ -38,7 +38,7 @@ class RailMonitor {
 
     bool ready() { return ready_; }
 
-    bool available(int local_nic, int remote_nic);
+    bool available(int local_nic, int remote_nic, bool update_mapping = true);
 
     void markFailed(int local_nic, int remote_nic);
 
@@ -79,7 +79,7 @@ class RailMonitor {
 
     int error_threshold_ = 3;
     std::chrono::seconds error_window_{10};
-    std::chrono::seconds cooldown_{30};
+    std::chrono::seconds cooldown_{1};
 };
 
 }  // namespace v1

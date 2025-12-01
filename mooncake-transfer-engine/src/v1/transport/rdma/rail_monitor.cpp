@@ -17,8 +17,8 @@
 namespace mooncake {
 namespace v1 {
 
-Status RailMonitor::load(const Topology *local, const Topology *remote,
-                         const std::string &rail_topo_json) {
+Status RailMonitor::load(const Topology* local, const Topology* remote,
+                         const std::string& rail_topo_json) {
     local_ = local;
     remote_ = remote;
     if (!rail_topo_json.empty()) {
@@ -29,16 +29,17 @@ Status RailMonitor::load(const Topology *local, const Topology *remote,
     return loadDefault();
 }
 
-bool RailMonitor::available(int local_nic, int remote_nic) {
+bool RailMonitor::available(int local_nic, int remote_nic,
+                            bool update_mapping) {
     auto it = rail_states_.find(std::make_pair(local_nic, remote_nic));
     if (it == rail_states_.end()) return false;
-    auto &st = it->second;
+    auto& st = it->second;
     if (st.paused) {
         auto now = std::chrono::steady_clock::now();
         if (now >= st.resume_time) {
             st.paused = false;
             st.error_count = 0;
-            updateBestMapping();
+            if (update_mapping) updateBestMapping();
             return true;
         }
         return false;
@@ -49,7 +50,7 @@ bool RailMonitor::available(int local_nic, int remote_nic) {
 void RailMonitor::markFailed(int local_nic, int remote_nic) {
     auto it = rail_states_.find(std::make_pair(local_nic, remote_nic));
     if (it == rail_states_.end()) return;
-    auto &st = it->second;
+    auto& st = it->second;
     auto now = std::chrono::steady_clock::now();
     if (st.error_count == 0 || now - st.last_error > error_window_) {
         st.error_count = 1;
@@ -57,13 +58,14 @@ void RailMonitor::markFailed(int local_nic, int remote_nic) {
         st.error_count++;
     }
     st.last_error = now;
-    if (st.cooldown.count() == 0) {
-        st.cooldown = cooldown_;
-    } else {
-        st.cooldown *= 2;
-        if (st.cooldown > std::chrono::seconds(300))
-            st.cooldown = std::chrono::seconds(300);
-    }
+    // if (st.cooldown.count() == 0) {
+    //     st.cooldown = cooldown_;
+    // } else {
+    //     st.cooldown *= 2;
+    //     if (st.cooldown > std::chrono::seconds(300))
+    //         st.cooldown = std::chrono::seconds(300);
+    // }
+    st.cooldown = cooldown_;
     if (st.error_count >= error_threshold_) {
         st.paused = true;
         st.resume_time = now + st.cooldown;
@@ -74,7 +76,7 @@ void RailMonitor::markFailed(int local_nic, int remote_nic) {
 void RailMonitor::markRecovered(int local_nic, int remote_nic) {
     auto it = rail_states_.find(std::make_pair(local_nic, remote_nic));
     if (it == rail_states_.end()) return;
-    auto &st = it->second;
+    auto& st = it->second;
     st.error_count = 0;
     st.paused = false;
     st.resume_time = {};
@@ -82,6 +84,12 @@ void RailMonitor::markRecovered(int local_nic, int remote_nic) {
 }
 
 int RailMonitor::findBestRemoteDevice(int local_nic, int remote_numa) {
+    thread_local auto last_ts = std::chrono::steady_clock::now();
+    auto now = std::chrono::steady_clock::now();
+    if (now - last_ts > std::chrono::milliseconds(200)) {
+        updateBestMapping();
+        last_ts = now;
+    }
     if (remote_numa >= 0 && remote_numa < (int)kMaxNuma) {
         if (best_mapping_[remote_numa].count(local_nic))
             return best_mapping_[remote_numa][local_nic];
@@ -108,7 +116,7 @@ int RailMonitor::findBestRemoteDevice(int local_nic, int remote_numa) {
  *   ]
  * }
  */
-Status RailMonitor::loadFromJson(const std::string &rail_topo_json) {
+Status RailMonitor::loadFromJson(const std::string& rail_topo_json) {
     try {
         auto root = json::parse(rail_topo_json);
 
@@ -116,7 +124,7 @@ Status RailMonitor::loadFromJson(const std::string &rail_topo_json) {
         direct_rails_.clear();
 
         if (root.contains("all")) {
-            for (const auto &path_entry : root["all"]) {
+            for (const auto& path_entry : root["all"]) {
                 std::string local_nic_name = path_entry.value("local", "");
                 std::string remote_nic_name = path_entry.value("remote", "");
                 int local_nic_id = local_->getNicId(local_nic_name);
@@ -132,7 +140,7 @@ Status RailMonitor::loadFromJson(const std::string &rail_topo_json) {
         }
 
         if (root.contains("direct")) {
-            for (const auto &path_entry : root["direct"]) {
+            for (const auto& path_entry : root["direct"]) {
                 std::string local_nic_name = path_entry.value("local", "");
                 std::string remote_nic_name = path_entry.value("remote", "");
                 int local_nic_id = local_->getNicId(local_nic_name);
@@ -146,7 +154,7 @@ Status RailMonitor::loadFromJson(const std::string &rail_topo_json) {
                 }
             }
         }
-    } catch (const std::exception &ex) {
+    } catch (const std::exception& ex) {
         LOG(ERROR) << "Failed to parse rail_topo_json: " << ex.what();
         return Status::InvalidArgument("Failed to parse JSON" LOC_MARK);
     }
@@ -156,12 +164,12 @@ Status RailMonitor::loadFromJson(const std::string &rail_topo_json) {
     return Status::OK();
 }
 
-static int matchRemoteNicId(const Topology *local, const Topology *remote,
+static int matchRemoteNicId(const Topology* local, const Topology* remote,
                             int local_nic) {
     std::string mem_name;
     for (size_t i = 0; i < local->getMemCount(); ++i) {
         auto entry = local->getMemEntry(i);
-        auto &prior_devices = entry->device_list[0];
+        auto& prior_devices = entry->device_list[0];
         if (entry->type == Topology::MEM_CUDA && !prior_devices.empty() &&
             prior_devices[0] == local_nic) {
             mem_name = entry->name;
@@ -172,7 +180,7 @@ static int matchRemoteNicId(const Topology *local, const Topology *remote,
     auto mem_id = remote->getMemId(mem_name);
     if (mem_id < 0) return -1;
     auto entry = remote->getMemEntry(mem_id);
-    auto &prior_devices = entry->device_list[0];
+    auto& prior_devices = entry->device_list[0];
     if (entry->type == Topology::MEM_CUDA && !prior_devices.empty())
         return prior_devices[0];
     return -1;
@@ -242,6 +250,12 @@ void RailMonitor::updateBestMapping() {
     const int local_nic_count = (int)local_->getNicCount();
     const int remote_nic_count = (int)remote_->getNicCount();
     for (int local_nic = 0; local_nic < local_nic_count; ++local_nic) {
+        for (int remote_nic = 0; remote_nic < remote_nic_count; ++remote_nic) {
+            // reset connected state
+            available(local_nic, remote_nic, false);
+        }
+    }
+    for (int local_nic = 0; local_nic < local_nic_count; ++local_nic) {
         auto local_entry = local_->getNicEntry(local_nic);
         if (!local_entry || local_entry->type != Topology::NIC_RDMA) continue;
         local_devices[local_entry->numa_node].push_back(local_nic);
@@ -265,7 +279,7 @@ void RailMonitor::updateBestMapping() {
 
     for (size_t local_numa = 0; local_numa < kMaxNuma; ++local_numa) {
         for (size_t remote_numa = 0; remote_numa < kMaxNuma; ++remote_numa) {
-            auto &mapping = best_mapping_[remote_numa];
+            auto& mapping = best_mapping_[remote_numa];
             size_t local_cnt = local_devices[local_numa].size();
             size_t remote_cnt = remote_devices[remote_numa].size();
             if (!local_cnt || !remote_cnt) continue;
@@ -276,10 +290,10 @@ void RailMonitor::updateBestMapping() {
                     remote_nic = direct_rails_[local_nic];
                 else
                     remote_nic = remote_devices[remote_numa][i % remote_cnt];
-                if (!available(local_nic, remote_nic)) {
+                if (!available(local_nic, remote_nic, false)) {
                     bool found = false;
                     for (int cand : remote_devices[remote_numa]) {
-                        if (available(local_nic, cand)) {
+                        if (available(local_nic, cand, false)) {
                             remote_nic = cand;
                             found = true;
                             break;
@@ -287,7 +301,7 @@ void RailMonitor::updateBestMapping() {
                     }
                     if (!found) {
                         for (int cand = 0; cand < remote_nic_count; ++cand) {
-                            if (available(local_nic, cand)) {
+                            if (available(local_nic, cand, false)) {
                                 remote_nic = cand;
                                 break;
                             }
