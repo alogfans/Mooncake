@@ -26,7 +26,7 @@
 #include <sys/time.h>
 
 namespace mooncake {
-namespace v1 {
+namespace tent {
 class BenchRunner {
    public:
     BenchRunner() {}
@@ -59,7 +59,7 @@ class BenchRunner {
                                      OpCode opcode) = 0;
 };
 
-}  // namespace v1
+}  // namespace tent
 }  // namespace mooncake
 
 #endif  // BENCH_RUNNER_H

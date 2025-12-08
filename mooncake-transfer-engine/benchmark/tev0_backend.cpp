@@ -26,7 +26,7 @@
 #endif
 
 namespace mooncake {
-namespace v1 {
+namespace tent {
 
 #ifdef USE_CUDA
 static inline int getNumaNodeFromPciDevice(const std::string &pci_bdf) {
@@ -293,5 +293,5 @@ double TEv0BenchRunner::runSingleTransfer(uint64_t local_addr,
     return duration;
 }
 
-}  // namespace v1
+}  // namespace tent
 }  // namespace mooncake

@@ -29,7 +29,7 @@
 #include "transfer_engine.h"
 
 namespace mooncake {
-namespace v1 {
+namespace tent {
 class TEv0BenchRunner : public BenchRunner {
    public:
     TEv0BenchRunner();
@@ -88,7 +88,7 @@ class TEv0BenchRunner : public BenchRunner {
     int pending_ = 0;
 };
 
-}  // namespace v1
+}  // namespace tent
 }  // namespace mooncake
 
 #endif  // TEV0_BACKEND_H

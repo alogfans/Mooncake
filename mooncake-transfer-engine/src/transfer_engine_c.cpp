@@ -20,13 +20,13 @@
 #include "transfer_engine.h"
 #include "transport/transport.h"
 
-#include "v1/transfer_engine.h"
-#include "v1/common/config.h"
+#include "tent/transfer_engine.h"
+#include "tent/common/config.h"
 
 using namespace mooncake;
 
 static bool g_enable_v1 = (getenv("MC_USE_TEV1") != nullptr);
-#define CAST(ptr) ((mooncake::v1::TransferEngine *)ptr)
+#define CAST(ptr) ((mooncake::tent::TransferEngine *)ptr)
 
 std::pair<std::string, std::string> parseConnectionString(
     const std::string &conn_string) {
@@ -56,11 +56,11 @@ transfer_engine_t createTransferEngine(const char *metadata_conn_string,
                                        uint64_t rpc_port, int auto_discover) {
     if (g_enable_v1) {
         auto conn_string = parseConnectionString(metadata_conn_string);
-        auto config = std::make_shared<mooncake::v1::ConfigManager>();
+        auto config = std::make_shared<mooncake::tent::ConfigManager>();
         config->set("local_segment_name", local_server_name);
         config->set("metadata_type", conn_string.first);
         config->set("metadata_servers", conn_string.second);
-        auto engine = new mooncake::v1::TransferEngine(config);
+        auto engine = new mooncake::tent::TransferEngine(config);
         if (!engine->available()) return nullptr;
         return (transfer_engine_t)engine;
     }
@@ -236,11 +236,11 @@ batch_id_t allocateBatchID(transfer_engine_t engine, size_t batch_size) {
 int submitTransfer(transfer_engine_t engine, batch_id_t batch_id,
                    struct transfer_request *entries, size_t count) {
     if (g_enable_v1) {
-        std::vector<mooncake::v1::Request> req_list;
+        std::vector<mooncake::tent::Request> req_list;
         req_list.resize(count);
         for (size_t index = 0; index < count; index++) {
             req_list[index].opcode =
-                (mooncake::v1::Request::OpCode)entries[index].opcode;
+                (mooncake::tent::Request::OpCode)entries[index].opcode;
             req_list[index].source = entries[index].source;
             req_list[index].target_id = entries[index].target_id;
             req_list[index].target_offset = entries[index].target_offset;
@@ -300,7 +300,7 @@ int submitTransferWithNotify(transfer_engine_t engine, batch_id_t batch_id,
 int getTransferStatus(transfer_engine_t engine, batch_id_t batch_id,
                       size_t task_id, struct transfer_status *status) {
     if (g_enable_v1) {
-        mooncake::v1::TransferStatus internal_status;
+        mooncake::tent::TransferStatus internal_status;
         auto ret =
             CAST(engine)->getTransferStatus(batch_id, task_id, internal_status);
         if (!ret.ok()) {

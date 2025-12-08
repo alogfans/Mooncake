@@ -30,8 +30,8 @@
 #include "transport/rdma_transport/rdma_transport.h"
 #include "transport/transport.h"
 
-#include "v1/transfer_engine.h"
-#include "v1/common/config.h"
+#include "tent/transfer_engine.h"
+#include "tent/common/config.h"
 
 using namespace mooncake;
 
@@ -168,7 +168,7 @@ class TransferEnginePy {
     std::shared_ptr<TransferEngine> engine_;
     Transport *xport_;
 
-    std::shared_ptr<mooncake::v1::TransferEngine> engine_v1_;
+    std::shared_ptr<mooncake::tent::TransferEngine> engine_v1_;
 
     std::mutex mutex_;
     std::vector<std::stack<char *>> free_list_;

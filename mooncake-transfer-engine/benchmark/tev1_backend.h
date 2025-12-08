@@ -25,13 +25,14 @@
 #include <glog/logging.h>
 #include <signal.h>
 #include <sys/time.h>
+#include <memory>
 
-#include "v1/transfer_engine.h"
-#include "v1/common/utils/random.h"
-#include "v1/common/utils/os.h"
+#include "tent/transfer_engine.h"
+#include "tent/common/utils/random.h"
+#include "tent/common/utils/os.h"
 
 namespace mooncake {
-namespace v1 {
+namespace tent {
 class TEv1BenchRunner : public BenchRunner {
    public:
     TEv1BenchRunner();
@@ -90,7 +91,7 @@ class TEv1BenchRunner : public BenchRunner {
     int pending_ = 0;
 };
 
-}  // namespace v1
+}  // namespace tent
 }  // namespace mooncake
 
 #endif  // TEV1_BACKEND_H

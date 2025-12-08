@@ -85,11 +85,9 @@ if (USE_ASCEND_HETEROGENEOUS)
 endif()
 
 
-add_subdirectory(v1)
+target_link_libraries(transfer_engine PRIVATE tent)
 
 if (USE_DYNAMIC_LOADER)
   add_definitions(-DUSE_DYNAMIC_LOADER)
   target_link_libraries(transfer_engine PRIVATE transfer_engine_shared)
-else()
-  target_link_libraries(transfer_engine PRIVATE transfer_engine_v1)
 endif()

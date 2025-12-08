@@ -17,7 +17,7 @@
 #include "types.h"
 
 #ifdef MOONCAKE_USE_V1
-#include "v1/common/config.h"
+#include "tent/common/config.h"
 #endif
 
 namespace mooncake {
@@ -258,10 +258,10 @@ ErrorCode Client::InitTransferEngine(
     if (!auto_discover) {
         LOG(WARNING) << "TENT supports auto discovery only";
     }
-    auto config = std::make_shared<mooncake::v1::ConfigManager>();
+    auto config = std::make_shared<mooncake::tent::ConfigManager>();
     config->set("local_segment_name", local_hostname);
     config->set("metadata_type", "p2p");
-    transfer_engine_ = std::make_shared<mooncake::v1::TransferEngine>();
+    transfer_engine_ = std::make_shared<mooncake::tent::TransferEngine>();
     return ErrorCode::OK;
 #else
     transfer_engine_ = std::make_shared<mooncake::TransferEngine>();

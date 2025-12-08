@@ -34,7 +34,7 @@ pybind11_add_module(engine ${SOURCES} ${CACHE_ALLOCATOR_SOURCES}
 )
 
 target_link_libraries(engine PUBLIC 
-    transfer_engine 
+    transfer_engine tent
     glog::glog
     gflags::gflags
 )

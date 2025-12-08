@@ -27,8 +27,8 @@
 #include <stdexcept>
 #include <chrono>
 
-#include "v1/common/utils/os.h"
-#include "v1/common/utils/random.h"
+#include "tent/common/utils/os.h"
+#include "tent/common/utils/random.h"
 
 #ifdef USE_CUDA
 #include <cuda_runtime.h>
@@ -44,7 +44,7 @@
     } while (0)
 
 namespace mooncake {
-namespace v1 {
+namespace tent {
 struct XferBenchConfig {
     static void loadFromFlags();
 
@@ -186,7 +186,7 @@ static inline void verifyData(void *addr, size_t length, uint8_t seed) {
 
 enum OpCode { READ, WRITE };
 
-}  // namespace v1
+}  // namespace tent
 }  // namespace mooncake
 
 #endif  // XFER_UTILS_H

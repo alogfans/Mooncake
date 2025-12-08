@@ -18,7 +18,7 @@
 #include "tev0_backend.h"
 #include "tev1_backend.h"
 
-using namespace mooncake::v1;
+using namespace mooncake::tent;
 
 void processBatchSizes(BenchRunner& runner, size_t block_size,
                        size_t batch_size, int num_threads) {

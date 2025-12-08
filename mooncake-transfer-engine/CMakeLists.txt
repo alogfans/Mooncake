@@ -59,4 +59,5 @@ if (USE_MNNVL)
   add_subdirectory(nvlink-allocator)
 endif()
 
+add_subdirectory(tent)
 add_subdirectory(benchmark)

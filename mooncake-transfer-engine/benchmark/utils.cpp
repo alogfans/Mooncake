@@ -43,7 +43,7 @@ DEFINE_string(xport_type, "", "Transport type: rdma|shm|mnnvl|gds|iouring");
 DEFINE_string(backend, "v1", "Transport backend: v0|v1|nixl");
 
 namespace mooncake {
-namespace v1 {
+namespace tent {
 std::string XferBenchConfig::seg_name;
 std::string XferBenchConfig::seg_type;
 std::string XferBenchConfig::target_seg_name;
@@ -149,5 +149,5 @@ void printStats(size_t block_size, size_t batch_size, XferBenchStats &stats, int
     // clang-format on
 }
 
-}  // namespace v1
+}  // namespace tent
 }  // namespace mooncake

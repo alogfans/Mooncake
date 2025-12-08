@@ -14,15 +14,15 @@
 
 #include "tev1_backend.h"
 #include "utils.h"
-#include "v1/runtime/platform.h"
-#include "v1/runtime/topology.h"
+#include "tent/runtime/platform.h"
+#include "tent/runtime/topology.h"
 
 #ifdef USE_CUDA
 #include <cuda_runtime.h>
 #endif
 
 namespace mooncake {
-namespace v1 {
+namespace tent {
 
 volatile bool g_tev1_running = true;
 volatile bool g_tev1_triggered_sig = false;
@@ -259,5 +259,5 @@ double TEv1BenchRunner::runSingleTransfer(uint64_t local_addr,
     return duration;
 }
 
-}  // namespace v1
+}  // namespace tent
 }  // namespace mooncake

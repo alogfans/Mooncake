@@ -34,7 +34,7 @@ static void freeMemory(void *ptr) { free(ptr); }
 #endif
 
 static bool g_enable_v1 = (getenv("MC_USE_TEV1") != nullptr);
-#define CAST(ptr) ((mooncake::v1::TransferEngine *)ptr)
+#define CAST(ptr) ((mooncake::tent::TransferEngine *)ptr)
 
 TransferEnginePy::TransferEnginePy() {
     const int64_t kNanosPerSecond = 1000 * 1000 * 1000;
@@ -123,12 +123,12 @@ int TransferEnginePy::initializeExt(const char *local_hostname,
                                     const char *metadata_type) {
     (void)(protocol);
     if (g_enable_v1) {
-        auto config = std::make_shared<mooncake::v1::ConfigManager>();
+        auto config = std::make_shared<mooncake::tent::ConfigManager>();
         if (strcmp(metadata_server, P2PHANDSHAKE) == 0) {
             config->set("local_segment_name", local_hostname);
             config->set("metadata_type", "p2p");
         }
-        engine_v1_ = std::make_unique<mooncake::v1::TransferEngine>(config);
+        engine_v1_ = std::make_unique<mooncake::tent::TransferEngine>(config);
         if (!engine_v1_->available()) return -1;
         free_list_.resize(kSlabSizeKBTabLen);
 #if !defined(USE_ASCEND) && !defined(USE_ASCEND_DIRECT)
@@ -316,11 +316,11 @@ int TransferEnginePy::transferSync(const char *target_hostname,
 
     if (g_enable_v1) {
         auto batch_id = engine_v1_->allocateBatch(1);
-        mooncake::v1::Request entry;
+        mooncake::tent::Request entry;
         if (opcode == TransferOpcode::WRITE)
-            entry.opcode = mooncake::v1::Request::WRITE;
+            entry.opcode = mooncake::tent::Request::WRITE;
         else
-            entry.opcode = mooncake::v1::Request::READ;
+            entry.opcode = mooncake::tent::Request::READ;
         entry.length = length;
         entry.source = (void *)buffer;
         entry.target_id = handle;
@@ -332,16 +332,16 @@ int TransferEnginePy::transferSync(const char *target_hostname,
         }
 
         while (true) {
-            mooncake::v1::TransferStatus status;
+            mooncake::tent::TransferStatus status;
             ret = engine_v1_->getTransferStatus(batch_id, 0, status);
             if (!ret.ok()) {
                 LOG(ERROR) << "getTransferStatus: " << ret.ToString();
                 engine_v1_->freeBatch(batch_id);
                 return -1;
             }
-            if (status.s == mooncake::v1::PENDING) continue;
+            if (status.s == mooncake::tent::PENDING) continue;
             engine_v1_->freeBatch(batch_id);
-            if (status.s == mooncake::v1::COMPLETED) {
+            if (status.s == mooncake::tent::COMPLETED) {
                 return 0;
             } else {
                 return -1;
@@ -443,13 +443,13 @@ int TransferEnginePy::batchTransferSync(
 
     if (g_enable_v1) {
         auto batch_size = buffers.size();
-        std::vector<mooncake::v1::Request> entries;
+        std::vector<mooncake::tent::Request> entries;
         for (size_t i = 0; i < batch_size; ++i) {
-            mooncake::v1::Request entry;
+            mooncake::tent::Request entry;
             if (opcode == TransferOpcode::WRITE)
-                entry.opcode = mooncake::v1::Request::WRITE;
+                entry.opcode = mooncake::tent::Request::WRITE;
             else
-                entry.opcode = mooncake::v1::Request::READ;
+                entry.opcode = mooncake::tent::Request::READ;
             entry.length = lengths[i];
             entry.source = (void *)buffers[i];
             entry.target_id = handle;
@@ -464,16 +464,16 @@ int TransferEnginePy::batchTransferSync(
         }
 
         while (true) {
-            mooncake::v1::TransferStatus status;
+            mooncake::tent::TransferStatus status;
             ret = engine_v1_->getTransferStatus(batch_id, status);
             if (!ret.ok()) {
                 LOG(ERROR) << "getTransferStatus: " << ret.ToString();
                 engine_v1_->freeBatch(batch_id);
                 return -1;
             }
-            if (status.s == mooncake::v1::PENDING) continue;
+            if (status.s == mooncake::tent::PENDING) continue;
             engine_v1_->freeBatch(batch_id);
-            if (status.s == mooncake::v1::COMPLETED) {
+            if (status.s == mooncake::tent::COMPLETED) {
                 return 0;
             } else {
                 return -1;
@@ -583,13 +583,13 @@ batch_id_t TransferEnginePy::batchTransferAsync(
 
     if (g_enable_v1) {
         auto batch_size = buffers.size();
-        std::vector<mooncake::v1::Request> entries;
+        std::vector<mooncake::tent::Request> entries;
         for (size_t i = 0; i < batch_size; ++i) {
-            mooncake::v1::Request entry;
+            mooncake::tent::Request entry;
             if (opcode == TransferOpcode::WRITE) {
-                entry.opcode = mooncake::v1::Request::WRITE;
+                entry.opcode = mooncake::tent::Request::WRITE;
             } else {
-                entry.opcode = mooncake::v1::Request::READ;
+                entry.opcode = mooncake::tent::Request::READ;
             }
             entry.length = lengths[i];
             entry.source = (void *)buffers[i];
@@ -648,7 +648,7 @@ int TransferEnginePy::getBatchTransferStatus(
     const std::vector<batch_id_t> &batch_ids) {
     pybind11::gil_scoped_release release;
     if (g_enable_v1) {
-        mooncake::v1::TransferStatus status;
+        mooncake::tent::TransferStatus status;
         for (auto &batch_id : batch_ids) {
             bool completed = false;
             while (!completed) {
@@ -658,8 +658,8 @@ int TransferEnginePy::getBatchTransferStatus(
                     engine_v1_->freeBatch(batch_id);
                     return -1;
                 }
-                if (status.s == mooncake::v1::PENDING) continue;
-                if (status.s == mooncake::v1::COMPLETED) {
+                if (status.s == mooncake::tent::PENDING) continue;
+                if (status.s == mooncake::tent::COMPLETED) {
                     engine_v1_->freeBatch(batch_id);
                     completed = true;
                 } else {
@@ -753,8 +753,8 @@ batch_id_t TransferEnginePy::transferSubmitWrite(const char *target_hostname,
 
     if (g_enable_v1) {
         auto batch_id = engine_v1_->allocateBatch(1);
-        mooncake::v1::Request entry;
-        entry.opcode = mooncake::v1::Request::WRITE;
+        mooncake::tent::Request entry;
+        entry.opcode = mooncake::tent::Request::WRITE;
         entry.length = length;
         entry.source = (void *)buffer;
         entry.target_id = handle;
@@ -784,15 +784,15 @@ batch_id_t TransferEnginePy::transferSubmitWrite(const char *target_hostname,
 int TransferEnginePy::transferCheckStatus(batch_id_t batch_id) {
     pybind11::gil_scoped_release release;
     if (g_enable_v1) {
-        mooncake::v1::TransferStatus status;
+        mooncake::tent::TransferStatus status;
         engine_v1_->getTransferStatus(batch_id, 0, status);
-        if (status.s == mooncake::v1::COMPLETED) {
+        if (status.s == mooncake::tent::COMPLETED) {
             engine_v1_->freeBatch(batch_id);
             return 1;
-        } else if (status.s == mooncake::v1::FAILED) {
+        } else if (status.s == mooncake::tent::FAILED) {
             engine_v1_->freeBatch(batch_id);
             return -1;
-        } else if (status.s == mooncake::v1::TIMEOUT) {
+        } else if (status.s == mooncake::tent::TIMEOUT) {
             return -2;
         } else {
             return 0;
@@ -889,8 +889,8 @@ int TransferEnginePy::unregisterMemory(uintptr_t buffer_addr) {
 uintptr_t TransferEnginePy::getFirstBufferAddress(
     const std::string &segment_name) {
     if (g_enable_v1) {
-        mooncake::v1::SegmentID handle = 0;
-        mooncake::v1::SegmentInfo info;
+        mooncake::tent::SegmentID handle = 0;
+        mooncake::tent::SegmentInfo info;
         auto ret = engine_v1_->openSegment(handle, segment_name);
         if (!ret.ok()) {
             LOG(ERROR) << "openSegment: " << ret.ToString();

@@ -18,7 +18,7 @@
 #endif
 
 #ifdef MOONCAKE_USE_V1
-#include "v1/transfer_engine.h"
+#include "tent/transfer_engine.h"
 #else
 #include "transfer_engine.h"
 #endif
@@ -30,12 +30,12 @@
 
 namespace mooncake {
 #ifdef MOONCAKE_USE_V1
-using TE = mooncake::v1::TransferEngine;
-using Opcode = mooncake::v1::Request::OpCode;
-using BatchID = mooncake::v1::BatchID;
-using Request = mooncake::v1::Request;
-using TStatus = mooncake::v1::TransferStatus;
-using TStatusEnum = mooncake::v1::TransferStatusEnum;
+using TE = mooncake::tent::TransferEngine;
+using Opcode = mooncake::tent::Request::OpCode;
+using BatchID = mooncake::tent::BatchID;
+using Request = mooncake::tent::Request;
+using TStatus = mooncake::tent::TransferStatus;
+using TStatusEnum = mooncake::tent::TransferStatusEnum;
 #else
 using TE = mooncake::TransferEngine;
 using Opcode = mooncake::TransferRequest::OpCode;
