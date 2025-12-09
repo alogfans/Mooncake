@@ -12,27 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifdef USE_DYNAMIC_LOADER
-#include "tent/runtime/metastore.h"
-#include "tent/runtime/loader.h"
-#include <glog/logging.h>
-
-namespace mooncake {
-namespace tent {
-std::shared_ptr<MetaStore> MetaStore::Create(const std::string& type,
-                                             const std::string& servers) {
-    auto plugin = Loader::instance().loadPlugin<MetaStore>("metastore", type);
-    if (!plugin) return nullptr;
-    auto status = plugin->connect(servers);
-    if (!status.ok()) {
-        LOG(FATAL) << status.ToString();
-        return nullptr;
-    }
-    return plugin;
-}
-}  // namespace tent
-}  // namespace mooncake
-#else
 #include "tent/runtime/metastore.h"
 #ifdef USE_ETCD
 #include "tent/metastore/etcd.h"
@@ -82,4 +61,3 @@ std::shared_ptr<MetaStore> MetaStore::Create(const std::string &type,
 }
 }  // namespace tent
 }  // namespace mooncake
-#endif

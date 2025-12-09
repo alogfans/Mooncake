@@ -16,23 +16,7 @@
 
 namespace mooncake {
 namespace tent {
-Status ConfigManager::loadConfig(const std::filesystem::path& config_path) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    std::ifstream ifs(config_path);
-    if (!ifs.is_open()) {
-        return Status::InvalidArgument("Failed to open config file" LOC_MARK);
-    }
-    try {
-        ifs >> config_data_;
-        config_path_ = config_path;
-        return Status::OK();
-    } catch (const std::exception& e) {
-        return Status::InvalidArgument(std::string("Invalid JSON: ") +
-                                       e.what() + LOC_MARK);
-    }
-}
-
-Status ConfigManager::loadConfigContent(const std::string& content) {
+Status Config::load(const std::string& content) {
     std::lock_guard<std::mutex> lock(mutex_);
     try {
         config_data_ = json::parse(content);
@@ -43,34 +27,31 @@ Status ConfigManager::loadConfigContent(const std::string& content) {
     }
 }
 
-std::string ConfigManager::dump(int indent) const {
+std::string Config::dump(int indent) const {
     std::lock_guard<std::mutex> lock(mutex_);
     return config_data_.dump(indent);
 }
 
-Status ConfigManager::save(const std::filesystem::path& out_path) const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    std::ofstream ofs(out_path);
-    if (!ofs.is_open()) {
-        return Status::InvalidArgument("Failed to open file for writing" +
-                                       out_path.string() + LOC_MARK);
+static inline void setConfig(Config& config, const std::string& env_key,
+                             const std::string& config_key) {
+    const char* val = std::getenv(env_key.c_str());
+    if (val) {
+        config.set(config_key, val);
     }
-    ofs << config_data_.dump(2);
+}
+
+Status ConfigHelper::loadFromEnv(Config& config) {
+    const char *conf_str = std::getenv("MC_TENT_CONF");
+    if (conf_str) {
+        config.load(conf_str);
+        return Status::OK();
+    }
+
+    // Legacy keys for backward compatibility
+    setConfig(config, "MC_IB_PORT", "transports/rdma/device/port");
+    setConfig(config, "MC_GID_INDEX", "transports/rdma/device/gid_index");
     return Status::OK();
 }
 
-const json* ConfigManager::findValue(const std::string& key_path) const {
-    const json* current = &config_data_;
-    size_t start = 0, end = key_path.find(kDelimiter);
-    while (end != std::string::npos) {
-        std::string part = key_path.substr(start, end - start);
-        if (!current->contains(part)) return nullptr;
-        current = &((*current)[part]);
-        start = end + 1;
-        end = key_path.find(kDelimiter, start);
-    }
-    std::string last = key_path.substr(start);
-    return current->contains(last) ? &((*current)[last]) : nullptr;
-}
 }  // namespace tent
 }  // namespace mooncake

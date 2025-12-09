@@ -16,8 +16,8 @@
 // modifications.
 // https://github.com/facebook/rocksdb/blob/main/include/rocksdb/status.h
 
-#ifndef V1_STATUS_H
-#define V1_STATUS_H
+#ifndef TENT_STATUS_H
+#define TENT_STATUS_H
 
 #include <cstdint>
 #include <ostream>
@@ -206,4 +206,4 @@ std::ostream& operator<<(std::ostream& os, const Status& s);
 }  // namespace tent
 }  // namespace mooncake
 
-#endif  // V1_STATUS_H
+#endif  // TENT_STATUS_H

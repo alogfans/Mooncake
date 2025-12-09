@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef SYSTEM_H
-#define SYSTEM_H
+#ifndef TENT_OS_H
+#define TENT_OS_H
 
 #include <glog/logging.h>
 #include <numa.h>
@@ -94,4 +94,4 @@ static inline std::string getCurrentDateTime() {
 }  // namespace tent
 }  // namespace mooncake
 
-#endif  // SYSTEM_H
+#endif  // TENT_OS_H

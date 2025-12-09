@@ -12,31 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifdef USE_DYNAMIC_LOADER
-#include "tent/runtime/platform.h"
-#include "tent/runtime/loader.h"
-#include "tent/platform/cpu.h"
-#include <glog/logging.h>
-
-namespace mooncake {
-namespace tent {
-
-Platform& Platform::getLoader(std::shared_ptr<ConfigManager> conf) {
-    static std::shared_ptr<Platform> g_instance;
-    static std::once_flag flag;
-    std::call_once(flag, [&]() {
-        auto platform_name = conf->get("platform_name", "cuda");
-        g_instance = Loader::instance().loadPlugin<Platform>(
-            "platform", platform_name, conf.get());
-        if (!g_instance) {
-            g_instance = std::make_shared<CpuPlatform>(conf);
-        }
-    });
-    return *g_instance;
-}
-}  // namespace tent
-}  // namespace mooncake
-#else
 #include "tent/runtime/platform.h"
 
 #ifdef USE_CUDA
@@ -50,7 +25,7 @@ Platform& Platform::getLoader(std::shared_ptr<ConfigManager> conf) {
 namespace mooncake {
 namespace tent {
 
-Platform& Platform::getLoader(std::shared_ptr<ConfigManager> conf) {
+Platform& Platform::getLoader(std::shared_ptr<Config> conf) {
     static std::shared_ptr<Platform> g_instance;
     static std::once_flag flag;
     std::call_once(flag, [&]() {
@@ -66,4 +41,3 @@ Platform& Platform::getLoader(std::shared_ptr<ConfigManager> conf) {
 }
 }  // namespace tent
 }  // namespace mooncake
-#endif

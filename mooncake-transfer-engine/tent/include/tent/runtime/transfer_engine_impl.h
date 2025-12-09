@@ -61,7 +61,7 @@ class TransferEngineImpl {
    public:
     TransferEngineImpl();
 
-    TransferEngineImpl(std::shared_ptr<ConfigManager> config);
+    TransferEngineImpl(std::shared_ptr<Config> config);
 
     ~TransferEngineImpl();
 
@@ -177,7 +177,7 @@ class TransferEngineImpl {
     };
 
    private:
-    std::shared_ptr<ConfigManager> conf_;
+    std::shared_ptr<Config> conf_;
     std::shared_ptr<ControlService> metadata_;
     std::shared_ptr<Topology> topology_;
     bool available_;

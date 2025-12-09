@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef RPC_STUB_H
-#define RPC_STUB_H
+#ifndef TENT_YLT_RPC_H
+#define TENT_YLT_RPC_H
 
 #include <atomic>
 #include <cstdint>
@@ -82,4 +82,4 @@ class CoroRpcAgent {
 
 }  // namespace tent
 }  // namespace mooncake
-#endif  // RPC_STUB_H
+#endif  // TENT_YLT_RPC_H

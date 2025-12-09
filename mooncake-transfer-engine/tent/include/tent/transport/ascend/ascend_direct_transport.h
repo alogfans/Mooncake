@@ -56,7 +56,7 @@ class AscendDirectTransport : public Transport {
     virtual Status install(std::string &local_segment_name,
                            std::shared_ptr<ControlService> metadata,
                            std::shared_ptr<Topology> local_topology,
-                           std::shared_ptr<ConfigManager> conf = nullptr);
+                           std::shared_ptr<Config> conf = nullptr);
 
     virtual Status uninstall();
 
@@ -80,7 +80,7 @@ class AscendDirectTransport : public Transport {
    private:
     void workerThread();
 
-    Status initHixl(const std::shared_ptr<ConfigManager> &conf);
+    Status initHixl(const std::shared_ptr<Config> &conf);
 
     Status checkAndConnect(const std::string &remote_hixl);
 

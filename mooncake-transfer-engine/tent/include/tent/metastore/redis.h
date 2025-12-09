@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef METASTORE_REDIS_H
-#define METASTORE_REDIS_H
+#ifndef TENT_REDIS_H
+#define TENT_REDIS_H
 
 #include <glog/logging.h>
 #include <hiredis/hiredis.h>
@@ -48,4 +48,4 @@ class RedisMetaStore : public MetaStore {
 }  // namespace tent
 }  // namespace mooncake
 
-#endif  // METASTORE_REDIS_H
+#endif  // TENT_REDIS_H

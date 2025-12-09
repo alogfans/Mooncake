@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef METASTORE_HTTP_H
-#define METASTORE_HTTP_H
+#ifndef TENT_HTTP_H
+#define TENT_HTTP_H
 
 #include "tent/runtime/metastore.h"
 
@@ -61,4 +61,4 @@ class HttpMetaStore : public MetaStore {
 }  // namespace tent
 }  // namespace mooncake
 
-#endif  // METASTORE_HTTP_H
+#endif  // TENT_HTTP_H

@@ -19,7 +19,6 @@ if (USE_ETCD)
     message(STATUS "Etcd metastore support: Enabled")
     add_metastore_module(etcd DEPS ${CMAKE_BINARY_DIR}/mooncake-common/etcd/libetcd_wrapper.so)
     add_dependencies(metastore_etcd build_etcd_wrapper)
-    add_dependencies(metastore_etcd_shared build_etcd_wrapper)
 endif()
 
 find_package(CURL)

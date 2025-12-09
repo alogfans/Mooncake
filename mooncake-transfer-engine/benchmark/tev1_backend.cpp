@@ -38,8 +38,8 @@ void signalHandlerV1(int signum) {
     g_tev1_triggered_sig = true;
 }
 
-std::shared_ptr<ConfigManager> loadConfig() {
-    auto config = std::make_shared<ConfigManager>();
+std::shared_ptr<Config> loadConfig() {
+    auto config = std::make_shared<Config>();
     config->set("local_segment_name", XferBenchConfig::seg_name);
     config->set("metadata_type", XferBenchConfig::metadata_type);
     config->set("metadata_servers", XferBenchConfig::metadata_url_list);

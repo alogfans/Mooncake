@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef THREAD_POOL_H_
-#define THREAD_POOL_H_
+#ifndef TENT_THREAD_POOL_H
+#define TENT_THREAD_POOL_H
 
 #include <future>
 #include <queue>

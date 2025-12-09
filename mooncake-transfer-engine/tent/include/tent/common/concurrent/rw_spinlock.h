@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef RW_SPINLOCK_H
-#define RW_SPINLOCK_H
+#ifndef TENT_RW_SPINLOCK_H
+#define TENT_RW_SPINLOCK_H
 
 #include <atomic>
 #include <thread>
@@ -150,4 +150,4 @@ class RWSpinlock {
 }  // namespace tent
 }  // namespace mooncake
 
-#endif  // RW_SPINLOCK_H
+#endif  // TENT_RW_SPINLOCK_H

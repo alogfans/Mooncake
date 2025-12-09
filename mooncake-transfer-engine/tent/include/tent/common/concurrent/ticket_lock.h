@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef TICKET_LOCK_H_
-#define TICKET_LOCK_H_
+#ifndef TENT_TICKET_LOCK_H
+#define TENT_TICKET_LOCK_H
 
 #include <atomic>
 #include <thread>
@@ -43,4 +43,4 @@ class TicketLock {
 }  // namespace tent
 }  // namespace mooncake
 
-#endif  // TICKET_LOCK_H_
+#endif  // TENT_TICKET_LOCK_H

@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef STRING_BUILDER_H
-#define STRING_BUILDER_H
+#ifndef TENT_STRING_BUILDER_H
+#define TENT_STRING_BUILDER_H
 
 #include <glog/logging.h>
 #include <numa.h>
@@ -95,4 +95,4 @@ static inline void deserializeBinaryData(const std::string &hexString,
 }  // namespace tent
 }  // namespace mooncake
 
-#endif  // STRING_BUILDER_H
+#endif  // TENT_STRING_BUILDER_H

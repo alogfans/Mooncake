@@ -42,7 +42,7 @@
 
 namespace mooncake {
 namespace tent {
-static void convertConfToRdmaParams(std::shared_ptr<ConfigManager> conf,
+static void convertConfToRdmaParams(std::shared_ptr<Config> conf,
                                     std::shared_ptr<RdmaParams> params) {
     SET_DEVICE(num_cq_list, params->device.num_cq_list);
     SET_DEVICE(num_comp_channels, params->device.num_comp_channels);
@@ -111,7 +111,7 @@ RdmaTransport::~RdmaTransport() { uninstall(); }
 Status RdmaTransport::install(std::string& local_segment_name,
                               std::shared_ptr<ControlService> metadata,
                               std::shared_ptr<Topology> local_topology,
-                              std::shared_ptr<ConfigManager> conf) {
+                              std::shared_ptr<Config> conf) {
     if (installed_) {
         return Status::InvalidArgument(
             "RDMA transport has been installed" LOC_MARK);

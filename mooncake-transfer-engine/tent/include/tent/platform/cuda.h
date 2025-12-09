@@ -23,7 +23,7 @@ namespace tent {
 
 class CudaPlatform : public Platform {
    public:
-    CudaPlatform(std::shared_ptr<ConfigManager> config)
+    CudaPlatform(std::shared_ptr<Config> config)
         : conf(std::move(config)) {}
     
     virtual ~CudaPlatform() {}
@@ -45,7 +45,7 @@ class CudaPlatform : public Platform {
     virtual const std::string type() const { return "cuda"; }
 
    private:
-    std::shared_ptr<ConfigManager> conf;
+    std::shared_ptr<Config> conf;
 };
 
 }  // namespace tent

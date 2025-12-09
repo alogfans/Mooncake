@@ -24,15 +24,15 @@ TransferEngine::TransferEngine()
     : impl_(std::make_unique<TransferEngineImpl>()) {}
 
 TransferEngine::TransferEngine(const std::string config_path) {
-    auto conf = std::make_shared<ConfigManager>();
-    auto status = conf->loadConfig(config_path);
+    auto conf = std::make_shared<Config>();
+    auto status = conf->load(config_path);
     if (!status.ok()) {
         LOG(WARNING) << "Failed to read config file " << config_path;
     }
     impl_ = std::make_unique<TransferEngineImpl>(conf);
 }
 
-TransferEngine::TransferEngine(std::shared_ptr<ConfigManager> conf)
+TransferEngine::TransferEngine(std::shared_ptr<Config> conf)
     : impl_(std::make_unique<TransferEngineImpl>(conf)) {}
 
 TransferEngine::~TransferEngine() {}

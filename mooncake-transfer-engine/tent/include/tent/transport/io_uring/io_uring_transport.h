@@ -59,7 +59,7 @@ class IOUringTransport : public Transport {
     virtual Status install(std::string &local_segment_name,
                            std::shared_ptr<ControlService> metadata,
                            std::shared_ptr<Topology> local_topology,
-                           std::shared_ptr<ConfigManager> conf = nullptr);
+                           std::shared_ptr<Config> conf = nullptr);
 
     virtual Status uninstall();
 
@@ -90,7 +90,7 @@ class IOUringTransport : public Transport {
     std::string local_segment_name_;
     std::shared_ptr<Topology> local_topology_;
     std::shared_ptr<ControlService> metadata_;
-    std::shared_ptr<ConfigManager> conf_;
+    std::shared_ptr<Config> conf_;
 
     RWSpinlock file_context_lock_;
     using FileContextMap =

@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef METASTORE_ETCD_H
-#define METASTORE_ETCD_H
+#ifndef TENT_ETCD_H
+#define TENT_ETCD_H
 
 #include <atomic>
 #include <libetcd_wrapper.h>
@@ -44,4 +44,4 @@ class EtcdMetaStore : public MetaStore {
 }  // namespace tent
 }  // namespace mooncake
 
-#endif  // METASTORE_ETCD_H
+#endif  // TENT_ETCD_H

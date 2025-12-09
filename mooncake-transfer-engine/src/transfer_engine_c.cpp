@@ -56,7 +56,7 @@ transfer_engine_t createTransferEngine(const char *metadata_conn_string,
                                        uint64_t rpc_port, int auto_discover) {
     if (g_enable_v1) {
         auto conn_string = parseConnectionString(metadata_conn_string);
-        auto config = std::make_shared<mooncake::tent::ConfigManager>();
+        auto config = std::make_shared<mooncake::tent::Config>();
         config->set("local_segment_name", local_server_name);
         config->set("metadata_type", conn_string.first);
         config->set("metadata_servers", conn_string.second);

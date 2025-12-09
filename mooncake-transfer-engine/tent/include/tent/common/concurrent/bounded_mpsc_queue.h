@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef BOUNDED_MPSC_QUEUE
-#define BOUNDED_MPSC_QUEUE
+#ifndef TENT_BOUNDED_MPSC_QUEUE_H
+#define TENT_BOUNDED_MPSC_QUEUE_H
 
 #include <atomic>
 #include <thread>
@@ -106,4 +106,4 @@ struct BoundedMPSCQueue {
 }  // namespace tent
 }  // namespace mooncake
 
-#endif  // BOUNDED_MPSC_QUEUE
+#endif  // TENT_BOUNDED_MPSC_QUEUE_H

@@ -74,7 +74,7 @@ static std::vector<Topology::NicEntry> listInfiniBandDevices() {
 }
 
 static void filterInfiniBandDevices(std::vector<Topology::NicEntry> &devices,
-                                    std::shared_ptr<ConfigManager> conf) {
+                                    std::shared_ptr<Config> conf) {
     auto whitelist = conf->getArray<std::string>("topology/rdma_whitelist");
     auto blacklist = conf->getArray<std::string>("topology/rdma_blacklist");
     std::vector<Topology::NicEntry> new_devices;

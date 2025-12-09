@@ -26,7 +26,7 @@ enum MemoryType {
 
 class Platform {
    public:
-    static Platform &getLoader(std::shared_ptr<ConfigManager> conf = nullptr);
+    static Platform &getLoader(std::shared_ptr<Config> conf = nullptr);
 
     Platform() {}
 

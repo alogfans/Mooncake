@@ -37,7 +37,7 @@ TcpTransport::~TcpTransport() { uninstall(); }
 Status TcpTransport::install(std::string &local_segment_name,
                              std::shared_ptr<ControlService> metadata,
                              std::shared_ptr<Topology> local_topology,
-                             std::shared_ptr<ConfigManager> conf) {
+                             std::shared_ptr<Config> conf) {
     if (installed_) {
         return Status::InvalidArgument(
             "TCP transport has been installed" LOC_MARK);

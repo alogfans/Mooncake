@@ -123,7 +123,7 @@ int TransferEnginePy::initializeExt(const char *local_hostname,
                                     const char *metadata_type) {
     (void)(protocol);
     if (g_enable_v1) {
-        auto config = std::make_shared<mooncake::tent::ConfigManager>();
+        auto config = std::make_shared<mooncake::tent::Config>();
         if (strcmp(metadata_server, P2PHANDSHAKE) == 0) {
             config->set("local_segment_name", local_hostname);
             config->set("metadata_type", "p2p");

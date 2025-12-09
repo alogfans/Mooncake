@@ -48,7 +48,7 @@ class TcpTransport : public Transport {
     virtual Status install(std::string &local_segment_name,
                            std::shared_ptr<ControlService> metadata,
                            std::shared_ptr<Topology> local_topology,
-                           std::shared_ptr<ConfigManager> conf = nullptr);
+                           std::shared_ptr<Config> conf = nullptr);
 
     virtual Status uninstall();
 

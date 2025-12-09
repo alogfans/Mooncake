@@ -12,51 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifdef USE_DYNAMIC_LOADER
-#include "tent/runtime/transfer_engine_impl.h"
-#include "tent/runtime/loader.h"
-#include "tent/transport/shm/shm_transport.h"
-#include "tent/transport/tcp/tcp_transport.h"
-
-namespace mooncake {
-namespace tent {
-std::shared_ptr<Transport> loadPlugin(const std::string& type) {
-    return Loader::instance().loadPlugin<Transport>("transport", type);
-}
-
-Status TransferEngineImpl::loadTransports() {
-    if (conf_->get("transports/tcp/enable", true))
-        transport_list_[TCP] = std::make_shared<TcpTransport>();
-
-    if (conf_->get("transports/shm/enable", true))
-        transport_list_[SHM] = std::make_shared<ShmTransport>();
-
-    if (conf_->get("transports/rdma/enable", true) &&
-        topology_->getNicCount(Topology::NIC_RDMA)) {
-        transport_list_[RDMA] = loadPlugin("rdma");
-    }
-
-    if (conf_->get("transports/io_uring/enable", true))
-        transport_list_[IOURING] = loadPlugin("uring");
-    
-    bool enable_mnnvl = getenv("MC_ENABLE_MNNVL") != nullptr;
-    if (enable_mnnvl) {
-        if (conf_->get("transports/mnnvl/enable", true))
-            transport_list_[MNNVL] = loadPlugin("mnnvl");
-    } else {
-        if (conf_->get("transports/nvlink/enable", true))
-            transport_list_[NVLINK] = loadPlugin("nvlink");
-    }
-
-    if (conf_->get("transports/gds/enable", false))
-        transport_list_[GDS] = loadPlugin("gds");
-
-    return Status::OK();
-}
-}  // namespace tent
-}  // namespace mooncake
-
-#else
 #include "tent/runtime/transfer_engine_impl.h"
 #include "tent/transport/shm/shm_transport.h"
 #include "tent/transport/tcp/tcp_transport.h"
@@ -89,7 +44,8 @@ Status TransferEngineImpl::loadTransports() {
     if (conf_->get("transports/tcp/enable", true))
         transport_list_[TCP] = std::make_shared<TcpTransport>();
 
-    if (conf_->get("transports/shm/enable", true))
+    // TODO affect the end-to-end performance because it is not numa aware
+    if (conf_->get("transports/shm/enable", false))
         transport_list_[SHM] = std::make_shared<ShmTransport>();
 
 #ifdef USE_RDMA
@@ -131,4 +87,3 @@ Status TransferEngineImpl::loadTransports() {
 
 }  // namespace tent
 }  // namespace mooncake
-#endif

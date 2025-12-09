@@ -137,7 +137,7 @@ AscendDirectTransport::~AscendDirectTransport() {
 Status AscendDirectTransport::install(std::string &local_segment_name,
                                       std::shared_ptr<ControlService> metadata,
                                       std::shared_ptr<Topology> local_topology,
-                                      std::shared_ptr<ConfigManager> conf) {
+                                      std::shared_ptr<Config> conf) {
     if (installed_) {
         return Status::InvalidArgument(
             "Hixl transport has been installed" LOC_MARK);
@@ -159,7 +159,7 @@ Status AscendDirectTransport::install(std::string &local_segment_name,
 }
 
 Status AscendDirectTransport::initHixl(
-    const std::shared_ptr<ConfigManager> &conf) {
+    const std::shared_ptr<Config> &conf) {
     auto ret = aclrtGetDevice(&device_logic_id_);
     if (ret) {
         LOG(ERROR) << "Call aclrtGetDevice failed, ret: " << ret;

@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef TYPES_H_
-#define TYPES_H_
+#ifndef TENT_TYPES_H
+#define TENT_TYPES_H
 
 #include <cstddef>
 #include <cstdint>
@@ -93,4 +93,4 @@ struct SegmentInfo {
 }  // namespace tent
 }  // namespace mooncake
 
-#endif  // TYPES_H_
+#endif  // TENT_TYPES_H

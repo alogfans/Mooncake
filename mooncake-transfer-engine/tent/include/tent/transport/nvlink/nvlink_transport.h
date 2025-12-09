@@ -55,7 +55,7 @@ class NVLinkTransport : public Transport {
     virtual Status install(std::string &local_segment_name,
                            std::shared_ptr<ControlService> metadata,
                            std::shared_ptr<Topology> local_topology,
-                           std::shared_ptr<ConfigManager> conf = nullptr);
+                           std::shared_ptr<Config> conf = nullptr);
 
     virtual Status uninstall();
 
@@ -104,7 +104,7 @@ class NVLinkTransport : public Transport {
 
     RWSpinlock relocate_lock_;
     HashMap relocate_map_;
-    std::shared_ptr<ConfigManager> conf_;
+    std::shared_ptr<Config> conf_;
 
     std::string machine_id_;
     uint64_t async_memcpy_threshold_;

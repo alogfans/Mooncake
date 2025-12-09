@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef RANDOM_H
-#define RANDOM_H
+#ifndef TENT_RANDOM_H
+#define TENT_RANDOM_H
 
 #include <atomic>
 
@@ -48,4 +48,4 @@ class SimpleRandom {
 }  // namespace tent
 }  // namespace mooncake
 
-#endif  // RANDOM_H
+#endif  // TENT_RANDOM_H

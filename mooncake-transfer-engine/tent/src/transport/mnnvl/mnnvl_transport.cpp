@@ -90,7 +90,7 @@ MnnvlTransport::~MnnvlTransport() { uninstall(); }
 Status MnnvlTransport::install(std::string &local_segment_name,
                                std::shared_ptr<ControlService> metadata,
                                std::shared_ptr<Topology> local_topology,
-                               std::shared_ptr<ConfigManager> conf) {
+                               std::shared_ptr<Config> conf) {
     if (installed_) {
         return Status::InvalidArgument(
             "MNNVL transport has been installed " LOC_MARK);

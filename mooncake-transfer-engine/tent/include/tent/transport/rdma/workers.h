@@ -188,6 +188,7 @@ class Workers {
 
         std::unordered_map<std::string, RailMonitor> rails;
         PerfMetricSummary perf;
+        uint64_t padding[16];
     };
 
     WorkerContext *worker_context_;

@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef THREAD_LOCAL_STORAGE_H
-#define THREAD_LOCAL_STORAGE_H
+#ifndef TENT_THREAD_LOCAL_STORAGE_H
+#define TENT_THREAD_LOCAL_STORAGE_H
 
 #include <functional>
 #include <mutex>
@@ -81,4 +81,4 @@ thread_local typename ThreadLocalStorage<T>::InstanceHolder*
 }  // namespace tent
 }  // namespace mooncake
 
-#endif  // THREAD_LOCAL_STORAGE_H
+#endif  // TENT_THREAD_LOCAL_STORAGE_H

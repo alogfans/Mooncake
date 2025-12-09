@@ -75,7 +75,7 @@ static std::vector<Topology::NicEntry> listInfiniBandDevices() {
 }
 
 static void filterInfiniBandDevices(std::vector<Topology::NicEntry> &devices,
-                                    std::shared_ptr<ConfigManager> conf) {
+                                    std::shared_ptr<Config> conf) {
     auto whitelist = conf->getArray<std::string>("topology/rdma_whitelist");
     auto blacklist = conf->getArray<std::string>("topology/rdma_blacklist");
     std::vector<Topology::NicEntry> new_devices;
@@ -355,9 +355,9 @@ const std::vector<RangeLocation> CudaPlatform::getLocation(void *start,
 
 #ifdef WITH_PLUGIN_HOOK
 extern "C" mooncake::tent::Platform *plugin_init(
-    mooncake::tent::ConfigManager *raw) {
-    std::shared_ptr<mooncake::tent::ConfigManager> conf(
-        raw, [](mooncake::tent::ConfigManager *) {});
+    mooncake::tent::Config *raw) {
+    std::shared_ptr<mooncake::tent::Config> conf(
+        raw, [](mooncake::tent::Config *) {});
     return new mooncake::tent::CudaPlatform(conf);
 }
 

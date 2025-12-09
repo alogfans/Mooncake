@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "tent/transfer_engine_c.h"
+#include "tent/transfer_engine.h"
 
 #include <glog/logging.h>
 
@@ -39,9 +39,9 @@ void mc_set_config(const char *key, const char *value) {
 }
 
 mc_engine_t mc_create_engine() {
-    auto config = std::make_shared<mooncake::tent::ConfigManager>();
+    auto config = std::make_shared<mooncake::tent::Config>();
     if (!tl_settings.path.empty()) {
-        auto status = config->loadConfigContent(tl_settings.path);
+        auto status = config->load(tl_settings.path);
         if (!status.ok()) {
             LOG(WARNING) << "mc_create_engine: " << status.ToString()
                          << ", fallback to default config";

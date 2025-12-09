@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef IP_UTIL_H
-#define IP_UTIL_H
+#ifndef TENT_IP_H
+#define TENT_IP_H
 
 #include <arpa/inet.h>
 #include <bits/stdint-uintn.h>
@@ -41,4 +41,4 @@ std::pair<std::string, uint16_t> parseHostNameWithPort(const std::string &url,
 
 }  // namespace tent
 }  // namespace mooncake
-#endif  // IP_UTIL_H
+#endif  // TENT_IP_H

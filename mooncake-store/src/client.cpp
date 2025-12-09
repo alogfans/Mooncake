@@ -258,7 +258,7 @@ ErrorCode Client::InitTransferEngine(
     if (!auto_discover) {
         LOG(WARNING) << "TENT supports auto discovery only";
     }
-    auto config = std::make_shared<mooncake::tent::ConfigManager>();
+    auto config = std::make_shared<mooncake::tent::Config>();
     config->set("local_segment_name", local_hostname);
     config->set("metadata_type", "p2p");
     transfer_engine_ = std::make_shared<mooncake::tent::TransferEngine>();
