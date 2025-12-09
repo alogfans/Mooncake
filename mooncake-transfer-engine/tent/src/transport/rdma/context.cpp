@@ -50,14 +50,14 @@
 
 namespace mooncake {
 namespace tent {
-static inline int isNullGid(union ibv_gid *gid) {
+static inline int isNullGid(union ibv_gid* gid) {
     for (int i = 0; i < 16; ++i) {
         if (gid->raw[i] != 0) return 0;
     }
     return 1;
 }
 
-static inline int querySocketID(const std::string &device_name) {
+static inline int querySocketID(const std::string& device_name) {
     std::string path =
         "/sys/class/infiniband/" + device_name + "/device/numa_node";
     std::ifstream file(path);
@@ -96,7 +96,7 @@ static inline int joinNonblockingPollList(int event_fd, int data_fd) {
     return 0;
 }
 
-static inline int ipv6_addr_v4mapped(const struct in6_addr *a) {
+static inline int ipv6_addr_v4mapped(const struct in6_addr* a) {
     return ((a->s6_addr32[0] | a->s6_addr32[1]) |
             (a->s6_addr32[2] ^ htonl(0x0000ffff))) == 0UL ||
            /* IPv4 encoded multicast addresses */
@@ -104,9 +104,9 @@ static inline int ipv6_addr_v4mapped(const struct in6_addr *a) {
             ((a->s6_addr32[1] | (a->s6_addr32[2] ^ htonl(0x0000ffff))) == 0UL));
 }
 
-static inline int getBestGidIndex(const std::string &device_name,
-                                  struct ibv_context *context,
-                                  ibv_port_attr &port_attr, uint8_t port) {
+static inline int getBestGidIndex(const std::string& device_name,
+                                  struct ibv_context* context,
+                                  ibv_port_attr& port_attr, uint8_t port) {
     int gid_index = 0, i;
     struct ibv_gid_entry gid_entry;
 
@@ -116,7 +116,7 @@ static inline int getBestGidIndex(const std::string &device_name,
                           << device_name << " port " << port;
             continue;  // if gid is invalid ibv_query_gid_ex() will return !0
         }
-        if ((ipv6_addr_v4mapped((struct in6_addr *)gid_entry.gid.raw) &&
+        if ((ipv6_addr_v4mapped((struct in6_addr*)gid_entry.gid.raw) &&
              gid_entry.gid_type == IBV_GID_TYPE_ROCE_V2) ||
             gid_entry.gid_type == IBV_GID_TYPE_IB) {
             gid_index = i;
@@ -139,11 +139,13 @@ static inline const std::string statusToString(
     return "UNKNOWN";
 }
 
-RdmaContext::RdmaContext(RdmaTransport &transport)
-    : transport_(transport), status_(DEVICE_UNINIT) {
+RdmaContext::RdmaContext(RdmaTransport& transport)
+    : transport_(transport),
+      status_(DEVICE_UNINIT),
+      verbs_(IbvLoader::Instance().sym()) {
     static std::once_flag g_once_flag;
-    auto fork_init = []() {
-        int ret = ibv_fork_init();
+    auto fork_init = [&]() {
+        int ret = verbs_.ibv_fork_init();
         if (ret) PLOG(FATAL) << "ibv_fork_init";
     };
     std::call_once(g_once_flag, fork_init);
@@ -153,7 +155,7 @@ RdmaContext::~RdmaContext() {
     if (status_ != DEVICE_UNINIT) disable();
 }
 
-int RdmaContext::construct(const std::string &device_name,
+int RdmaContext::construct(const std::string& device_name,
                            std::shared_ptr<RdmaParams> params) {
     ASSERT_STATUS(DEVICE_UNINIT);
     device_name_ = device_name;
@@ -174,7 +176,7 @@ int RdmaContext::enable() {
         return -1;
     }
 
-    native_pd_ = ibv_alloc_pd(native_context_);
+    native_pd_ = verbs_.ibv_alloc_pd(native_context_);
     if (!native_pd_) {
         PLOG(ERROR) << "ibv_alloc_pd";
         disable();
@@ -197,7 +199,7 @@ int RdmaContext::enable() {
     comp_channel_.resize(num_comp_channel_, nullptr);
 
     for (size_t i = 0; i < num_comp_channel_; ++i) {
-        comp_channel_[i] = ibv_create_comp_channel(native_context_);
+        comp_channel_[i] = verbs_.ibv_create_comp_channel(native_context_);
         if (!comp_channel_[i]) {
             PLOG(ERROR) << "ibv_create_comp_channel";
             disable();
@@ -222,9 +224,9 @@ int RdmaContext::enable() {
 
     status_ = DEVICE_ENABLED;
 
-    if (params_->verbose) {  
+    if (params_->verbose) {
         LOG(INFO) << "Context " << device_name_ << " is enabled: "
-                << "LID " << lid_ << ", GID [" << gid_index_ << "] " << gid();
+                  << "LID " << lid_ << ", GID [" << gid_index_ << "] " << gid();
     }
     return 0;
 }
@@ -233,12 +235,12 @@ int RdmaContext::disable() {
     ASSERT_STATUS_NOT(DEVICE_UNINIT);
     endpoint_store_->clear();
 
-    for (auto &entry : mr_set_) {
-        int ret = ibv_dereg_mr(entry);
+    for (auto& entry : mr_set_) {
+        int ret = verbs_.ibv_dereg_mr(entry);
         if (ret) PLOG(ERROR) << "ibv_dereg_mr";
     }
     mr_set_.clear();
-    for (auto &entry : cq_list_) {
+    for (auto& entry : cq_list_) {
         delete entry;
     }
     cq_list_.clear();
@@ -248,19 +250,19 @@ int RdmaContext::disable() {
         event_fd_ = -1;
     }
 
-    for (auto &item : comp_channel_)
-        if (item && ibv_destroy_comp_channel(item))
+    for (auto& item : comp_channel_)
+        if (item && verbs_.ibv_destroy_comp_channel(item))
             PLOG(ERROR) << "ibv_destroy_comp_channel";
     comp_channel_.clear();
     num_comp_channel_ = 0;
 
     if (native_pd_) {
-        if (ibv_dealloc_pd(native_pd_)) PLOG(ERROR) << "ibv_dealloc_pd";
+        if (verbs_.ibv_dealloc_pd(native_pd_)) PLOG(ERROR) << "ibv_dealloc_pd";
         native_pd_ = nullptr;
     }
 
     if (native_context_) {
-        if (ibv_close_device(native_context_))
+        if (verbs_.ibv_close_device(native_context_))
             PLOG(ERROR) << "ibv_close_device";
         native_context_ = nullptr;
     }
@@ -269,13 +271,13 @@ int RdmaContext::disable() {
     return 0;
 }
 
-RdmaContext::MemReg RdmaContext::registerMemReg(void *addr, size_t length,
+RdmaContext::MemReg RdmaContext::registerMemReg(void* addr, size_t length,
                                                 int access) {
     ASSERT_STATUS(DEVICE_ENABLED);
-    ibv_mr *entry = ibv_reg_mr(native_pd_, addr, length, access);
+    ibv_mr* entry = verbs_.ibv_reg_mr_default(native_pd_, addr, length, access);
     if (!entry) {
         PLOG(ERROR) << "Failed to register memory from " << addr << " to "
-                    << (char *)addr + length << " in RDMA device "
+                    << (char*)addr + length << " in RDMA device "
                     << device_name_;
         return nullptr;
     }
@@ -287,14 +289,14 @@ RdmaContext::MemReg RdmaContext::registerMemReg(void *addr, size_t length,
 
 int RdmaContext::unregisterMemReg(MemReg id) {
     ASSERT_STATUS(DEVICE_ENABLED);
-    auto entry = (ibv_mr *)id;
+    auto entry = (ibv_mr*)id;
     mr_set_mutex_.lock();
     mr_set_.erase(entry);
     mr_set_mutex_.unlock();
 
-    if (ibv_dereg_mr(entry)) {
+    if (verbs_.ibv_dereg_mr(entry)) {
         LOG(ERROR) << "Failed to unregister memory from " << entry->addr
-                   << " to " << (char *)entry->addr + entry->length
+                   << " to " << (char*)entry->addr + entry->length
                    << " in RDMA device " << device_name_;
     }
 
@@ -313,42 +315,42 @@ std::string RdmaContext::gid() const {
     return gid_str;
 }
 
-RdmaCQ *RdmaContext::cq(int index) {
+RdmaCQ* RdmaContext::cq(int index) {
     ASSERT_STATUS(DEVICE_ENABLED);
     if (index < 0 || index >= params_->device.num_cq_list) return nullptr;
     return cq_list_[index];
 }
 
-int RdmaContext::openDevice(const std::string &device_name, uint8_t port) {
+int RdmaContext::openDevice(const std::string& device_name, uint8_t port) {
     int num_devices = 0;
-    struct ibv_context *context = nullptr;
-    struct ibv_device **devices = ibv_get_device_list(&num_devices);
+    struct ibv_context* context = nullptr;
+    struct ibv_device** devices = verbs_.ibv_get_device_list(&num_devices);
     if (!devices || num_devices <= 0) {
         PLOG(ERROR) << "ibv_get_device_list";
         return -1;
     }
 
     for (int i = 0; i < num_devices; ++i) {
-        if (device_name != ibv_get_device_name(devices[i])) continue;
-        context = ibv_open_device(devices[i]);
+        if (device_name != verbs_.ibv_get_device_name(devices[i])) continue;
+        context = verbs_.ibv_open_device(devices[i]);
         if (!context) {
             PLOG(ERROR) << "ibv_open_device";
-            ibv_free_device_list(devices);
+            verbs_.ibv_free_device_list(devices);
             return -1;
         }
     }
 
-    ibv_free_device_list(devices);
+    verbs_.ibv_free_device_list(devices);
     if (!context) {
         LOG(ERROR) << "No matched device found in this server: " << device_name;
         return -1;
     }
 
     ibv_port_attr port_attr;
-    int ret = ibv_query_port(context, port, &port_attr);
+    int ret = verbs_.ibv_query_port_default(context, port, &port_attr);
     if (ret) {
         PLOG(ERROR) << "Failed to query port " << port << " on " << device_name;
-        if (ibv_close_device(context)) {
+        if (verbs_.ibv_close_device(context)) {
             PLOG(ERROR) << "ibv_close_device";
         }
         return -1;
@@ -357,17 +359,17 @@ int RdmaContext::openDevice(const std::string &device_name, uint8_t port) {
     if (port_attr.state != IBV_PORT_ACTIVE) {
         LOG(WARNING) << "Device " << device_name << " port " << port
                      << " not active";
-        if (ibv_close_device(context)) {
+        if (verbs_.ibv_close_device(context)) {
             PLOG(ERROR) << "ibv_close_device";
         }
         return -1;
     }
 
     ibv_device_attr device_attr;
-    ret = ibv_query_device(context, &device_attr);
+    ret = verbs_.ibv_query_device(context, &device_attr);
     if (ret) {
         PLOG(WARNING) << "ibv_query_device";
-        if (ibv_close_device(context)) {
+        if (verbs_.ibv_close_device(context)) {
             PLOG(ERROR) << "ibv_close_device";
         }
         return -1;
@@ -387,7 +389,7 @@ int RdmaContext::openDevice(const std::string &device_name, uint8_t port) {
         }
     }
 
-    ret = ibv_query_gid(context, port, gid_index_, &gid_);
+    ret = verbs_.ibv_query_gid(context, port, gid_index_, &gid_);
     if (ret) {
         PLOG(ERROR) << "Unable to query GID " << gid_index_ << " on device "
                     << device_name << " port " << port;
@@ -400,7 +402,7 @@ int RdmaContext::openDevice(const std::string &device_name, uint8_t port) {
     if (isNullGid(&gid_)) {
         PLOG(ERROR) << "Uninitialized GID " << gid_index_ << " on "
                     << device_name << "/" << port;
-        if (ibv_close_device(context)) {
+        if (verbs_.ibv_close_device(context)) {
             PLOG(ERROR) << "ibv_close_device";
         }
         return -1;

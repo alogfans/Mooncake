@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef RDMA_CONTEXT_H
-#define RDMA_CONTEXT_H
+#ifndef TENT_CONTEXT_H
+#define TENT_CONTEXT_H
 
 #include <gflags/gflags.h>
 #include <glog/logging.h>
@@ -30,6 +30,7 @@
 
 #include "cq.h"
 #include "params.h"
+#include "ibv_loader.h"
 #include "rdma_transport.h"
 #include "tent/common/status.h"
 
@@ -127,9 +128,11 @@ class RdmaContext {
 
     std::shared_ptr<EndpointStore> endpoint_store_;
     std::vector<RdmaCQ *> cq_list_;
+
+    const IbvSymbols &verbs_;
 };
 
 }  // namespace tent
 }  // namespace mooncake
 
-#endif  // RDMA_CONTEXT_H
+#endif  // TENT_CONTEXT_H

@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef RDMA_BUFFERS_H
-#define RDMA_BUFFERS_H
+#ifndef TENT_BUFFERS_H
+#define TENT_BUFFERS_H
 
 #include <map>
 #include <memory>
@@ -115,4 +115,4 @@ class LocalBufferManager {
 }  // namespace tent
 }  // namespace mooncake
 
-#endif  // RDMA_BUFFERS_H
+#endif  // TENT_BUFFERS_H

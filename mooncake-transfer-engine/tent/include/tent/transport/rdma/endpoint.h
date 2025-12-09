@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef RDMA_ENDPOINT_H
-#define RDMA_ENDPOINT_H
+#ifndef TENT_ENDPOINT_H
+#define TENT_ENDPOINT_H
 
 #include <queue>
 
@@ -166,4 +166,4 @@ class RdmaEndPoint {
 }  // namespace tent
 }  // namespace mooncake
 
-#endif  // RDMA_ENDPOINT_H
+#endif  // TENT_ENDPOINT_H

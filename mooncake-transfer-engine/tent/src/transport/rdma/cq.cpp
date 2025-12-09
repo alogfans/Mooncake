@@ -29,24 +29,24 @@ namespace mooncake {
 namespace tent {
 RdmaCQ::~RdmaCQ() {
     if (cq_) {
-        ibv_destroy_cq(cq_);
+        context_->verbs_.ibv_destroy_cq(cq_);
         cq_ = nullptr;
     }
 }
 
-int RdmaCQ::construct(RdmaContext *context, int cqe_limit, int index) {
+int RdmaCQ::construct(RdmaContext* context, int cqe_limit, int index) {
     context_ = context;
     cqe_limit_ = cqe_limit;
     auto native_context = context_->nativeContext();
-    ibv_comp_channel *comp_channel =
+    ibv_comp_channel* comp_channel =
         (context_->num_comp_channel_)
             ? context_->comp_channel_[index % context_->num_comp_channel_]
             : nullptr;
     int comp_vector = (native_context->num_comp_vectors == 0)
                           ? 0
                           : index % native_context->num_comp_vectors;
-    cq_ = ibv_create_cq(native_context, cqe_limit, nullptr, comp_channel,
-                        comp_vector);
+    cq_ = context_->verbs_.ibv_create_cq(native_context, cqe_limit, nullptr,
+                                         comp_channel, comp_vector);
     if (!cq_) {
         PLOG(ERROR) << "ibv_create_cq";
         return -1;
@@ -67,7 +67,7 @@ void RdmaCQ::cancelQuota(int num_entries) {
     __sync_fetch_and_sub(&cqe_now_, num_entries);
 }
 
-int RdmaCQ::poll(int num_entries, ibv_wc *wc) {
+int RdmaCQ::poll(int num_entries, ibv_wc* wc) {
     if (!cqe_now_) return 0;
     int rc = ibv_poll_cq(cq_, num_entries, wc);
     if (rc < 0) {

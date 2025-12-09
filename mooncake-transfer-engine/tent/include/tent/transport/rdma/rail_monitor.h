@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef RAIL_MONITOR_H
-#define RAIL_MONITOR_H
+#ifndef TENT_RAIL_MONITOR_H
+#define TENT_RAIL_MONITOR_H
 
 #include "tent/common/config.h"
 #include "tent/common/status.h"
@@ -85,4 +85,4 @@ class RailMonitor {
 }  // namespace tent
 }  // namespace mooncake
 
-#endif  // RAIL_MONITOR_H
+#endif  // TENT_RAIL_MONITOR_H

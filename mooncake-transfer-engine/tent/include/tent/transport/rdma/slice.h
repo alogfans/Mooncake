@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef RDMA_SLICE_H_
-#define RDMA_SLICE_H_
+#ifndef TENT_SLICE_H
+#define TENT_SLICE_H
 
 #include <atomic>
 #include <cstddef>
@@ -91,4 +91,4 @@ static inline void updateSliceStatus(RdmaSlice *slice,
 }  // namespace tent
 }  // namespace mooncake
 
-#endif  // RDMA_SLICE_H_
+#endif  // TENT_SLICE_H

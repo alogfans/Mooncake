@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef ENDPOINT_STORE_H_
-#define ENDPOINT_STORE_H_
+#ifndef TENT_ENDPOINT_STORE_H
+#define TENT_ENDPOINT_STORE_H
 
 #include <infiniband/verbs.h>
 

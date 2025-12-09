@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef DEVICE_QUOTA_FEEDBACK_H_
-#define DEVICE_QUOTA_FEEDBACK_H_
+#ifndef TENT_QUOTA_H
+#define TENT_QUOTA_H
 
 #include <atomic>
 #include <vector>
@@ -120,4 +120,4 @@ class DeviceQuota {
 }  // namespace tent
 }  // namespace mooncake
 
-#endif  // DEVICE_QUOTA_FEEDBACK_H_
+#endif  // TENT_QUOTA_H

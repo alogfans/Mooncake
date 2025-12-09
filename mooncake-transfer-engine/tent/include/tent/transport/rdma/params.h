@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef RDMA_PARAMS_H
-#define RDMA_PARAMS_H
+#ifndef TENT_PARAMS_H
+#define TENT_PARAMS_H
 
 #include <cstddef>
 #include <cstdint>
@@ -75,4 +75,4 @@ struct RdmaParams {
 };
 }  // namespace tent
 }  // namespace mooncake
-#endif  // RDMA_PARAMS_H
+#endif  // TENT_PARAMS_H

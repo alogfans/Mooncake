@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef RDMA_CQ_H
-#define RDMA_CQ_H
+#ifndef TENT_CQ_H
+#define TENT_CQ_H
 
 #include <gflags/gflags.h>
 #include <glog/logging.h>
@@ -65,4 +65,4 @@ class RdmaCQ {
 }  // namespace tent
 }  // namespace mooncake
 
-#endif  // RDMA_CQ_H
+#endif  // TENT_CQ_H

@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef RDMA_WORKERS_H
-#define RDMA_WORKERS_H
+#ifndef TENT_WORKERS_H
+#define TENT_WORKERS_H
 
 #include <future>
 #include <queue>

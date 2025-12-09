@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef RDMA_TRANSPORT_V1_H_
-#define RDMA_TRANSPORT_V1_H_
+#ifndef TENT_RDMA_TRANSPORT_H
+#define TENT_RDMA_TRANSPORT_H
 
 #include <infiniband/verbs.h>
 
@@ -108,4 +108,4 @@ class RdmaTransport : public Transport {
 }  // namespace tent
 }  // namespace mooncake
 
-#endif  // RDMA_TRANSPORT_V1_H_
+#endif  // TENT_RDMA_TRANSPORT_H

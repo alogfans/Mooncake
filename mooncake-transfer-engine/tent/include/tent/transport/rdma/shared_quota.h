@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef MOONCAKE_SHARED_QUOTA_MANAGER_H
-#define MOONCAKE_SHARED_QUOTA_MANAGER_H
+#ifndef TENT_SHARED_QUOTA_H
+#define TENT_SHARED_QUOTA_H
 
 #include "quota.h"
 #include "tent/common/status.h"
@@ -98,4 +98,4 @@ class SharedQuotaManager {
 }  // namespace tent
 }  // namespace mooncake
 
-#endif  // MOONCAKE_SHARED_QUOTA_MANAGER_H
+#endif  // TENT_SHARED_QUOTA_H

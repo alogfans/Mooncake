@@ -49,9 +49,9 @@ RdmaEndPoint::~RdmaEndPoint() {
         endpoints_count_->fetch_sub(1, std::memory_order_relaxed);
 }
 
-int RdmaEndPoint::construct(RdmaContext *context, EndPointParams *params,
-                            const std::string &endpoint_name,
-                            std::atomic<int> *endpoints_count) {
+int RdmaEndPoint::construct(RdmaContext* context, EndPointParams* params,
+                            const std::string& endpoint_name,
+                            std::atomic<int>* endpoints_count) {
     context_ = context;
     params_ = params;
     endpoint_name_ = endpoint_name;
@@ -73,7 +73,8 @@ int RdmaEndPoint::construct(RdmaContext *context, EndPointParams *params,
         attr.cap.max_send_wr = attr.cap.max_recv_wr = params_->max_qp_wr;
         attr.cap.max_send_sge = attr.cap.max_recv_sge = params_->max_sge;
         attr.cap.max_inline_data = params_->max_inline_bytes;
-        qp_list_[i] = ibv_create_qp(context_->nativePD(), &attr);
+        qp_list_[i] =
+            context_->verbs_.ibv_create_qp(context_->nativePD(), &attr);
         if (!qp_list_[i]) {
             PLOG(ERROR) << "ibv_create_qp";
             deconstruct();
@@ -90,7 +91,8 @@ int RdmaEndPoint::deconstruct() {
     status_ = EP_RESET;
     resetInflightSlices();
     for (size_t i = 0; i < qp_list_.size(); ++i) {
-        if (ibv_destroy_qp(qp_list_[i])) PLOG(ERROR) << "ibv_destroy_qp";
+        if (context_->verbs_.ibv_destroy_qp(qp_list_[i]))
+            PLOG(ERROR) << "ibv_destroy_qp";
         cancelQuota(i, wr_depth_list_[i].value);
     }
     qp_list_.clear();
@@ -101,8 +103,8 @@ int RdmaEndPoint::deconstruct() {
     return 0;
 }
 
-Status RdmaEndPoint::connect(const std::string &peer_server_name,
-                             const std::string &peer_nic_name) {
+Status RdmaEndPoint::connect(const std::string& peer_server_name,
+                             const std::string& peer_nic_name) {
     RWSpinlock::WriteGuard guard(lock_);
     if (peer_server_name.empty() || peer_nic_name.empty())
         return Status::InvalidArgument("Invalid peer path" LOC_MARK);
@@ -110,8 +112,8 @@ Status RdmaEndPoint::connect(const std::string &peer_server_name,
     if (status_ != EP_HANDSHAKING)
         return Status::InvalidArgument(
             "Endpoint not in handshaking state" LOC_MARK);
-    auto &transport = context_->transport_;
-    auto &manager = transport.metadata_->segmentManager();
+    auto& transport = context_->transport_;
+    auto& manager = transport.metadata_->segmentManager();
     auto qp_num = qpNum();
     BootstrapDesc local_desc, peer_desc;
     local_desc.local_nic_path =
@@ -146,8 +148,8 @@ Status RdmaEndPoint::connect(const std::string &peer_server_name,
     return Status::OK();
 }
 
-Status RdmaEndPoint::accept(const BootstrapDesc &peer_desc,
-                            BootstrapDesc &local_desc) {
+Status RdmaEndPoint::accept(const BootstrapDesc& peer_desc,
+                            BootstrapDesc& local_desc) {
     RWSpinlock::WriteGuard guard(lock_);
     if (status_ == EP_READY) {
         LOG(WARNING) << "Endpoint is established with " << peer_nic_name_
@@ -160,8 +162,8 @@ Status RdmaEndPoint::accept(const BootstrapDesc &peer_desc,
         return Status::InvalidArgument(
             "Endpoint not in handshaking state" LOC_MARK);
     }
-    auto &transport = context_->transport_;
-    auto &manager = transport.metadata_->segmentManager();
+    auto& transport = context_->transport_;
+    auto& manager = transport.metadata_->segmentManager();
     auto peer_nic_path = peer_desc.local_nic_path;
     auto peer_server_name = getServerNameFromNicPath(peer_nic_path);
     auto peer_nic_name = getNicNameFromNicPath(peer_nic_path);
@@ -202,7 +204,8 @@ int RdmaEndPoint::resetUnlocked() {
     memset(&attr, 0, sizeof(attr));
     attr.qp_state = IBV_QPS_RESET;
     for (size_t i = 0; i < qp_list_.size(); ++i) {
-        int ret = ibv_modify_qp(qp_list_[i], &attr, IBV_QP_STATE);
+        int ret =
+            context_->verbs_.ibv_modify_qp(qp_list_[i], &attr, IBV_QP_STATE);
         if (ret) {
             PLOG(ERROR) << "ibv_modify_qp(RESET)";
             deconstruct();
@@ -213,9 +216,9 @@ int RdmaEndPoint::resetUnlocked() {
     return 0;
 }
 
-int RdmaEndPoint::setupAllQPs(const std::string &peer_gid, uint16_t peer_lid,
+int RdmaEndPoint::setupAllQPs(const std::string& peer_gid, uint16_t peer_lid,
                               std::vector<uint32_t> peer_qp_num_list,
-                              std::string *reply_msg) {
+                              std::string* reply_msg) {
     if (status_ == EP_READY) {
         status_ = EP_RESET;
         return -1;
@@ -245,7 +248,7 @@ int RdmaEndPoint::setupAllQPs(const std::string &peer_gid, uint16_t peer_lid,
     return 0;
 }
 
-static ibv_wr_opcode getOpCode(RdmaSlice *slice) {
+static ibv_wr_opcode getOpCode(RdmaSlice* slice) {
     switch (slice->task->request.opcode) {
         case Request::READ:
             return IBV_WR_RDMA_READ;
@@ -256,7 +259,7 @@ static ibv_wr_opcode getOpCode(RdmaSlice *slice) {
     }
 }
 
-int RdmaEndPoint::submitSlices(std::vector<RdmaSlice *> &slice_list,
+int RdmaEndPoint::submitSlices(std::vector<RdmaSlice*>& slice_list,
                                int qp_index) {
     // RWSpinlock::ReadGuard guard(lock_);  // TODO performance issue
     const static int kSgeEntries = 1;
@@ -279,9 +282,9 @@ int RdmaEndPoint::submitSlices(std::vector<RdmaSlice *> &slice_list,
 
     for (int wr_idx = 0; wr_idx < wr_count; ++wr_idx) {
         auto current = slice_list[wr_idx];
-        auto &wr = wr_list[wr_idx];
+        auto& wr = wr_list[wr_idx];
         for (int sge_off = 0; sge_off < kSgeEntries; ++sge_off) {
-            auto &sge = sge_list[sge_idx + sge_off];
+            auto& sge = sge_list[sge_idx + sge_off];
             sge.addr = (uint64_t)current->source_addr;
             sge.length = current->length;
             sge.lkey = current->source_lkey;
@@ -314,7 +317,7 @@ int RdmaEndPoint::submitSlices(std::vector<RdmaSlice *> &slice_list,
         }
     }
 
-    auto &queue = slice_queue_[qp_index];
+    auto& queue = slice_queue_[qp_index];
     for (int wr_idx = 0; wr_idx < wr_count; ++wr_idx) {
         auto current = slice_list[wr_idx];
         if (!current->failed) {
@@ -343,7 +346,7 @@ int RdmaEndPoint::submitRecvImmDataRequest(int qp_index, uint64_t id) {
 
 void RdmaEndPoint::resetInflightSlices() {
     for (int qp_index = 0; qp_index < (int)qp_list_.size(); ++qp_index) {
-        auto &queue = slice_queue_[qp_index];
+        auto& queue = slice_queue_[qp_index];
         while (!queue.empty()) {
             auto current = queue.pop();
             updateSliceStatus(current, TransferStatusEnum::CANCELED);
@@ -351,12 +354,12 @@ void RdmaEndPoint::resetInflightSlices() {
     }
 }
 
-size_t RdmaEndPoint::acknowledge(RdmaSlice *slice, TransferStatusEnum status) {
+size_t RdmaEndPoint::acknowledge(RdmaSlice* slice, TransferStatusEnum status) {
     auto qp_index = slice->qp_index;
-    auto &queue = slice_queue_[qp_index];
+    auto& queue = slice_queue_[qp_index];
     if (!queue.contains(slice)) return 0;
     int num_entries = 0;
-    RdmaSlice *current = nullptr;
+    RdmaSlice* current = nullptr;
     do {
         current = queue.pop();
         if (!current) break;
@@ -398,11 +401,11 @@ void RdmaEndPoint::cancelQuota(int qp_index, int num_entries) {
     cq->cancelQuota(num_entries);
 }
 
-int RdmaEndPoint::setupOneQP(int qp_index, const std::string &peer_gid,
+int RdmaEndPoint::setupOneQP(int qp_index, const std::string& peer_gid,
                              uint16_t peer_lid, uint32_t peer_qp_num,
-                             std::string *reply_msg) {
+                             std::string* reply_msg) {
     assert(qp_index >= 0 && qp_index < (int)qp_list_.size());
-    auto &qp = qp_list_[qp_index];
+    auto& qp = qp_list_[qp_index];
 
     // RESET -> INIT
     ibv_qp_attr attr;
@@ -412,7 +415,7 @@ int RdmaEndPoint::setupOneQP(int qp_index, const std::string &peer_gid,
     attr.pkey_index = params_->pkey_index;
     attr.qp_access_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ |
                            IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_ATOMIC;
-    int ret = ibv_modify_qp(
+    int ret = context_->verbs_.ibv_modify_qp(
         qp, &attr,
         IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS);
     if (ret) {
@@ -454,10 +457,10 @@ int RdmaEndPoint::setupOneQP(int qp_index, const std::string &peer_gid,
     attr.rq_psn = params_->rq_psn;
     attr.max_dest_rd_atomic = params_->max_dest_rd_atomic;
     attr.min_rnr_timer = params_->min_rnr_timer;
-    ret = ibv_modify_qp(qp, &attr,
-                        IBV_QP_STATE | IBV_QP_PATH_MTU | IBV_QP_MIN_RNR_TIMER |
-                            IBV_QP_AV | IBV_QP_MAX_DEST_RD_ATOMIC |
-                            IBV_QP_DEST_QPN | IBV_QP_RQ_PSN);
+    ret = context_->verbs_.ibv_modify_qp(
+        qp, &attr,
+        IBV_QP_STATE | IBV_QP_PATH_MTU | IBV_QP_MIN_RNR_TIMER | IBV_QP_AV |
+            IBV_QP_MAX_DEST_RD_ATOMIC | IBV_QP_DEST_QPN | IBV_QP_RQ_PSN);
     if (ret) {
         std::stringstream ss;
         ss << "Failed to modify QP's state to RTR in endpoint "
@@ -478,10 +481,10 @@ int RdmaEndPoint::setupOneQP(int qp_index, const std::string &peer_gid,
     attr.rnr_retry = params_->send_rnr_count;
     attr.sq_psn = params_->sq_psn;
     attr.max_rd_atomic = params_->max_rd_atomic;
-    ret = ibv_modify_qp(qp, &attr,
-                        IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT |
-                            IBV_QP_RNR_RETRY | IBV_QP_SQ_PSN |
-                            IBV_QP_MAX_QP_RD_ATOMIC);
+    ret = context_->verbs_.ibv_modify_qp(
+        qp, &attr,
+        IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY |
+            IBV_QP_SQ_PSN | IBV_QP_MAX_QP_RD_ATOMIC);
     if (ret) {
         std::stringstream ss;
         ss << "Failed to modify QP's state to RTS in endpoint "

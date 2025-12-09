@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "tent/transport/rdma/rdma_transport.h"
+#include "tent/transport/rdma/ibv_loader.h"
 
 #include <glog/logging.h>
 #include <sys/mman.h>
@@ -115,6 +116,11 @@ Status RdmaTransport::install(std::string& local_segment_name,
     if (installed_) {
         return Status::InvalidArgument(
             "RDMA transport has been installed" LOC_MARK);
+    }
+
+    if (!IbvLoader::Instance().available()) {
+        return Status::InvalidArgument(
+            "RDMA transport not available" LOC_MARK);
     }
 
     if (local_topology == nullptr ||
