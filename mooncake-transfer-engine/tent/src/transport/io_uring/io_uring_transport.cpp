@@ -14,7 +14,7 @@
 
 #include "tent/transport/io_uring/io_uring_transport.h"
 
-#include <bits/stdint-uintn.h>
+#include <cstdint>
 #include <glog/logging.h>
 
 #include <algorithm>
@@ -78,6 +78,7 @@ Status IOUringTransport::install(std::string& local_segment_name,
             "IO Uring transport has been installed" LOC_MARK);
     }
 
+    CHECK_STATUS(probeCapabilities());
     metadata_ = metadata;
     local_segment_name_ = local_segment_name;
     local_topology_ = local_topology;
@@ -89,6 +90,18 @@ Status IOUringTransport::install(std::string& local_segment_name,
     if (Platform::getLoader().type() == "cuda") {
         caps.gpu_to_file = true;
     }
+    return Status::OK();
+}
+
+Status IOUringTransport::probeCapabilities() {
+    struct io_uring probe_ring;
+    int rc = io_uring_queue_init(2, &probe_ring, 0);
+    if (rc < 0) {
+        LOG(INFO) << "IOUringTransport: io_uring_queue_init failed: "
+                  << strerror(-rc);
+        return Status::InternalError("io_uring not supported on this kernel");
+    }
+    io_uring_queue_exit(&probe_ring);
     return Status::OK();
 }
 
@@ -259,13 +272,3 @@ Status IOUringTransport::removeMemoryBuffer(BufferDesc& desc) {
 
 }  // namespace tent
 }  // namespace mooncake
-
-#ifdef WITH_PLUGIN_HOOK
-extern "C" mooncake::tent::Transport* plugin_init() {
-    return new mooncake::tent::IOUringTransport();
-}
-
-extern "C" void plugin_exit(mooncake::tent::Transport* instance) {
-    delete instance;
-}
-#endif

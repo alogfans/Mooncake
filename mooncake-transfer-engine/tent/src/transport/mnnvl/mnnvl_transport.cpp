@@ -555,13 +555,3 @@ Status MnnvlTransport::setPeerAccess() {
 
 }  // namespace tent
 }  // namespace mooncake
-
-#ifdef WITH_PLUGIN_HOOK
-extern "C" mooncake::tent::Transport *plugin_init() {
-    return new mooncake::tent::MnnvlTransport();
-}
-
-extern "C" void plugin_exit(mooncake::tent::Transport *instance) {
-    delete instance;
-}
-#endif

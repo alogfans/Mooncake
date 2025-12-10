@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef IO_URING_TRANSPORT_H_
-#define IO_URING_TRANSPORT_H_
+#ifndef TENT_IO_URING_TRANSPORT_H
+#define TENT_IO_URING_TRANSPORT_H
 
 #include <bits/stdint-uintn.h>
 #include <liburing.h>
@@ -85,6 +85,8 @@ class IOUringTransport : public Transport {
 
     IOUringFileContext *findFileContext(SegmentID handle);
 
+    Status probeCapabilities();
+
    private:
     bool installed_;
     std::string local_segment_name_;
@@ -101,4 +103,4 @@ class IOUringTransport : public Transport {
 }  // namespace tent
 }  // namespace mooncake
 
-#endif  // IO_URING_TRANSPORT_H_
+#endif  // TENT_IO_URING_TRANSPORT_H

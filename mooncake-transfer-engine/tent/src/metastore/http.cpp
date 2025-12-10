@@ -164,13 +164,3 @@ Status HttpMetaStore::remove(const std::string &key) {
 }
 }  // namespace tent
 }  // namespace mooncake
-
-#ifdef WITH_PLUGIN_HOOK
-extern "C" mooncake::tent::MetaStore *plugin_init() {
-    return new mooncake::tent::HttpMetaStore();
-}
-
-extern "C" void plugin_exit(mooncake::tent::MetaStore *instance) {
-    delete instance;
-}
-#endif
