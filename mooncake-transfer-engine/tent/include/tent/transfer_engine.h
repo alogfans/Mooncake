@@ -34,7 +34,7 @@ extern "C" {
 
 struct mc_request {
     int opcode;
-    void *source;
+    void* source;
     mc_segment_id_t target_id;
     uint64_t target_offset;
     uint64_t length;
@@ -57,7 +57,7 @@ struct mc_status {
 
 typedef struct mc_status mc_status_t;
 
-typedef void *mc_engine_t;
+typedef void* mc_engine_t;
 
 struct mc_buffer_info {
     uint64_t base, length;
@@ -70,7 +70,7 @@ struct mc_buffer_info {
 struct mc_segment_info {
     int type;
     int num_buffers;
-    struct mc_buffer_info *buffers;
+    struct mc_buffer_info* buffers;
 };
 
 typedef struct mc_segment_info mc_segment_info_t;
@@ -82,60 +82,60 @@ struct mc_notifi_record {
 
 struct mc_notifi_info {
     int num_records;
-    struct mc_notifi_record *records;
+    struct mc_notifi_record* records;
 };
 
-void mc_load_config_from_file(const char *path);
+void mc_load_config_from_file(const char* path);
 
-void mc_set_config(const char *key, const char *value);
+void mc_set_config(const char* key, const char* value);
 
 mc_engine_t mc_create_engine();
 
 void mc_destroy_engine(mc_engine_t engine);
 
-int mc_segment_name(mc_engine_t engine, char *buf, size_t buf_len);
+int mc_segment_name(mc_engine_t engine, char* buf, size_t buf_len);
 
-int mc_rpc_server_addr_port(mc_engine_t engine, char *addr_buf, size_t buf_len,
-                            uint16_t *port);
+int mc_rpc_server_addr_port(mc_engine_t engine, char* addr_buf, size_t buf_len,
+                            uint16_t* port);
 
-int mc_open_segment(mc_engine_t engine, mc_segment_id_t *handle,
-                    const char *segment_name);
+int mc_open_segment(mc_engine_t engine, mc_segment_id_t* handle,
+                    const char* segment_name);
 
 int mc_close_segment(mc_engine_t engine, mc_segment_id_t handle);
 
 int mc_get_segment_info(mc_engine_t engine, mc_segment_id_t handle,
-                        mc_segment_info_t *info);
+                        mc_segment_info_t* info);
 
-void mc_free_segment_info(mc_segment_info_t *info);
+void mc_free_segment_info(mc_segment_info_t* info);
 
-int mc_allocate_memory(mc_engine_t engine, void **addr, size_t size,
-                       const char *location);
+int mc_allocate_memory(mc_engine_t engine, void** addr, size_t size,
+                       const char* location);
 
-int mc_free_memory(mc_engine_t engine, void *addr);
+int mc_free_memory(mc_engine_t engine, void* addr);
 
-int mc_register_memory(mc_engine_t engine, void *addr, size_t size);
+int mc_register_memory(mc_engine_t engine, void* addr, size_t size);
 
-int mc_unregister_memory(mc_engine_t engine, void *addr, size_t size);
+int mc_unregister_memory(mc_engine_t engine, void* addr, size_t size);
 
 mc_batch_id_t mc_allocate_batch(mc_engine_t engine, size_t batch_size);
 
 int mc_free_batch(mc_engine_t engine, mc_batch_id_t batch_id);
 
-int mc_submit(mc_engine_t engine, mc_batch_id_t batch_id, mc_request_t *entries,
+int mc_submit(mc_engine_t engine, mc_batch_id_t batch_id, mc_request_t* entries,
               size_t count);
 
 int mc_send_notifs(mc_engine_t engine, mc_segment_id_t handle,
-                   const char *message);
+                   const char* message);
 
-int mc_recv_notifs(mc_engine_t engine, mc_notifi_info *info);
+int mc_recv_notifs(mc_engine_t engine, mc_notifi_info* info);
 
-void mc_free_notifs(mc_notifi_info *info);
+void mc_free_notifs(mc_notifi_info* info);
 
 int mc_task_status(mc_engine_t engine, mc_batch_id_t batch_id, size_t task_id,
-                   mc_status_t *status);
+                   mc_status_t* status);
 
 int mc_overall_status(mc_engine_t engine, mc_batch_id_t batch_id,
-                      mc_status_t *status);
+                      mc_status_t* status);
 
 #ifdef __cplusplus
 }
@@ -169,9 +169,9 @@ class TransferEngine {
 
     ~TransferEngine();
 
-    TransferEngine(const TransferEngine &) = delete;
+    TransferEngine(const TransferEngine&) = delete;
 
-    TransferEngine &operator=(const TransferEngine &) = delete;
+    TransferEngine& operator=(const TransferEngine&) = delete;
 
    public:
     bool available() const;
@@ -183,34 +183,34 @@ class TransferEngine {
     uint16_t getRpcServerPort() const;
 
    public:
-    Status exportLocalSegment(std::string &shared_handle);
+    Status exportLocalSegment(std::string& shared_handle);
 
-    Status importRemoteSegment(SegmentID &handle,
-                               const std::string &shared_handle);
+    Status importRemoteSegment(SegmentID& handle,
+                               const std::string& shared_handle);
 
-    Status openSegment(SegmentID &handle, const std::string &segment_name);
+    Status openSegment(SegmentID& handle, const std::string& segment_name);
 
     Status closeSegment(SegmentID handle);
 
-    Status getSegmentInfo(SegmentID handle, SegmentInfo &info);
+    Status getSegmentInfo(SegmentID handle, SegmentInfo& info);
 
    public:
-    Status allocateLocalMemory(void **addr, size_t size,
+    Status allocateLocalMemory(void** addr, size_t size,
                                Location location = kWildcardLocation);
 
-    Status freeLocalMemory(void *addr);
+    Status freeLocalMemory(void* addr);
 
-    Status registerLocalMemory(void *addr, size_t size,
+    Status registerLocalMemory(void* addr, size_t size,
                                Permission permission = kGlobalReadWrite);
 
-    Status unregisterLocalMemory(void *addr, size_t size = 0);
+    Status unregisterLocalMemory(void* addr, size_t size = 0);
 
     // advanced buffer allocate function
-    Status allocateLocalMemory(void **addr, size_t size,
-                               MemoryOptions &options);
+    Status allocateLocalMemory(void** addr, size_t size,
+                               MemoryOptions& options);
 
     // advanced buffer register function
-    Status registerLocalMemory(void *addr, size_t size, MemoryOptions &options);
+    Status registerLocalMemory(void* addr, size_t size, MemoryOptions& options);
 
    public:
     BatchID allocateBatch(size_t batch_size);
@@ -218,19 +218,19 @@ class TransferEngine {
     Status freeBatch(BatchID batch_id);
 
     Status submitTransfer(BatchID batch_id,
-                          const std::vector<Request> &request_list);
+                          const std::vector<Request>& request_list);
 
-    Status sendNotification(SegmentID target_id, const Notification &notifi);
+    Status sendNotification(SegmentID target_id, const Notification& notifi);
 
-    Status receiveNotification(std::vector<Notification> &notifi_list);
+    Status receiveNotification(std::vector<Notification>& notifi_list);
 
     Status getTransferStatus(BatchID batch_id, size_t task_id,
-                             TransferStatus &status);
+                             TransferStatus& status);
 
     Status getTransferStatus(BatchID batch_id,
-                             std::vector<TransferStatus> &status_list);
+                             std::vector<TransferStatus>& status_list);
 
-    Status getTransferStatus(BatchID batch_id, TransferStatus &overall_status);
+    Status getTransferStatus(BatchID batch_id, TransferStatus& overall_status);
 
    private:
     std::unique_ptr<TransferEngineImpl> impl_;
