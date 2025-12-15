@@ -18,7 +18,7 @@
 
 #include "tent/runtime/transfer_engine_impl.h"
 
-#define CAST(ptr) ((mooncake::tent::TransferEngineImpl *)ptr)
+#define CAST(ptr) ((mooncake::tent::TransferEngineImpl*)ptr)
 #define CHECK_POINTER(ptr)                       \
     if (!ptr) {                                  \
         LOG(ERROR) << "Invalid argument: " #ptr; \
@@ -32,33 +32,33 @@ struct Settings {
 
 thread_local Settings tl_settings;
 
-void mc_load_config_from_file(const char *path) { tl_settings.path = path; }
+void tent_load_config_from_file(const char* path) { tl_settings.path = path; }
 
-void mc_set_config(const char *key, const char *value) {
+void tent_set_config(const char* key, const char* value) {
     tl_settings.attrs[key] = value;
 }
 
-mc_engine_t mc_create_engine() {
+tent_engine_t tent_create_engine() {
     auto config = std::make_shared<mooncake::tent::Config>();
     if (!tl_settings.path.empty()) {
         auto status = config->load(tl_settings.path);
         if (!status.ok()) {
-            LOG(WARNING) << "mc_create_engine: " << status.ToString()
+            LOG(WARNING) << "tent_create_engine: " << status.ToString()
                          << ", fallback to default config";
         }
     }
-    for (auto &attr : tl_settings.attrs) config->set(attr.first, attr.second);
+    for (auto& attr : tl_settings.attrs) config->set(attr.first, attr.second);
     auto engine = new mooncake::tent::TransferEngineImpl(config);
-    return (mc_engine_t)engine;
+    return (tent_engine_t)engine;
 }
 
-void mc_destroy_engine(mc_engine_t engine) {
+void tent_destroy_engine(tent_engine_t engine) {
     if (engine) {
         delete CAST(engine);
     }
 }
 
-int mc_segment_name(mc_engine_t engine, char *buf, size_t buf_len) {
+int tent_segment_name(tent_engine_t engine, char* buf, size_t buf_len) {
     CHECK_POINTER(engine);
     CHECK_POINTER(buf);
     auto result = CAST(engine)->getSegmentName();
@@ -66,8 +66,8 @@ int mc_segment_name(mc_engine_t engine, char *buf, size_t buf_len) {
     return 0;
 }
 
-int mc_rpc_server_addr_port(mc_engine_t engine, char *addr_buf, size_t buf_len,
-                            uint16_t *port) {
+int tent_rpc_server_addr_port(tent_engine_t engine, char* addr_buf,
+                              size_t buf_len, uint16_t* port) {
     CHECK_POINTER(engine);
     CHECK_POINTER(addr_buf);
     CHECK_POINTER(port);
@@ -77,37 +77,37 @@ int mc_rpc_server_addr_port(mc_engine_t engine, char *addr_buf, size_t buf_len,
     return 0;
 }
 
-int mc_open_segment(mc_engine_t engine, mc_segment_id_t *handle,
-                    const char *segment_name) {
+int tent_open_segment(tent_engine_t engine, tent_segment_id_t* handle,
+                      const char* segment_name) {
     CHECK_POINTER(engine);
     CHECK_POINTER(handle);
     CHECK_POINTER(segment_name);
     auto status = CAST(engine)->openSegment(*handle, segment_name);
     if (!status.ok()) {
-        LOG(ERROR) << "mc_open_segment: " << status.ToString();
+        LOG(ERROR) << "tent_open_segment: " << status.ToString();
         return -1;
     }
     return 0;
 }
 
-int mc_close_segment(mc_engine_t engine, mc_segment_id_t handle) {
+int tent_close_segment(tent_engine_t engine, tent_segment_id_t handle) {
     CHECK_POINTER(engine);
     auto status = CAST(engine)->closeSegment(handle);
     if (!status.ok()) {
-        LOG(ERROR) << "mc_close_segment: " << status.ToString();
+        LOG(ERROR) << "tent_close_segment: " << status.ToString();
         return -1;
     }
     return 0;
 }
 
-int mc_get_segment_info(mc_engine_t engine, mc_segment_id_t handle,
-                        mc_segment_info_t *info) {
+int tent_get_segment_info(tent_engine_t engine, tent_segment_id_t handle,
+                          tent_segment_info_t* info) {
     CHECK_POINTER(engine);
     CHECK_POINTER(info);
     mooncake::tent::SegmentInfo pinfo;
     auto status = CAST(engine)->getSegmentInfo(handle, pinfo);
     if (!status.ok()) {
-        LOG(ERROR) << "mc_get_segment_info: " << status.ToString();
+        LOG(ERROR) << "tent_get_segment_info: " << status.ToString();
         return -1;
     }
     if (pinfo.type == mooncake::tent::SegmentInfo::Memory)
@@ -119,9 +119,9 @@ int mc_get_segment_info(mc_engine_t engine, mc_segment_id_t handle,
     if (info->num_buffers == 0) return 0;
 
     info->buffers =
-        (mc_buffer_info *)malloc(sizeof(mc_buffer_info) * info->num_buffers);
+        (tent_buffer_info*)malloc(sizeof(tent_buffer_info) * info->num_buffers);
     if (!info->buffers) {
-        LOG(ERROR) << "mc_get_segment_info: out of memory";
+        LOG(ERROR) << "tent_get_segment_info: out of memory";
         return -1;
     }
 
@@ -135,12 +135,12 @@ int mc_get_segment_info(mc_engine_t engine, mc_segment_id_t handle,
     return 0;
 }
 
-void mc_free_segment_info(mc_segment_info_t *info) {
+void tent_free_segment_info(tent_segment_info_t* info) {
     if (info && info->buffers) free(info->buffers);
 }
 
-int mc_allocate_memory(mc_engine_t engine, void **addr, size_t size,
-                       const char *location) {
+int tent_allocate_memory(tent_engine_t engine, void** addr, size_t size,
+                         const char* location) {
     CHECK_POINTER(engine);
     CHECK_POINTER(addr);
     CHECK_POINTER(location);
@@ -148,62 +148,62 @@ int mc_allocate_memory(mc_engine_t engine, void **addr, size_t size,
     if (location) options.location = location;
     auto status = CAST(engine)->allocateLocalMemory(addr, size, options);
     if (!status.ok()) {
-        LOG(ERROR) << "mc_allocate_memory: " << status.ToString();
+        LOG(ERROR) << "tent_allocate_memory: " << status.ToString();
         return -1;
     }
     return 0;
 }
 
-int mc_free_memory(mc_engine_t engine, void *addr) {
+int tent_free_memory(tent_engine_t engine, void* addr) {
     CHECK_POINTER(engine);
     CHECK_POINTER(addr);
     auto status = CAST(engine)->freeLocalMemory(addr);
     if (!status.ok()) {
-        LOG(ERROR) << "mc_free_memory: " << status.ToString();
+        LOG(ERROR) << "tent_free_memory: " << status.ToString();
         return -1;
     }
     return 0;
 }
 
-int mc_register_memory(mc_engine_t engine, void *addr, size_t size) {
+int tent_register_memory(tent_engine_t engine, void* addr, size_t size) {
     CHECK_POINTER(engine);
     CHECK_POINTER(addr);
     auto status = CAST(engine)->registerLocalMemory(addr, size);
     if (!status.ok()) {
-        LOG(ERROR) << "mc_register_memory: " << status.ToString();
+        LOG(ERROR) << "tent_register_memory: " << status.ToString();
         return -1;
     }
     return 0;
 }
 
-int mc_unregister_memory(mc_engine_t engine, void *addr, size_t size) {
+int tent_unregister_memory(tent_engine_t engine, void* addr, size_t size) {
     CHECK_POINTER(engine);
     CHECK_POINTER(addr);
     auto status = CAST(engine)->unregisterLocalMemory(addr, size);
     if (!status.ok()) {
-        LOG(ERROR) << "mc_unregister_memory: " << status.ToString();
+        LOG(ERROR) << "tent_unregister_memory: " << status.ToString();
         return -1;
     }
     return 0;
 }
 
-mc_batch_id_t mc_allocate_batch(mc_engine_t engine, size_t batch_size) {
+tent_batch_id_t tent_allocate_batch(tent_engine_t engine, size_t batch_size) {
     CHECK_POINTER(engine);
-    return (mc_batch_id_t)CAST(engine)->allocateBatch(batch_size);
+    return (tent_batch_id_t)CAST(engine)->allocateBatch(batch_size);
 }
 
-int mc_free_batch(mc_engine_t engine, mc_batch_id_t batch_id) {
+int tent_free_batch(tent_engine_t engine, tent_batch_id_t batch_id) {
     CHECK_POINTER(engine);
     auto status = CAST(engine)->freeBatch(batch_id);
     if (!status.ok()) {
-        LOG(ERROR) << "mc_free_batch: " << status.ToString();
+        LOG(ERROR) << "tent_free_batch: " << status.ToString();
         return -1;
     }
     return 0;
 }
 
-int mc_submit(mc_engine_t engine, mc_batch_id_t batch_id, mc_request_t *entries,
-              size_t count) {
+int tent_submit(tent_engine_t engine, tent_batch_id_t batch_id,
+                tent_request_t* entries, size_t count) {
     CHECK_POINTER(engine);
     CHECK_POINTER(entries);
     std::vector<mooncake::tent::Request> req_list;
@@ -218,39 +218,39 @@ int mc_submit(mc_engine_t engine, mc_batch_id_t batch_id, mc_request_t *entries,
     }
     auto status = CAST(engine)->submitTransfer(batch_id, req_list);
     if (!status.ok()) {
-        LOG(ERROR) << "mc_submit: " << status.ToString();
+        LOG(ERROR) << "tent_submit: " << status.ToString();
         return -1;
     }
     return 0;
 }
 
-int mc_send_notifs(mc_engine_t engine, mc_segment_id_t handle,
-                   const char *message) {
+int tent_send_notifs(tent_engine_t engine, tent_segment_id_t handle,
+                     const char* message) {
     CHECK_POINTER(engine);
     CHECK_POINTER(message);
     auto status = CAST(engine)->sendNotification(handle, message);
     if (!status.ok()) {
-        LOG(ERROR) << "mc_send_notifs: " << status.ToString();
+        LOG(ERROR) << "tent_send_notifs: " << status.ToString();
         return -1;
     }
     return 0;
 }
 
-int mc_recv_notifs(mc_engine_t engine, mc_notifi_info *info) {
+int tent_recv_notifs(tent_engine_t engine, tent_notifi_info* info) {
     CHECK_POINTER(engine);
     CHECK_POINTER(info);
     std::vector<mooncake::tent::Notification> notify_list;
     auto status = CAST(engine)->receiveNotification(notify_list);
     if (!status.ok()) {
-        LOG(ERROR) << "mc_recv_notifs: " << status.ToString();
+        LOG(ERROR) << "tent_recv_notifs: " << status.ToString();
         return -1;
     }
     info->num_records = (int)notify_list.size();
     if (info->num_records) {
-        info->records = (mc_notifi_record *)malloc(sizeof(mc_notifi_record) *
-                                                   info->num_records);
+        info->records = (tent_notifi_record*)malloc(sizeof(tent_notifi_record) *
+                                                    info->num_records);
         if (!info->records) {
-            LOG(ERROR) << "mc_recv_notifs: out of memory";
+            LOG(ERROR) << "tent_recv_notifs: out of memory";
             return -1;
         }
 
@@ -262,12 +262,12 @@ int mc_recv_notifs(mc_engine_t engine, mc_notifi_info *info) {
     return 0;
 }
 
-void mc_free_notifs(mc_notifi_info *info) {
+void tent_free_notifs(tent_notifi_info* info) {
     if (info && info->records) free(info->records);
 }
 
-int mc_task_status(mc_engine_t engine, mc_batch_id_t batch_id, size_t task_id,
-                   mc_status_t *xfer_status) {
+int tent_task_status(tent_engine_t engine, tent_batch_id_t batch_id,
+                     size_t task_id, tent_status_t* xfer_status) {
     CHECK_POINTER(engine);
     CHECK_POINTER(batch_id);
     CHECK_POINTER(xfer_status);
@@ -275,7 +275,7 @@ int mc_task_status(mc_engine_t engine, mc_batch_id_t batch_id, size_t task_id,
     auto status =
         CAST(engine)->getTransferStatus(batch_id, task_id, internal_status);
     if (!status.ok()) {
-        LOG(ERROR) << "mc_overall_status: " << status.ToString();
+        LOG(ERROR) << "tent_overall_status: " << status.ToString();
         return -1;
     }
     xfer_status->status = (int)internal_status.s;
@@ -283,15 +283,15 @@ int mc_task_status(mc_engine_t engine, mc_batch_id_t batch_id, size_t task_id,
     return 0;
 }
 
-int mc_overall_status(mc_engine_t engine, mc_batch_id_t batch_id,
-                      mc_status_t *xfer_status) {
+int tent_overall_status(tent_engine_t engine, tent_batch_id_t batch_id,
+                        tent_status_t* xfer_status) {
     CHECK_POINTER(engine);
     CHECK_POINTER(batch_id);
     CHECK_POINTER(xfer_status);
     mooncake::tent::TransferStatus internal_status;
     auto status = CAST(engine)->getTransferStatus(batch_id, internal_status);
     if (!status.ok()) {
-        LOG(ERROR) << "mc_overall_status: " << status.ToString();
+        LOG(ERROR) << "tent_overall_status: " << status.ToString();
         return -1;
     }
     xfer_status->status = (int)internal_status.s;
