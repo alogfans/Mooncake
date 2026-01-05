@@ -25,7 +25,7 @@ class SimpleRandom {
    public:
     SimpleRandom(uint32_t seed) : current(seed) {}
 
-    static SimpleRandom &Get() {
+    static SimpleRandom& Get() {
         static std::atomic<uint64_t> g_incr_val(0);
         thread_local SimpleRandom g_random(getCurrentTimeInNano() +
                                            g_incr_val.fetch_add(1));
@@ -45,6 +45,36 @@ class SimpleRandom {
     static const uint32_t c = 1013904223;
     static const uint32_t m = 0xFFFFFFFF;
 };
+
+static inline uint64_t SeedOnce() {
+    // Try to leverage existing util; fallback to time-based seed.
+    // Replace with your project's canonical seed source if available.
+    uint64_t s = getCurrentTimeInNano();
+    // xorshift mix
+    s ^= s >> 12;
+    s ^= s << 25;
+    s ^= s >> 27;
+    return s ? s : 88172645463325252ull;
+}
+
+static inline uint64_t XorShift64(uint64_t& s) {
+    // xorshift64*
+    s ^= s >> 12;
+    s ^= s << 25;
+    s ^= s >> 27;
+    return s * 2685821657736338717ull;
+}
+
+static inline double Rand01(uint64_t& s) {
+    // [0,1)
+    const uint64_t r = XorShift64(s);
+    return (r >> 11) * (1.0 / 9007199254740992.0);  // 2^53
+}
+
+static inline size_t RandMod(uint64_t& s, size_t n) {
+    return (n == 0) ? 0 : static_cast<size_t>(XorShift64(s) % n);
+}
+
 }  // namespace tent
 }  // namespace mooncake
 
