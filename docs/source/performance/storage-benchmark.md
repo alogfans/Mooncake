@@ -160,5 +160,4 @@ Each `hash_id` corresponds to a 512-token block. The tool simulates prefix cachi
 
 ## Requirements
 
-- Python 3.8+
-- No third-party dependencies (standard library only)
+- Python 3.10+

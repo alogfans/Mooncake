@@ -26,28 +26,10 @@ MIN_LATENCY_MS = 0.001  # Minimum latency in milliseconds (1 microsecond)
 # Model KVCache sizes (bytes per token, based on LMCache calculator)
 # Source: https://lmcache.ai/kv_cache_calculator.html
 MODEL_BYTES_PER_TOKEN = {
-    # Small models (7B-13B)
-    "llama-2-7b": 512,
-    "llama-2-13b": 800,
-    "llama-3-8b": 128,
-    "mistral-7b": 128,
-    "qwen-14b": 40,
-    "gemma-7b": 224,
-
-    # Large models (70B-405B)
-    "llama-2-70b": 320,
-    "llama-3-70b": 320,
-    "llama-3.1-405b": 516018,  # ~504 KB/token
-    "mixtral-8x7b": 128,
-    "mixtral-8x22b": 224,
-    "qwen-72b": 320,
-    "qwen-110b": 320,
-
-    # Extra large models
-    "deepseek-v3": 1749384,  # ~1.67 MB/token
-    "glm-4.6": 156991,  # ~153 KB/token
-
-    # Legacy/default
+    "llama-3.1-405b": 327680,
+    "qwen3-32b": 81920,
+    "deepseek-v3": 1748992,
+    "glm-4.6": 157013,
     "default": DEFAULT_BYTES_PER_TOKEN,
 }
 
@@ -259,10 +241,10 @@ class OffsetAllocatorStorage:
         offset = self._allocate_offset()
         file_offset = offset * self.block_size_bytes
 
-        start = time.time()
-
-        # Generate simulated data
+        # Generate simulated data BEFORE timing to avoid including CPU cost
         data = os.urandom(self.block_size_bytes)
+
+        start = time.time()
 
         try:
             fd = self._get_fd()
@@ -270,6 +252,9 @@ class OffsetAllocatorStorage:
 
             # Ensure data persistence (fsync)
             os.fsync(fd)
+
+            # Evict from page cache to ensure reads measure actual SSD performance
+            os.posix_fadvise(fd, file_offset, self.block_size_bytes, os.POSIX_FADV_DONTNEED)
 
             latency_ms = (time.time() - start) * 1000.0
 
