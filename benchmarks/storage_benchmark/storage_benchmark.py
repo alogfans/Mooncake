@@ -10,6 +10,8 @@ import json
 import time
 import os
 import statistics
+import random
+import errno
 from pathlib import Path
 from typing import Dict, List, Optional
 from dataclasses import dataclass
@@ -90,19 +92,28 @@ class OffsetAllocatorStorage:
     """
 
     def __init__(self, storage_dir: str, bytes_per_token: int = DEFAULT_BYTES_PER_TOKEN,
-                 max_blocks: int = 100000):
+                 max_blocks: int = 100000, block_size_tokens: int = 512,
+                 fsync_mode: str = 'batch', fsync_batch_size: int = 100):
         """Initialize Offset Allocator storage
 
         Args:
             storage_dir: Storage directory path
             bytes_per_token: Bytes per token
             max_blocks: Maximum number of blocks (determines file size)
+            block_size_tokens: Number of tokens per block
+            fsync_mode: When to fsync ('batch', 'always', 'end', 'none')
+            fsync_batch_size: Number of writes between fsync in batch mode
         """
         self.storage_dir = Path(storage_dir)
         self.bytes_per_token = bytes_per_token
-        self.block_size_tokens = BLOCK_SIZE_TOKENS
+        self.block_size_tokens = block_size_tokens
         self.block_size_bytes = self.block_size_tokens * self.bytes_per_token
         self.max_blocks = max_blocks
+
+        # Fsync configuration
+        self.fsync_mode = fsync_mode
+        self.fsync_batch_size = fsync_batch_size
+        self.pending_sync_count = 0
 
         # Create storage directory
         self.storage_dir.mkdir(parents=True, exist_ok=True)
@@ -125,6 +136,13 @@ class OffsetAllocatorStorage:
         # File descriptor (keep open, avoid repeated open/close)
         self.fd = None
 
+        # Pre-allocated data buffer with pattern to avoid SSD compression artifacts
+        # Using a repeating pattern that looks like realistic data (not all zeros)
+        # Pattern: 64-byte repeated sequence mixed with some variation
+        pattern = bytes([(i & 0xFF) for i in range(256)])  # 0-255 byte pattern
+        pattern_repeats = (self.block_size_bytes // len(pattern)) + 1
+        self._data_buffer = (pattern * pattern_repeats)[:self.block_size_bytes]
+
         # Statistics
         self.stats = {
             'read_count': 0,
@@ -133,6 +151,7 @@ class OffsetAllocatorStorage:
             'write_bytes': 0,
             'read_latencies_ms': [],
             'write_latencies_ms': [],
+            'sync_count': 0,  # Number of fsync operations performed
         }
 
     # ========================================================================
@@ -205,20 +224,20 @@ class OffsetAllocatorStorage:
             hash_id: Unique block identifier
 
         Returns:
-            float: Read latency in milliseconds
+            float: Read latency in milliseconds, or 0 if block doesn't exist
         """
         if hash_id not in self.hash_id_to_offset:
-            return MIN_LATENCY_MS
+            return 0.0  # Block doesn't exist, no latency to measure
 
         offset = self.hash_id_to_offset[hash_id]
         file_offset = offset * self.block_size_bytes
 
-        start = time.time()
+        start = time.perf_counter()
 
         try:
             fd = self._get_fd()
             data = os.pread(fd, self.block_size_bytes, file_offset)
-            latency_ms = (time.time() - start) * 1000.0
+            latency_ms = (time.perf_counter() - start) * 1000.0
 
             self.stats['read_count'] += 1
             self.stats['read_bytes'] += len(data)
@@ -226,7 +245,7 @@ class OffsetAllocatorStorage:
             return latency_ms
         except OSError as e:
             print(f"Error reading block {hash_id} at offset {file_offset}: {e}")
-            return MIN_LATENCY_MS
+            return 0.0  # Error case, don't pollute stats
 
     def write_block(self, hash_id: int) -> float:
         """Write block using pwrite
@@ -241,22 +260,44 @@ class OffsetAllocatorStorage:
         offset = self._allocate_offset()
         file_offset = offset * self.block_size_bytes
 
-        # Generate simulated data BEFORE timing to avoid including CPU cost
-        data = os.urandom(self.block_size_bytes)
+        # Use pre-allocated buffer (much faster than os.urandom)
+        data = self._data_buffer
 
-        start = time.time()
+        start = time.perf_counter()
 
         try:
             fd = self._get_fd()
             written = os.pwrite(fd, data, file_offset)
 
-            # Ensure data persistence (fsync)
-            os.fsync(fd)
+            write_done = time.perf_counter()
 
-            # Evict from page cache to ensure reads measure actual SSD performance
-            os.posix_fadvise(fd, file_offset, self.block_size_bytes, os.POSIX_FADV_DONTNEED)
-
-            latency_ms = (time.time() - start) * 1000.0
+            # Conditional fsync based on mode
+            if self.fsync_mode == 'always':
+                # Include fsync in latency measurement
+                os.fsync(fd)
+                self.stats['sync_count'] += 1
+                self.pending_sync_count = 0
+                latency_ms = (time.perf_counter() - start) * 1000.0
+                # Evict from page cache AFTER fsync to ensure reads measure actual SSD performance
+                os.posix_fadvise(fd, file_offset, self.block_size_bytes, os.POSIX_FADV_DONTNEED)
+            elif self.fsync_mode == 'batch':
+                # For batch mode, only measure write time (fsync is deferred)
+                self.pending_sync_count += 1
+                if self.pending_sync_count >= self.fsync_batch_size:
+                    os.fsync(fd)
+                    self.stats['sync_count'] += 1
+                    self.pending_sync_count = 0
+                latency_ms = (write_done - start) * 1000.0  # Only write time
+                # Evict from page cache after each write
+                os.posix_fadvise(fd, file_offset, self.block_size_bytes, os.POSIX_FADV_DONTNEED)
+            elif self.fsync_mode == 'none':
+                latency_ms = (write_done - start) * 1000.0
+                # Evict from page cache even when not syncing
+                os.posix_fadvise(fd, file_offset, self.block_size_bytes, os.POSIX_FADV_DONTNEED)
+            else:  # 'end' mode
+                latency_ms = (write_done - start) * 1000.0
+                # Evict from page cache (fsync will happen at the end)
+                os.posix_fadvise(fd, file_offset, self.block_size_bytes, os.POSIX_FADV_DONTNEED)
 
             # Update mapping
             self.hash_id_to_offset[hash_id] = offset
@@ -266,11 +307,51 @@ class OffsetAllocatorStorage:
             self.stats['write_latencies_ms'].append(latency_ms)
             return latency_ms
         except OSError as e:
-            print(f"Error writing block {hash_id} at offset {file_offset}: {e}")
-            return MIN_LATENCY_MS
+            if e.errno == errno.ENOSPC:
+                print(f"Error: Disk full when writing block {hash_id} at offset {file_offset}")
+            else:
+                print(f"Error writing block {hash_id} at offset {file_offset}: {e}")
+            return 0.0  # Error case, don't pollute stats
 
-    def close(self):
-        """Close file"""
+    def __enter__(self):
+        """Context manager entry"""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - ensures cleanup"""
+        # Perform final fsync before closing for 'end' and 'batch' modes
+        self._finalize_sync()
+        self.close(force_sync=False)  # Already synced above
+        return False
+
+    def _finalize_sync(self):
+        """Perform final fsync before closing (for 'end' mode and pending batch writes)"""
+        if self.fd is not None:
+            if self.fsync_mode == 'end':
+                try:
+                    os.fsync(self.fd)
+                    self.stats['sync_count'] += 1
+                except OSError:
+                    pass
+            elif self.fsync_mode == 'batch' and self.pending_sync_count > 0:
+                # Flush remaining pending writes
+                try:
+                    os.fsync(self.fd)
+                    self.stats['sync_count'] += 1
+                    self.pending_sync_count = 0
+                except OSError:
+                    pass
+
+    def close(self, force_sync: bool = True):
+        """Close file
+
+        Args:
+            force_sync: Whether to force fsync before closing
+        """
+        # For backward compatibility with non-context-manager usage
+        if force_sync:
+            self._finalize_sync()
+
         if self.fd is not None:
             os.close(self.fd)
             self.fd = None
@@ -301,6 +382,7 @@ class OffsetAllocatorStorage:
                 'mb': self.stats['write_bytes'] / 1024 / 1024,
                 **calc_stats(self.stats['write_latencies_ms'])
             },
+            'sync_count': self.stats['sync_count'],
             'total_blocks': len(self.hash_id_to_offset),
             'free_blocks': len(self.free_offsets),
         }
@@ -336,16 +418,24 @@ class StorageBenchmark:
     """
 
     def __init__(self, storage_dir: str, bytes_per_token: int = DEFAULT_BYTES_PER_TOKEN,
-                 max_blocks: int = 100000):
+                 max_blocks: int = 100000, block_size_tokens: int = 512,
+                 fsync_mode: str = 'batch', fsync_batch_size: int = 100):
         """Initialize benchmark
 
         Args:
             storage_dir: Storage directory
             bytes_per_token: Bytes per token
             max_blocks: Maximum number of blocks
+            block_size_tokens: Number of tokens per block
+            fsync_mode: When to fsync ('batch', 'always', 'end', 'none')
+            fsync_batch_size: Number of writes between fsync in batch mode
         """
-        self.storage = OffsetAllocatorStorage(storage_dir, bytes_per_token, max_blocks)
+        self.storage = OffsetAllocatorStorage(
+            storage_dir, bytes_per_token, max_blocks,
+            block_size_tokens, fsync_mode, fsync_batch_size
+        )
         self.bytes_per_token = bytes_per_token
+        self.block_size_tokens = block_size_tokens
 
         # Statistics
         self.stats = {
@@ -373,7 +463,7 @@ class StorageBenchmark:
         self.stats['total_requests'] += 1
         self.stats['total_blocks'] += len(req.hash_ids)
 
-        start_time = time.time()
+        start_time = time.perf_counter()
         total_latency = 0.0
 
         # Process each hash_id (in order)
@@ -423,14 +513,27 @@ class StorageBenchmark:
             'prefix_hit_blocks': self.stats['prefix_hit_blocks'],
             'block_hit_rate': read_blocks / total_blocks if total_blocks > 0 else 0,
             'write_ratio': write_blocks / total_blocks if total_blocks > 0 else 0,
-            'tokens_per_block': BLOCK_SIZE_TOKENS,  # Fixed block size in tokens
+            'tokens_per_block': self.block_size_tokens,  # Configurable block size in tokens
             'latency': latency_stats,
             'storage': storage_stats,
         }
 
-    def close(self):
-        """Close storage"""
-        self.storage.close()
+    def __enter__(self):
+        """Context manager entry"""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - ensures cleanup"""
+        self.close()
+        return False
+
+    def close(self, force_sync: bool = True):
+        """Close storage
+
+        Args:
+            force_sync: Whether to force final sync before closing
+        """
+        self.storage.close(force_sync=force_sync)
 
 
 # ============================================================================
@@ -501,16 +604,37 @@ class TraceLoader:
         self._load_trace()
 
     def _load_trace(self):
-        """Load trace file"""
-        with open(self.trace_path, 'r') as f:
-            for line in f:
-                req = json.loads(line.strip())
-                self.requests.append(KVCacheRequest(
-                    timestamp=req['timestamp'],
-                    hash_ids=req['hash_ids'],
-                    input_length=req['input_length'],
-                    output_length=req['output_length']
-                ))
+        """Load trace file with error handling"""
+        line_num = 0
+        try:
+            with open(self.trace_path, 'r') as f:
+                for line in f:
+                    line_num += 1
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        req = json.loads(line)
+                        # Validate required fields
+                        if not all(k in req for k in ['timestamp', 'hash_ids', 'input_length', 'output_length']):
+                            print(f"Warning: Line {line_num} missing required fields, skipping")
+                            continue
+                        if not isinstance(req['hash_ids'], list):
+                            print(f"Warning: Line {line_num} has invalid hash_ids (not a list), skipping")
+                            continue
+                        self.requests.append(KVCacheRequest(
+                            timestamp=float(req['timestamp']),
+                            hash_ids=req['hash_ids'],
+                            input_length=int(req['input_length']),
+                            output_length=int(req['output_length'])
+                        ))
+                    except (json.JSONDecodeError, ValueError, KeyError) as e:
+                        print(f"Warning: Line {line_num} has invalid format: {e}, skipping")
+                        continue
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Trace file not found: {self.trace_path}")
+        except OSError as e:
+            raise OSError(f"Error reading trace file {self.trace_path}: {e}")
 
     def get_requests(self) -> List[KVCacheRequest]:
         """Get request list
@@ -527,7 +651,9 @@ class TraceLoader:
 
 def run_benchmark(trace_path: str, storage_dir: str, bytes_per_token: int = DEFAULT_BYTES_PER_TOKEN,
                    max_requests: Optional[int] = None, max_blocks: int = 100000,
-                   replay_timestamps: bool = False, time_scale: float = 1.0) -> Dict:
+                   replay_timestamps: bool = False, time_scale: float = 1.0,
+                   block_size_tokens: int = 512,
+                   fsync_mode: str = 'batch', fsync_batch_size: int = 100) -> Dict:
     """Run benchmark
 
     Args:
@@ -538,17 +664,23 @@ def run_benchmark(trace_path: str, storage_dir: str, bytes_per_token: int = DEFA
         max_blocks: Maximum number of blocks
         replay_timestamps: Whether to replay timestamps from trace (simulate realistic timing)
         time_scale: Time scaling factor (1.0=real-time, 0.1=10x speed, 10.0=0.1x speed)
+        block_size_tokens: Number of tokens per block
+        fsync_mode: When to fsync ('batch', 'always', 'end', 'none')
+        fsync_batch_size: Number of writes between fsync in batch mode
 
     Returns:
         Dict: Benchmark results
     """
+    block_size_bytes = block_size_tokens * bytes_per_token
+
     print(f"\n{'='*80}")
     print(f"Running: {Path(trace_path).name}")
     print(f"Architecture: Offset Allocator (Mooncake style)")
-    print(f"Block size: {BLOCK_SIZE_TOKENS} tokens/block (fixed, {BLOCK_SIZE_BYTES} bytes)")
+    print(f"Block size: {block_size_tokens} tokens/block ({block_size_bytes:,} bytes)")
     print(f"Storage: Single large file with offset-based block management")
     print(f"Bytes per token: {bytes_per_token}")
     print(f"Max blocks: {max_blocks}")
+    print(f"Fsync mode: {fsync_mode}" + (f" (batch_size={fsync_batch_size})" if fsync_mode == 'batch' else ''))
     print(f"Timestamp replay: {'Enabled' if replay_timestamps else 'Disabled'}")
     if replay_timestamps:
         scale_desc = 'real-time' if time_scale == 1.0 else f'{1/time_scale:.1f}x speed' if time_scale < 1.0 else f'{time_scale}x slower'
@@ -570,49 +702,54 @@ def run_benchmark(trace_path: str, storage_dir: str, bytes_per_token: int = DEFA
         time_span_ms = max(timestamps) - min(timestamps)
         print(f"Timestamp range: {min(timestamps):.1f} - {max(timestamps):.1f} ms (span: {time_span_ms:.1f} ms)")
 
-    # Create benchmark instance
-    benchmark = StorageBenchmark(storage_dir, bytes_per_token, max_blocks)
+    # Create benchmark instance with context manager for cleanup
+    with StorageBenchmark(
+        storage_dir, bytes_per_token, max_blocks,
+        block_size_tokens, fsync_mode, fsync_batch_size
+    ) as benchmark:
 
-    # Run benchmark
-    start_time = time.time()
-    total_io_time = 0.0  # Actual I/O time (excluding sleep)
-    last_timestamp = None
-    base_time = time.time()
+        # Run benchmark
+        start_time = time.perf_counter()
+        total_io_time = 0.0  # Actual I/O time (excluding sleep)
+        last_timestamp = None
+        base_time = time.time()  # Use wall time for replay synchronization
 
-    for i, req in enumerate(requests):
-        # Replay by timestamps
-        sleep_time = 0.0
-        if replay_timestamps and last_timestamp is not None:
-            # Calculate time interval from previous request
-            delta_ms = req.timestamp - last_timestamp
-            sleep_time = delta_ms / 1000.0 / time_scale  # Apply time scaling
+        for i, req in enumerate(requests):
+            # Replay by timestamps
+            sleep_time = 0.0
+            if replay_timestamps and last_timestamp is not None:
+                # Calculate time interval from previous request
+                delta_ms = req.timestamp - last_timestamp
+                sleep_time = delta_ms / 1000.0 / time_scale  # Apply time scaling
 
-            if sleep_time > 0:
-                time.sleep(sleep_time)
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
 
-        # Process request (measure I/O time)
-        req_start = time.time()
-        benchmark.process_request(req)
-        req_io_time = time.time() - req_start
-        total_io_time += req_io_time
+            # Process request (measure I/O time)
+            req_start = time.perf_counter()
+            benchmark.process_request(req)
+            req_io_time = time.perf_counter() - req_start
+            total_io_time += req_io_time
 
-        # Record current request timestamp
-        last_timestamp = req.timestamp
+            # Record current request timestamp
+            last_timestamp = req.timestamp
 
-        # Progress output
-        if (i + 1) % 100 == 0:
-            if replay_timestamps:
-                elapsed_wall_time = time.time() - base_time
-                simulated_time = (req.timestamp - requests[0].timestamp) / 1000.0 / time_scale
-                print(f"  Processed {i + 1}/{len(requests)}... (wall: {elapsed_wall_time:.1f}s, simulated: {simulated_time:.1f}s, io: {total_io_time:.1f}s)")
-            else:
-                print(f"  Processed {i + 1}/{len(requests)}...")
+            # Progress output
+            if (i + 1) % 100 == 0:
+                if replay_timestamps:
+                    elapsed_wall_time = time.time() - base_time
+                    simulated_time = (req.timestamp - requests[0].timestamp) / 1000.0 / time_scale
+                    print(f"  Processed {i + 1}/{len(requests)}... (wall: {elapsed_wall_time:.1f}s, simulated: {simulated_time:.1f}s, io: {total_io_time:.1f}s)")
+                else:
+                    print(f"  Processed {i + 1}/{len(requests)}...")
 
-    elapsed = time.time() - start_time
+        elapsed = time.perf_counter() - start_time
 
-    # Get statistics
-    stats = benchmark.get_stats()
-    benchmark.close()
+        # Perform final sync to include it in stats
+        benchmark.storage._finalize_sync()
+
+        # Get statistics (context manager will handle cleanup)
+        stats = benchmark.get_stats()
 
     # Calculate actual I/O time (excluding sleep)
     io_time = total_io_time if replay_timestamps else elapsed
@@ -626,6 +763,9 @@ def run_benchmark(trace_path: str, storage_dir: str, bytes_per_token: int = DEFA
         'requests_per_second': len(requests) / io_time if io_time > 0 else 0,  # Based on I/O time
         'timestamp_replay_enabled': replay_timestamps,
         'time_scale': time_scale,
+        'bytes_per_token': bytes_per_token,
+        'block_size_tokens': block_size_tokens,
+        'fsync_mode': fsync_mode,
         **stats,
     }
 
@@ -675,7 +815,9 @@ def print_results(results: List[Dict]):
         print(f"  Blocks in Use:       {r['storage']['total_blocks']:>10,}")
         print(f"  Free Blocks:         {r['storage']['free_blocks']:>10,}")
         print(f"  Tokens per Block:    {r['tokens_per_block']:>10,}")
-        print(f"  Block Size:          {r['tokens_per_block'] * 2048 / 1024 / 1024:>10.2f} MB")
+        print(f"  Block Size:          {r['tokens_per_block'] * r.get('bytes_per_token', 2048) / 1024 / 1024:>10.2f} MB")
+        if 'sync_count' in r['storage']:
+            print(f"  Fsync Operations:    {r['storage']['sync_count']:>10,}")
 
         print(f"\n[Execution Time]")
         if r.get('timestamp_replay_enabled'):
@@ -715,10 +857,20 @@ Examples:
   # All scenarios with custom bytes_per_token
   python storage_benchmark.py --scenario=all --bytes-per-token=512
 
+  # Test with different block sizes and fsync modes
+  python storage_benchmark.py --scenario=toolagent --block-size-tokens=256 --fsync-mode=always
+
+  # Test with custom fsync batch size
+  python storage_benchmark.py --scenario=toolagent --fsync-mode=batch --fsync-batch-size=50
+
+Performance Tuning:
+  --fsync-mode=batch (default): Balance between performance and safety
+  --fsync-mode=always: Safest but slowest, measures full persistence cost
+  --fsync-mode=end: Fastest, only measures write I/O (not persistence)
+  --fsync-mode=none: Testing only, no durability guarantees
+
 Available model presets:
-  Small models (7B-13B): llama-2-7b, llama-2-13b, llama-3-8b, mistral-7b, qwen-14b, gemma-7b
-  Large models (70B-405B): llama-2-70b, llama-3-70b, llama-3.1-405b, mixtral-8x7b, mixtral-8x22b, qwen-72b, qwen-110b
-  Extra large models: deepseek-v3, glm-4.6
+  llama-3.1-405b, qwen3-32b, deepseek-v3, glm-4.6, default
 
 For more information: tools/STORAGE_BENCHMARK_README.md
         """
@@ -743,6 +895,13 @@ For more information: tools/STORAGE_BENCHMARK_README.md
                        help='Enable timestamp replay (simulate realistic request timing)')
     parser.add_argument('--time-scale', type=float, default=1.0,
                        help='Time scaling factor (1.0=real-time, 0.1=10x speed, 10.0=0.1x speed)')
+    parser.add_argument('--block-size-tokens', type=int, default=512,
+                       help='Number of tokens per block (default: 512)')
+    parser.add_argument('--fsync-mode', type=str, choices=['batch', 'always', 'end', 'none'],
+                       default='batch',
+                       help='When to fsync: batch=every N writes (default), always=after each write, end=only at close, none=never')
+    parser.add_argument('--fsync-batch-size', type=int, default=100,
+                       help='Number of writes between fsync in batch mode (default: 100)')
 
     args = parser.parse_args()
 
@@ -768,6 +927,7 @@ For more information: tools/STORAGE_BENCHMARK_README.md
 
     # Run benchmarks
     results = []
+
     for scenario in scenarios:
         trace_path = Path(args.trace_dir) / trace_files[scenario]
         if trace_path.exists():
@@ -778,7 +938,10 @@ For more information: tools/STORAGE_BENCHMARK_README.md
                 args.max_requests,
                 args.max_blocks,
                 args.replay_timestamps,
-                args.time_scale
+                args.time_scale,
+                args.block_size_tokens,
+                args.fsync_mode,
+                args.fsync_batch_size
             )
             results.append(result)
         else:
