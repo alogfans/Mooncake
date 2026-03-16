@@ -18,6 +18,8 @@ DEFINE_int32(port, 50052, "Real Client service port");
 DEFINE_string(global_segment_size, "4 GB", "Size of global segment");
 DEFINE_int32(threads, 1, "Number of threads for client service");
 DEFINE_bool(enable_offload, false, "Enable offload availability");
+DECLARE_bool(enable_http_server);
+DECLARE_int32(http_port);
 
 namespace mooncake {
 void RegisterClientRpcService(coro_rpc::coro_rpc_server &server,
@@ -54,10 +56,17 @@ void RegisterClientRpcService(coro_rpc::coro_rpc_server &server,
     server.register_handler<&RealClient::query_task>(&real_client);
     server.register_handler<&RealClient::batch_get_offload_object>(
         &real_client);
+    server.register_handler<&RealClient::release_offload_buffer>(&real_client);
 }
 }  // namespace mooncake
 
 int main(int argc, char *argv[]) {
+    // Attention !!!
+    // Initialization of ResourceTracker must be the most earliest.
+    // Otherwise, the main thread will not apply signal mask before other
+    // spawning threads, leading to missing signal processing.
+    mooncake::ResourceTracker::getInstance();
+
     gflags::ParseCommandLineFlags(&argc, &argv, true);
     size_t global_segment_size = string_to_byte_size(FLAGS_global_segment_size);
 

@@ -22,6 +22,7 @@
 #include "types.h"
 #include "replica.h"
 #include "master_metric_manager.h"
+#include "count_min_sketch.h"
 #include "local_hot_cache.h"
 
 namespace mooncake {
@@ -241,7 +242,8 @@ class Client {
      * @return ErrorCode indicating success/failure
      */
     tl::expected<void, ErrorCode> MountSegment(
-        const void* buffer, size_t size, const std::string& protocol = "tcp");
+        const void* buffer, size_t size, const std::string& protocol = "tcp",
+        const std::string& location = kWildcardLocation);
 
     /**
      * @brief Unregisters a memory segment from master
@@ -418,6 +420,9 @@ class Client {
         return transfer_engine_->getLocalIpAndPort();
     }
 
+    // Return sorted NUMA node IDs that have at least one RDMA NIC.
+    [[nodiscard]] std::vector<int> GetNicNumaNodes() const;
+
     tl::expected<Replica::Descriptor, ErrorCode> GetPreferredReplica(
         const std::vector<Replica::Descriptor>& replica_list);
     /**
@@ -441,6 +446,33 @@ class Client {
             return hot_cache_->GetCacheSize();
         }
         return 0;
+    }
+
+    bool is_ping_healthy() const { return last_ping_success_.load(); }
+
+    /**
+     * @brief Get current frequency admission count for a key.
+     * @return estimated count, or 0 if admission sketch is disabled.
+     */
+    uint8_t GetAdmissionCount(const std::string& key) const {
+        if (admission_sketch_ == nullptr) {
+            return 0;
+        }
+        return admission_sketch_->count(key);
+    }
+
+    /**
+     * @brief Decide whether a key should be admitted to local hot cache.
+     * Updates admission sketch only when cache was not used.
+     */
+    bool ShouldAdmitToHotCache(const std::string& key, bool cache_used) {
+        if (!(hot_cache_ && !cache_used)) {
+            return false;
+        }
+        if (admission_sketch_ == nullptr) {
+            return true;
+        }
+        return admission_sketch_->increment(key) >= admission_threshold_;
     }
 
    private:
@@ -582,6 +614,7 @@ class Client {
     MasterViewHelper master_view_helper_;
     std::thread ping_thread_;
     std::atomic<bool> ping_running_{false};
+    std::atomic<bool> last_ping_success_{false};
     void PingThreadMain(bool is_ha_mode, std::string current_master_address);
     void PollAndDispatchTasks();
     void SubmitTask(const TaskAssignment& assignment);
@@ -641,6 +674,10 @@ class Client {
     // Local hot cache and async handler
     std::shared_ptr<LocalHotCache> hot_cache_;
     std::unique_ptr<LocalHotCacheHandler> hot_cache_handler_;
+
+    // Frequency admission: only cache keys whose CMS count >= threshold
+    std::unique_ptr<CountMinSketch> admission_sketch_;
+    uint8_t admission_threshold_ = 2;
 };
 
 }  // namespace mooncake

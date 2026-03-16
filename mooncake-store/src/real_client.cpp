@@ -3,11 +3,13 @@
 #include <sys/un.h>
 #include <unistd.h>
 #include <numa.h>
+#include <numaif.h>
 #include <pthread.h>
 #include <signal.h>
 #include <thread>
 #include <stop_token>
 
+#include <dlfcn.h>  // for dlsym (Python detection)
 #include <cstdlib>  // for atexit
 #include <algorithm>
 #include <cctype>
@@ -24,6 +26,13 @@
 #include "file_storage.h"
 #include "default_config.h"
 #include "shm_helper.h"
+#include "memory_location.h"
+
+DEFINE_bool(enable_http_server, false,
+            "Enable embedded HTTP server for health check and metrics.");
+DEFINE_int32(http_port, 9300,
+             "Port for client HTTP server "
+             "(only effective when --enable_http_server=true).");
 
 namespace mooncake {
 
@@ -38,9 +47,18 @@ ResourceTracker &ResourceTracker::getInstance() {
 }
 
 ResourceTracker::ResourceTracker() {
-    // Start dedicated signal handling thread (best-effort)
-    startSignalThread();
-    // Register exit handler as a backstop
+    // In embedded environments (e.g. Python), the host runtime owns signal
+    // handling.  Blocking SIGINT with pthread_sigmask (done inside
+    // startSignalThread) would prevent Python from raising KeyboardInterrupt,
+    // causing the process to hang on Ctrl-C.  Detect Python at runtime via
+    // dlsym so we don't need to include <Python.h> or change any public API.
+    if (!dlsym(RTLD_DEFAULT, "Py_IsInitialized")) {
+        // Standalone C/C++ process – install our own signal handling.
+        startSignalThread();
+    }
+
+    // Register exit handler as a backstop (works in both standalone and
+    // embedded modes).
     std::atexit(exitHandler);
 }
 
@@ -101,44 +119,56 @@ void ResourceTracker::startSignalThread() {
         sigaddset(&set, SIGUSR1);  // used to interrupt sigwait on stop
         pthread_sigmask(SIG_BLOCK, &set, nullptr);
 
-        signal_thread_ = std::jthread(
-            [set, ready = std::move(ready)](std::stop_token st) mutable {
-                // Register a stop callback to interrupt sigwait via SIGUSR1
-                pthread_t self = pthread_self();
-                std::stop_callback cb(
-                    st, [self]() { pthread_kill(self, SIGUSR1); });
-                ready.set_value();
-                for (;;) {
-                    int sig = 0;
-                    int rc = sigwait(&set, &sig);
-                    if (rc != 0) {
-                        LOG(ERROR) << "sigwait failed: " << strerror(rc);
-                        continue;
-                    }
-
-                    if (sig == SIGUSR1) {
-                        if (st.stop_requested()) {
-                            break;  // graceful stop
-                        }
-                        continue;  // spurious
-                    }
-
-                    // Perform cleanup in normal thread context
-                    LOG(INFO) << "Received signal " << sig
-                              << ", cleaning up resources";
-                    ResourceTracker::getInstance().cleanupAllResources();
-
-                    // Restore default action and re-raise to terminate normally
-                    struct sigaction sa;
-                    sa.sa_handler = SIG_DFL;
-                    sigemptyset(&sa.sa_mask);
-                    sa.sa_flags = 0;
-                    sigaction(sig, &sa, nullptr);
-                    raise(sig);
-
-                    break;  // Should not reach due to process termination
+        signal_thread_ = std::jthread([set, ready = std::move(ready)](
+                                          std::stop_token st) mutable {
+            // Register a stop callback to interrupt sigwait via SIGUSR1
+            pthread_t self = pthread_self();
+            std::stop_callback cb(st,
+                                  [self]() { pthread_kill(self, SIGUSR1); });
+            ready.set_value();
+            for (;;) {
+                int sig = 0;
+                int rc = sigwait(&set, &sig);
+                if (rc != 0) {
+                    LOG(ERROR) << "sigwait failed: " << strerror(rc);
+                    continue;
                 }
-            });
+
+                if (sig == SIGUSR1) {
+                    if (st.stop_requested()) {
+                        break;  // graceful stop
+                    }
+                    continue;  // spurious
+                }
+
+                // Perform cleanup in normal thread context
+                LOG(INFO) << "Received signal " << sig
+                          << ", cleaning up resources";
+                ResourceTracker::getInstance().cleanupAllResources();
+
+                // Restore default action and re-raise to terminate normally
+                struct sigaction sa;
+                sa.sa_handler = SIG_DFL;
+                sigemptyset(&sa.sa_mask);
+                sa.sa_flags = 0;
+                sigaction(sig, &sa, nullptr);
+
+                // Unblock the signal before raising it so it can be
+                // delivered immediately
+                sigset_t unblock_set;
+                sigemptyset(&unblock_set);
+                sigaddset(&unblock_set, sig);
+                int ret = pthread_sigmask(SIG_UNBLOCK, &unblock_set, nullptr);
+                if (ret != 0) {
+                    LOG(ERROR) << "Failed to unblock signal " << sig
+                               << " before raising: " << strerror(ret);
+                    _exit(EXIT_FAILURE);
+                }
+                raise(sig);
+
+                break;  // Should not reach due to process termination
+            }
+        });
         ready_future.wait();  // Ensure thread is ready
     });
 }
@@ -152,6 +182,7 @@ RealClient::RealClient() {
 
 RealClient::~RealClient() {
     // Ensure resources are cleaned even if not explicitly closed
+    stop_http_server();
     tearDownAll_internal();
 }
 
@@ -302,6 +333,25 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
         auto max_mr_size = globalConfig().max_mr_size;     // Max segment size
         uint64_t total_glbseg_size = global_segment_size;  // For logging
         uint64_t current_glbseg_size = 0;                  // For logging
+
+        // In standalone mode with RDMA, auto-discover NUMA nodes with NICs
+        // and distribute global_segment across them for full NIC utilization.
+        std::vector<int> seg_numa_nodes;
+        if (!ipc_socket_path_.empty() && protocol == "rdma") {
+            seg_numa_nodes = client_->GetNicNumaNodes();
+            if (seg_numa_nodes.size() > 1) {
+                std::string nodes_str;
+                for (size_t i = 0; i < seg_numa_nodes.size(); ++i) {
+                    if (i) nodes_str += ",";
+                    nodes_str += std::to_string(seg_numa_nodes[i]);
+                }
+                LOG(INFO) << "NUMA-segmented mode: NIC NUMA nodes=["
+                          << nodes_str << "]";
+            } else {
+                seg_numa_nodes.clear();
+            }
+        }
+
         while (global_segment_size > 0) {
             size_t segment_size = std::min(global_segment_size, max_mr_size);
             global_segment_size -= segment_size;
@@ -311,7 +361,19 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
 
             size_t mapped_size = segment_size;
             void *ptr = nullptr;
-            if (should_use_hugepage) {
+            std::string seg_location = kWildcardLocation;
+
+            if (!seg_numa_nodes.empty()) {
+                // NUMA-segmented allocation: contiguous VMA, per-region binding
+                size_t page_sz = should_use_hugepage
+                                     ? get_hugepage_size_from_env()
+                                     : static_cast<size_t>(getpagesize());
+                mapped_size =
+                    align_up(segment_size, page_sz * seg_numa_nodes.size());
+                ptr = allocate_buffer_numa_segments(mapped_size, seg_numa_nodes,
+                                                    page_sz);
+                seg_location = buildSegmentsLocation(page_sz, seg_numa_nodes);
+            } else if (should_use_hugepage) {
                 mapped_size =
                     align_up(segment_size, get_hugepage_size_from_env());
                 ptr = allocate_buffer_mmap_memory(mapped_size,
@@ -325,18 +387,19 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
                 LOG(ERROR) << "Failed to allocate segment memory";
                 return tl::unexpected(ErrorCode::INVALID_PARAMS);
             }
-            if (this->protocol == "ascend") {
-                ascend_segment_ptrs_.emplace_back(ptr);
-            } else if (this->protocol == "ubshmem") {
-                ubshmem_segment_ptrs_.emplace_back(ptr);
-            } else if (should_use_hugepage) {
+            if (this->protocol == "ascend" || this->protocol == "ubshmem") {
+                ascend_segment_ptrs_.emplace_back(
+                    ptr, AscendSegmentDeleter{this->protocol});
+            } else if (!seg_numa_nodes.empty() || should_use_hugepage) {
+                // NUMA-segmented or hugepage: track as mmap allocation for
+                // munmap cleanup
                 hugepage_segment_ptrs_.emplace_back(
                     ptr, HugepageSegmentDeleter{mapped_size});
             } else {
                 segment_ptrs_.emplace_back(ptr);
             }
             auto mount_result =
-                client_->MountSegment(ptr, mapped_size, protocol);
+                client_->MountSegment(ptr, mapped_size, protocol, seg_location);
             if (!mount_result.has_value()) {
                 LOG(ERROR) << "Failed to mount segment: "
                            << toString(mount_result.error());
@@ -368,6 +431,13 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
         }
     }
     client_requester_ = std::make_shared<ClientRequester>();
+    if (FLAGS_enable_http_server) {
+        if (start_http_server() != 0) {
+            LOG(ERROR) << "Failed to start HTTP server on port "
+                       << FLAGS_http_port;
+        }
+    }
+
     return {};
 }
 
@@ -506,6 +576,7 @@ tl::expected<void, ErrorCode> RealClient::tearDownAll_internal() {
     }
 
     stop_ipc_server();
+    stop_http_server();
 
     if (!client_) {
         // Not initialized or already cleaned; treat as success for idempotence
@@ -555,6 +626,99 @@ tl::expected<void, ErrorCode> RealClient::tearDownAll_internal() {
 }
 
 int RealClient::tearDownAll() { return to_py_ret(tearDownAll_internal()); }
+
+int RealClient::health_check() {
+    if (closed_.load()) return HC_NOT_INITIALIZED;
+    if (!client_) return HC_NOT_INITIALIZED;
+    if (!client_->is_ping_healthy()) return HC_MASTER_UNREACHABLE;
+    return HC_HEALTHY;
+}
+
+int RealClient::start_http_server() {
+    using namespace coro_http;
+
+    http_server_ =
+        std::make_unique<coro_http_server>(/*thread_num=*/1, FLAGS_http_port);
+
+    http_server_->set_http_handler<GET>(
+        "/health", [this](coro_http_request &req, coro_http_response &resp) {
+            int code = health_check();
+            std::string status_str;
+            switch (code) {
+                case HC_HEALTHY:
+                    status_str = "healthy";
+                    break;
+                case HC_NOT_INITIALIZED:
+                    status_str = "not_initialized";
+                    break;
+                case HC_MASTER_UNREACHABLE:
+                    status_str = "master_unreachable";
+                    break;
+                default:
+                    status_str = "unknown";
+                    break;
+            }
+            std::string body = "{\"status\":\"" + status_str +
+                               "\",\"code\":" + std::to_string(code) + "}";
+            resp.add_header("Content-Type", "application/json");
+            auto http_status = (code == HC_HEALTHY)
+                                   ? status_type::ok
+                                   : status_type::service_unavailable;
+            resp.set_status_and_content(http_status, std::move(body));
+        });
+
+    http_server_->set_http_handler<GET>(
+        "/metrics", [this](coro_http_request &req, coro_http_response &resp) {
+            if (!client_) {
+                resp.set_status_and_content(status_type::service_unavailable,
+                                            "client not initialized");
+                return;
+            }
+            auto result = client_->SerializeMetrics();
+            if (!result) {
+                resp.set_status_and_content(status_type::service_unavailable,
+                                            "metrics not available");
+                return;
+            }
+            resp.add_header("Content-Type", "text/plain; version=0.0.4");
+            resp.set_status_and_content(status_type::ok, std::move(*result));
+        });
+
+    http_server_->set_http_handler<GET>(
+        "/metrics/summary",
+        [this](coro_http_request &req, coro_http_response &resp) {
+            if (!client_) {
+                resp.set_status_and_content(status_type::service_unavailable,
+                                            "client not initialized");
+                return;
+            }
+            auto result = client_->GetSummaryMetrics();
+            if (!result) {
+                resp.set_status_and_content(status_type::service_unavailable,
+                                            "metrics not available");
+                return;
+            }
+            resp.add_header("Content-Type", "text/plain");
+            resp.set_status_and_content(status_type::ok, std::move(*result));
+        });
+
+    auto ec = http_server_->async_start();
+    if (ec.hasResult()) {
+        LOG(ERROR) << "Failed to start HTTP server on port " << FLAGS_http_port;
+        http_server_.reset();
+        return -1;
+    }
+    LOG(INFO) << "Client HTTP server started on port " << FLAGS_http_port;
+    return 0;
+}
+
+void RealClient::stop_http_server() {
+    if (http_server_) {
+        http_server_->stop();
+        http_server_.reset();
+        LOG(INFO) << "Client HTTP server stopped";
+    }
+}
 
 tl::expected<void, ErrorCode> RealClient::put_internal(
     const std::string &key, std::span<const char> value,
@@ -1103,7 +1267,7 @@ std::shared_ptr<BufferHandle> RealClient::get_buffer_internal(
         return nullptr;
     }
 
-    // Allocate buffer using the new allocator
+    // Normal allocation path
     auto alloc_result = client_buffer_allocator->allocate(total_length);
     if (!alloc_result) {
         LOG(ERROR) << "Failed to allocate buffer for get_buffer, key: " << key;
@@ -2233,7 +2397,14 @@ RealClient::batch_get_into_multi_buffers_internal(
 
 tl::expected<PingResponse, ErrorCode> RealClient::ping(const UUID &client_id) {
     std::shared_lock<std::shared_mutex> lock(dummy_client_mutex_);
-    ClientStatus client_status = ClientStatus::OK;
+
+    if (!client_) {
+        LOG(ERROR) << "client_id=" << client_id << ", error=client_not_ready";
+        return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
+    }
+
+    ClientStatus client_status =
+        client_->is_ping_healthy() ? ClientStatus::OK : ClientStatus::UNDEFINED;
 
     PodUUID pod_client_id = {client_id.first, client_id.second};
     if (!dummy_client_ping_queue_.push(pod_client_id)) {
@@ -2535,8 +2706,18 @@ RealClient::batch_get_offload_object(const std::vector<std::string> &keys,
         return tl::make_unexpected(result.error());
     }
     return BatchGetOffloadObjectResponse(
-        std::move(result.value()), client_->GetTransportEndpoint(),
+        result.value().batch_id, std::move(result.value().pointers),
+        client_->GetTransportEndpoint(),
         file_storage_->config_.client_buffer_gc_ttl_ms);
+}
+
+bool RealClient::release_offload_buffer(uint64_t batch_id) {
+    if (!file_storage_) {
+        LOG(WARNING)
+            << "release_offload_buffer called but file_storage_ is null";
+        return false;
+    }
+    return file_storage_->ReleaseBuffer(batch_id);
 }
 
 tl::expected<void, ErrorCode>
@@ -2569,7 +2750,14 @@ RealClient::batch_get_into_offload_object_internal(
               << elapsed_time
               << "ms, with target_rpc_service_addr: " << target_rpc_service_addr
               << ", key size: " << objects.size()
-              << "gc ttl: " << batchGetResp->gc_ttl_ms << "ms.";
+              << ", batch_id: " << batchGetResp->batch_id
+              << ", gc ttl: " << batchGetResp->gc_ttl_ms << "ms.";
+
+    // Release buffer immediately after transfer completion (fire-and-forget)
+    // This allows early buffer reclamation instead of waiting for GC lease
+    client_requester_->release_offload_buffer(target_rpc_service_addr,
+                                              batchGetResp->batch_id);
+
     if (!result) {
         LOG(ERROR) << "Batch get into offload object failed with error: "
                    << result.error();
@@ -2606,6 +2794,23 @@ ClientRequester::batch_get_offload_object(const std::string &client_addr,
             << client_addr << ", error is: " << result.error();
     }
     return result;
+}
+
+void ClientRequester::release_offload_buffer(const std::string &client_addr,
+                                             uint64_t batch_id) {
+    // Fire-and-forget: attempt to release buffer, log errors but don't block
+    auto result = invoke_rpc<&RealClient::release_offload_buffer, bool>(
+        client_addr, batch_id);
+    if (!result) {
+        // This is expected in some cases (e.g., network issues, buffer already
+        // GC'd) Log at INFO level since GC will eventually clean up anyway
+        VLOG(1) << "Failed to release_offload_buffer for batch_id=" << batch_id
+                << " at " << client_addr
+                << " (will be GC'd): " << result.error();
+    } else {
+        VLOG(1) << "Successfully released buffer for batch_id=" << batch_id
+                << " at " << client_addr;
+    }
 }
 
 template <auto ServiceMethod, typename ReturnType, typename... Args>

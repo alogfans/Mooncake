@@ -28,6 +28,14 @@ enum ShmSegmentType : uint32_t {
     SHM_SEG_HOT_CACHE = 0,  // local hot cache backing memory
 };
 
+// Return codes for health_check()
+enum HealthCheckStatus : int {
+    HC_HEALTHY = 0,          // Fully connected, all links up
+    HC_NOT_INITIALIZED = 1,  // Not initialized or already closed
+    HC_MASTER_UNREACHABLE =
+        2  // Master (or RealClient for DummyClient) unreachable
+};
+
 // Payload for IPC_SHM_REGISTER (followed by fd via SCM_RIGHTS)
 struct ShmRegisterRequest {
     uint64_t client_id_first;
@@ -64,6 +72,16 @@ class ClientRequester {
     batch_get_offload_object(const std::string &client_addr,
                              const std::vector<std::string> &keys,
                              const std::vector<int64_t> sizes);
+
+    /**
+     * @brief Notifies remote FileStorage to release buffer after transfer
+     * completion. This is a fire-and-forget call - errors are logged but not
+     * propagated.
+     * @param client_addr Network address of the remote FileStorage service.
+     * @param batch_id The batch_id returned from batch_get_offload_object.
+     */
+    void release_offload_buffer(const std::string &client_addr,
+                                uint64_t batch_id);
 
    private:
     /**
@@ -207,6 +225,8 @@ class PyClient {
         const std::string &key) = 0;
 
     virtual int tearDownAll() = 0;
+
+    virtual int health_check() = 0;
 
     virtual tl::expected<UUID, ErrorCode> create_copy_task(
         const std::string &key, const std::vector<std::string> &targets) = 0;
