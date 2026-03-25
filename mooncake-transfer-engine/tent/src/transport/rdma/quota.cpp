@@ -57,7 +57,8 @@ struct TlsDeviceInfo {
     uint32_t sample_idx{0};
     bool window_full{false};
 
-    // Helper: get both p05 and p95 percentiles in one pass (assumes window_full)
+    // Helper: get both p05 and p95 percentiles in one pass (assumes
+    // window_full)
     void getBeta0Percentiles(double& out_p05, double& out_p95) {
         if (!window_full) {
             out_p05 = 5e-4;
@@ -142,14 +143,39 @@ Status DeviceQuota::allocate(uint64_t length, const std::string& location,
             double beta1 = w * tl_dev.beta1 + (1.0 - w) * beta1_g;
             double bw = dev.bw_gbps * 1e9 / 8;
             double predicted_time = (weighted_active / bw) * beta1 + beta0;
-            score_map[dev_id] = penalty[rank] * predicted_time;
+            double score = penalty[rank] * predicted_time;
+
+            // QoS penalty: lower priority processes get penalized when higher
+            // priority processes are using the device
+            if (shared_quota_ && priority_ > PRIO_HIGH) {
+                uint64_t high_load = shared_quota_->getHighPrioLoad(dev_id);
+                uint64_t med_load = shared_quota_->getMediumPrioLoad(dev_id);
+
+                // Threshold: consider device "contended" if > 1MB used by
+                // higher prio
+                constexpr uint64_t QOS_THRESHOLD = 1024 * 1024;
+
+                if (priority_ == PRIO_MEDIUM) {
+                    if (high_load > QOS_THRESHOLD) {
+                        score *= 2.0;
+                    }
+                } else if (priority_ == PRIO_LOW) {
+                    if (high_load > QOS_THRESHOLD || med_load > QOS_THRESHOLD) {
+                        score *= 5.0;
+                    }
+                }
+            }
+
+            score_map[dev_id] = score;
 
             // Idle discount: give unused devices a chance to be re-evaluated
-            uint64_t last_ns = dev.last_update_ns.load(std::memory_order_relaxed);
+            uint64_t last_ns =
+                dev.last_update_ns.load(std::memory_order_relaxed);
             if (last_ns > 0) {
                 uint64_t idle_ns = getFastTimeNanos() - last_ns;
                 if (idle_ns > 10e8) {  // idle > 1 seconds
-                    double discount = std::min(0.4, idle_ns / 60e8);  // max 40% off
+                    double discount =
+                        std::min(0.4, idle_ns / 60e8);  // max 40% off
                     score_map[dev_id] *= (1.0 - discount);
                 }
             }
@@ -253,8 +279,10 @@ Status DeviceQuota::release(int dev_id, uint64_t length, double latency) {
     // Apply clamping to global beta (if needed)
     if (local_weight_ < 1 - 1e-6) {
         dev.last_update_ns.store(getFastTimeNanos(), std::memory_order_relaxed);
-        dev.beta0.store(std::clamp(new_beta0_g, beta0_min, beta0_max), std::memory_order_relaxed);
-        dev.beta1.store(std::clamp(new_beta1_g, beta1_min, beta1_max), std::memory_order_relaxed);
+        dev.beta0.store(std::clamp(new_beta0_g, beta0_min, beta0_max),
+                        std::memory_order_relaxed);
+        dev.beta1.store(std::clamp(new_beta1_g, beta1_min, beta1_max),
+                        std::memory_order_relaxed);
 
         if (shared_quota_) {
             thread_local uint64_t tl_last_ts = 0;

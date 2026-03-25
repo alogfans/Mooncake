@@ -87,10 +87,7 @@ static inline int64_t getCurrentTimeInNano() {
 static inline uint64_t rdtscp() {
     unsigned int aux;
     uint64_t rax, rdx;
-    __asm__ __volatile__(
-        "rdtscp"
-        : "=a"(rax), "=d"(rdx), "=c"(aux)
-    );
+    __asm__ __volatile__("rdtscp" : "=a"(rax), "=d"(rdx), "=c"(aux));
     return (rdx << 32) | rax;
 }
 #elif defined(__aarch64__) || defined(__arm__)
@@ -107,32 +104,33 @@ static inline uint64_t rdtscp() {
 
 // Convert TSC cycles to nanoseconds using calibrated TSC frequency
 namespace detail {
-    // TSC frequency in MHz (initialized once)
-    inline double g_tsc_mhz = 0.0;
+// TSC frequency in MHz (initialized once)
+inline double g_tsc_mhz = 0.0;
 
-    // One-time calibration of TSC frequency
-    inline double calibrateTscFrequency() {
-        if (g_tsc_mhz > 0.0) return g_tsc_mhz;
+// One-time calibration of TSC frequency
+inline double calibrateTscFrequency() {
+    if (g_tsc_mhz > 0.0) return g_tsc_mhz;
 
-        // Measure TSC frequency by comparing with clock_gettime
-        const int calibration_ms = 10;  // 10ms calibration
-        auto start_tsc = rdtscp();
-        auto start_ns = std::chrono::steady_clock::now();
+    // Measure TSC frequency by comparing with clock_gettime
+    const int calibration_ms = 10;  // 10ms calibration
+    auto start_tsc = rdtscp();
+    auto start_ns = std::chrono::steady_clock::now();
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(calibration_ms));
+    std::this_thread::sleep_for(std::chrono::milliseconds(calibration_ms));
 
-        auto end_tsc = rdtscp();
-        auto end_ns = std::chrono::steady_clock::now();
+    auto end_tsc = rdtscp();
+    auto end_ns = std::chrono::steady_clock::now();
 
-        uint64_t tsc_diff = end_tsc - start_tsc;
-        auto ns_diff = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                          end_ns - start_ns).count();
+    uint64_t tsc_diff = end_tsc - start_tsc;
+    auto ns_diff =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(end_ns - start_ns)
+            .count();
 
-        // TSC frequency in MHz = (cycles / nanoseconds) * 1000
-        g_tsc_mhz = (static_cast<double>(tsc_diff) / ns_diff) * 1000.0;
+    // TSC frequency in MHz = (cycles / nanoseconds) * 1000
+    g_tsc_mhz = (static_cast<double>(tsc_diff) / ns_diff) * 1000.0;
 
-        return g_tsc_mhz;
-    }
+    return g_tsc_mhz;
+}
 }  // namespace detail
 
 // Convert TSC cycles to nanoseconds (fast path, ~5 cycles)
@@ -143,9 +141,7 @@ static inline uint64_t tscToNanos(uint64_t tsc_cycles) {
 
 // Get current time in nanoseconds using RDTSCP (faster than clock_gettime)
 // For interval measurement only, not absolute time
-static inline uint64_t getFastTimeNanos() {
-    return tscToNanos(rdtscp());
-}
+static inline uint64_t getFastTimeNanos() { return tscToNanos(rdtscp()); }
 
 static inline std::string getCurrentDateTime() {
     auto now = std::chrono::system_clock::now();
