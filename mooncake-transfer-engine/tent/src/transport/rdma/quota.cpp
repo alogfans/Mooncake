@@ -16,6 +16,7 @@
 #include "tent/transport/rdma/shared_quota.h"
 #include "tent/common/utils/random.h"
 
+#include <algorithm>
 #include <assert.h>
 #include <unordered_set>
 
@@ -48,6 +49,54 @@ struct TlsDeviceInfo {
     uint64_t active_bytes{0};
     double beta0{0.0};
     double beta1{1.0};
+
+    // Sample window for percentile calculation
+    static constexpr uint32_t kSampleWindow = 100;
+    double beta0_samples[kSampleWindow]{0};
+    double beta1_samples[kSampleWindow]{0};
+    uint32_t sample_idx{0};
+    bool window_full{false};
+
+    // Helper: get both p05 and p95 percentiles in one pass (assumes window_full)
+    void getBeta0Percentiles(double& out_p05, double& out_p95) {
+        if (!window_full) {
+            out_p05 = 5e-4;
+            out_p95 = 5e-4;
+            return;
+        }
+        size_t idx_p05 = (kSampleWindow - 1) * 0.05;
+        size_t idx_p95 = (kSampleWindow - 1) * 0.95;
+        std::nth_element(beta0_samples, beta0_samples + idx_p05,
+                         beta0_samples + kSampleWindow);
+        out_p05 = beta0_samples[idx_p05];
+        std::nth_element(beta0_samples + idx_p05 + 1, beta0_samples + idx_p95,
+                         beta0_samples + kSampleWindow);
+        out_p95 = beta0_samples[idx_p95];
+    }
+
+    void getBeta1Percentiles(double& out_p05, double& out_p95) {
+        if (!window_full) {
+            out_p05 = 2.0;
+            out_p95 = 2.0;
+            return;
+        }
+        size_t idx_p05 = (kSampleWindow - 1) * 0.05;
+        size_t idx_p95 = (kSampleWindow - 1) * 0.95;
+        std::nth_element(beta1_samples, beta1_samples + idx_p05,
+                         beta1_samples + kSampleWindow);
+        out_p05 = beta1_samples[idx_p05];
+        std::nth_element(beta1_samples + idx_p05 + 1, beta1_samples + idx_p95,
+                         beta1_samples + kSampleWindow);
+        out_p95 = beta1_samples[idx_p95];
+    }
+
+    // Add sample to window
+    void addSample(double b0, double b1) {
+        beta0_samples[sample_idx] = b0;
+        beta1_samples[sample_idx] = b1;
+        sample_idx = (sample_idx + 1) % kSampleWindow;
+        if (sample_idx == 0) window_full = true;
+    }
 };
 
 thread_local std::unordered_map<int, TlsDeviceInfo> tl_device_info;
@@ -94,6 +143,16 @@ Status DeviceQuota::allocate(uint64_t length, const std::string& location,
             double bw = dev.bw_gbps * 1e9 / 8;
             double predicted_time = (weighted_active / bw) * beta1 + beta0;
             score_map[dev_id] = penalty[rank] * predicted_time;
+
+            // Idle discount: give unused devices a chance to be re-evaluated
+            uint64_t last_ns = dev.last_update_ns.load(std::memory_order_relaxed);
+            if (last_ns > 0) {
+                uint64_t idle_ns = getFastTimeNanos() - last_ns;
+                if (idle_ns > 10e8) {  // idle > 1 seconds
+                    double discount = std::min(0.4, idle_ns / 60e8);  // max 40% off
+                    score_map[dev_id] *= (1.0 - discount);
+                }
+            }
             best_score = std::min(best_score, score_map[dev_id]);
             found_device = true;
         }
@@ -163,16 +222,40 @@ Status DeviceQuota::release(int dev_id, uint64_t length, double latency) {
 
     double new_beta0_l = tl_dev.beta0 + w * delta0;
     double new_beta1_l = tl_dev.beta1 * (1.0 + w * delta1);
-    tl_dev.beta0 = std::clamp(new_beta0_l, 0.0, 5e-4);
-    tl_dev.beta1 = std::clamp(new_beta1_l, 0.5, 20.0);
+    double new_beta0_g = beta0_g + (1.0 - w) * delta0;
+    double new_beta1_g = beta1_g * (1.0 + (1.0 - w) * delta1);
 
+    // Compute percentile bounds once (shared by local and global)
+    double beta0_min, beta0_max, beta1_min, beta1_max;
+    if (use_robust_clamp_) {
+        tl_dev.addSample(new_beta0_l, new_beta1_l);
+
+        double p95_beta0, p05_beta0, p95_beta1, p05_beta1;
+        tl_dev.getBeta0Percentiles(p05_beta0, p95_beta0);
+        tl_dev.getBeta1Percentiles(p05_beta1, p95_beta1);
+
+        const double headroom = 1.1;
+        beta0_min = p05_beta0;
+        beta0_max = std::min(p95_beta0 * headroom, 5e-4);
+        beta1_min = p05_beta1;
+        beta1_max = std::min(p95_beta1 * headroom, 20.0);
+    } else {
+        beta0_min = 0.0;
+        beta0_max = 5e-4;
+        beta1_min = 0.5;
+        beta1_max = 20.0;
+    }
+
+    // Apply clamping to local beta
+    tl_dev.beta0 = std::clamp(new_beta0_l, beta0_min, beta0_max);
+    tl_dev.beta1 = std::clamp(new_beta1_l, beta1_min, beta1_max);
+
+    // Apply clamping to global beta (if needed)
     if (local_weight_ < 1 - 1e-6) {
-        double new_beta0_g = beta0_g + (1.0 - w) * delta0;
-        double new_beta1_g = beta1_g * (1.0 + (1.0 - w) * delta1);
-        dev.beta0.store(std::clamp(new_beta0_g, 0.0, 5e-4),
-                        std::memory_order_relaxed);
-        dev.beta1.store(std::clamp(new_beta1_g, 0.5, 20.0),
-                        std::memory_order_relaxed);
+        dev.last_update_ns.store(getFastTimeNanos(), std::memory_order_relaxed);
+        dev.beta0.store(std::clamp(new_beta0_g, beta0_min, beta0_max), std::memory_order_relaxed);
+        dev.beta1.store(std::clamp(new_beta1_g, beta1_min, beta1_max), std::memory_order_relaxed);
+
         if (shared_quota_) {
             thread_local uint64_t tl_last_ts = 0;
             uint64_t now = getCurrentTimeInNano();

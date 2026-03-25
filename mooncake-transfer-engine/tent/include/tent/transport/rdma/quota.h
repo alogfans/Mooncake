@@ -63,6 +63,8 @@ class DeviceQuota {
         uint64_t padding3[7];
         std::atomic<double> beta1{1.0};  // Effective bandwidth correction
         uint64_t padding4[7];
+        std::atomic<uint64_t> last_update_ns{0};  // Last update time (RDTSCP-based)
+        uint64_t padding5[7];
     };
 
    public:
@@ -104,6 +106,10 @@ class DeviceQuota {
 
     void setCrossNumaAccess(bool enable = true) { allow_cross_numa_ = enable; }
 
+    void setRobustClamping(bool enable) { use_robust_clamp_ = enable; }
+
+    bool getRobustClamping() const { return use_robust_clamp_; }
+
    private:
     std::shared_ptr<Topology> local_topology_;
     std::unordered_map<int, DeviceInfo> devices_;
@@ -112,6 +118,8 @@ class DeviceQuota {
     double alpha_ = 0.01;
     double local_weight_ = 0.9;
     uint64_t diffusion_interval_ = 10 * 1000000ull;
+    bool use_robust_clamp_ = true;     // Use adaptive bounds instead of static
+    uint32_t sample_window_size_ = 100; // Number of samples for percentile calculation
     std::shared_ptr<SharedQuotaManager> shared_quota_;
     bool enable_quota_ = true;
     bool update_quota_params_ = true;
