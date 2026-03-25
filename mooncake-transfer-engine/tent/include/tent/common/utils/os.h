@@ -133,9 +133,13 @@ inline double calibrateTscFrequency() {
 }
 }  // namespace detail
 
+// Initialize fast timer by calibrating TSC frequency at startup.
+// Call this once at program startup to avoid lazy calibration overhead.
+static inline void initFastTimer() { detail::calibrateTscFrequency(); }
+
 // Convert TSC cycles to nanoseconds (fast path, ~5 cycles)
 static inline uint64_t tscToNanos(uint64_t tsc_cycles) {
-    double tsc_mhz = detail::calibrateTscFrequency();
+    double tsc_mhz = detail::g_tsc_mhz;
     return static_cast<uint64_t>(tsc_cycles / tsc_mhz);
 }
 
