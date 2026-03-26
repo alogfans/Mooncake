@@ -16,7 +16,6 @@
 #include "tent/transport/rdma/shared_quota.h"
 #include "tent/common/utils/random.h"
 
-#include <algorithm>
 #include <assert.h>
 #include <unordered_set>
 
@@ -50,51 +49,52 @@ struct TlsDeviceInfo {
     double beta0{0.0};  // Fixed overhead (μs), origin/main: 0.0
     double beta1{1.0};  // Bandwidth correction factor, origin/main: 1.0
 
-    // Sample window for robust percentile-based clamping
-    static constexpr uint32_t kSampleWindow = 100;
-    double beta0_samples[kSampleWindow]{0};
-    double beta1_samples[kSampleWindow]{0};
-    uint32_t sample_idx{0};
-    bool window_full{false};
+    double beta0_min_observed{0.0};
+    double beta0_max_observed{500.0};
+    double beta1_min_observed{0.5};
+    double beta1_max_observed{20.0};
+    uint32_t sample_count{0};
+    static constexpr double kDecayFactor = 0.98;
+    static constexpr uint32_t kWarmupSamples = 50;
 
-    void getBeta0Percentiles(double& out_p05, double& out_p95) {
-        if (!window_full) {
-            out_p05 = 0.0;
-            out_p95 = 500.0;  // 500μs
-            return;
+    void updateBounds(double b0, double b1) {
+        sample_count++;
+        if (sample_count <= kWarmupSamples) {
+            beta0_min_observed = std::min(beta0_min_observed, b0);
+            beta0_max_observed = std::max(beta0_max_observed, b0);
+            beta1_min_observed = std::min(beta1_min_observed, b1);
+            beta1_max_observed = std::max(beta1_max_observed, b1);
+        } else {
+            beta0_min_observed =
+                kDecayFactor * beta0_min_observed +
+                (1 - kDecayFactor) * std::min(beta0_min_observed, b0);
+            beta0_max_observed =
+                kDecayFactor * beta0_max_observed +
+                (1 - kDecayFactor) * std::max(beta0_max_observed, b0);
+            beta1_min_observed =
+                kDecayFactor * beta1_min_observed +
+                (1 - kDecayFactor) * std::min(beta1_min_observed, b1);
+            beta1_max_observed =
+                kDecayFactor * beta1_max_observed +
+                (1 - kDecayFactor) * std::max(beta1_max_observed, b1);
         }
-        size_t idx_p05 = (kSampleWindow - 1) * 0.05;
-        size_t idx_p95 = (kSampleWindow - 1) * 0.95;
-        std::nth_element(beta0_samples, beta0_samples + idx_p05,
-                         beta0_samples + kSampleWindow);
-        out_p05 = beta0_samples[idx_p05];
-        std::nth_element(beta0_samples + idx_p05 + 1, beta0_samples + idx_p95,
-                         beta0_samples + kSampleWindow);
-        out_p95 = beta0_samples[idx_p95];
     }
 
-    void getBeta1Percentiles(double& out_p05, double& out_p95) {
-        if (!window_full) {
-            // Bandwidth correction factor: origin/main [0.5, 20.0]
-            out_p05 = 0.5;
-            out_p95 = 20.0;
-            return;
+    void getBounds(double& b0_min, double& b0_max, double& b1_min,
+                   double& b1_max) {
+        if (sample_count < kWarmupSamples) {
+            b0_min = 0.0;
+            b0_max = 500.0;
+            b1_min = 0.5;
+            b1_max = 20.0;
+        } else {
+            double range0 = beta0_max_observed - beta0_min_observed;
+            double range1 = beta1_max_observed - beta1_min_observed;
+            b0_min = std::max(0.0, beta0_min_observed);
+            b0_max = beta0_max_observed + 2.0 * range0;
+            b1_min = std::max(0.5, beta1_min_observed);
+            b1_max = beta1_max_observed + 2.0 * range1;
         }
-        size_t idx_p05 = (kSampleWindow - 1) * 0.05;
-        size_t idx_p95 = (kSampleWindow - 1) * 0.95;
-        std::nth_element(beta1_samples, beta1_samples + idx_p05,
-                         beta1_samples + kSampleWindow);
-        out_p05 = beta1_samples[idx_p05];
-        std::nth_element(beta1_samples + idx_p05 + 1, beta1_samples + idx_p95,
-                         beta1_samples + kSampleWindow);
-        out_p95 = beta1_samples[idx_p95];
-    }
-
-    void addSample(double b0, double b1) {
-        beta0_samples[sample_idx] = b0;
-        beta1_samples[sample_idx] = b1;
-        sample_idx = (sample_idx + 1) % kSampleWindow;
-        if (sample_idx == 0) window_full = true;
     }
 };
 
@@ -259,31 +259,10 @@ Status DeviceQuota::release(int dev_id, uint64_t length, double latency) {
     double delta1 = adapt_alpha * rel_err;
     double new_beta1_l = tl_dev.beta1 * (1.0 + w * delta1);
     double new_beta1_g = beta1_g * (1.0 + (1.0 - w) * delta1);
-
-    // Dynamic percentile-based clamping
     double beta0_min, beta0_max, beta1_min, beta1_max;
     if (use_robust_clamp_) {
-        tl_dev.addSample(new_beta0_l, new_beta1_l);
-
-        double p95_beta0, p05_beta0, p95_beta1, p05_beta1;
-        tl_dev.getBeta0Percentiles(p05_beta0, p95_beta0);
-        tl_dev.getBeta1Percentiles(p05_beta1, p95_beta1);
-
-        double iqr_beta0 = p95_beta0 - p05_beta0;
-        double iqr_beta1 = p95_beta1 - p05_beta1;
-
-        if (tl_dev.window_full) {
-            beta0_min = std::max(0.0, p05_beta0);
-            beta0_max = p95_beta0 + 3.0 * iqr_beta0;
-            beta1_min = std::max(0.5, p05_beta1);
-            beta1_max = p95_beta1 + 3.0 * iqr_beta1;
-        } else {
-            // Cold-start: origin/main values in microseconds
-            beta0_min = 0.0;
-            beta0_max = 500.0;
-            beta1_min = 0.5;
-            beta1_max = 20.0;
-        }
+        tl_dev.updateBounds(new_beta0_l, new_beta1_l);
+        tl_dev.getBounds(beta0_min, beta0_max, beta1_min, beta1_max);
     } else {
         // Static bounds: origin/main values in microseconds
         beta0_min = 0.0;

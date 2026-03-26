@@ -191,7 +191,8 @@ void Workers::disableEndpoint(RdmaSlice* slice, int ibv_wc_status) {
     if (desc) {
         auto& worker = worker_context_[tl_wid];
         auto& rail = worker.rails[desc->machine_id];
-        rail.markFailed(slice->source_dev_id, slice->target_dev_id, ibv_wc_status);
+        rail.markFailed(slice->source_dev_id, slice->target_dev_id,
+                        ibv_wc_status);
     }
     if (slice->ep_weak_ptr) {
         slice->ep_weak_ptr->acknowledge(slice, FAILED);

@@ -47,7 +47,8 @@ bool RailMonitor::available(int local_nic, int remote_nic) {
     return true;
 }
 
-void RailMonitor::markFailed(int local_nic, int remote_nic, int transport_error) {
+void RailMonitor::markFailed(int local_nic, int remote_nic,
+                             int transport_error) {
     auto it = rail_states_.find(std::make_pair(local_nic, remote_nic));
     if (it == rail_states_.end()) {
         rail_states_[std::make_pair(local_nic, remote_nic)] = RailState{};
@@ -62,7 +63,8 @@ void RailMonitor::markFailed(int local_nic, int remote_nic, int transport_error)
                           transport_error == IBV_WC_RNR_RETRY_EXC_ERR);
 
     // For congestion errors, require more errors before triggering failover
-    int failover_threshold = is_congestion ? error_threshold_ * 2 : error_threshold_;
+    int failover_threshold =
+        is_congestion ? error_threshold_ * 2 : error_threshold_;
 
     if (st.error_count == 0 || now - st.last_error > error_window_) {
         st.error_count = 1;
@@ -96,7 +98,8 @@ void RailMonitor::markRecovered(int local_nic, int remote_nic) {
     st.resume_time = {};
     updateBestMapping();
 
-    LOG(INFO) << "Rail " << local_nic << " -> " << remote_nic << " marked recovered";
+    LOG(INFO) << "Rail " << local_nic << " -> " << remote_nic
+              << " marked recovered";
 }
 
 int RailMonitor::findBestRemoteDevice(int local_nic, int remote_numa) {
