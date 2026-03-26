@@ -27,7 +27,7 @@ Status DeviceQuota::loadTopology(std::shared_ptr<Topology>& local_topology) {
     std::unordered_set<int> used_numa_id;
     for (size_t dev_id = 0; dev_id < local_topology->getNicCount(); ++dev_id) {
         auto entry = local_topology->getNicEntry(dev_id);
-        if (entry->type != Topology::NIC_RDMA) continue;
+        if (!entry || entry->type != Topology::NIC_RDMA) continue;
         DeviceInfo& info = devices_[dev_id];
         info.dev_id = dev_id;
         info.bw_gbps = 200.0;
@@ -47,22 +47,20 @@ Status DeviceQuota::enableSharedQuota(const std::string& shm_name) {
 
 struct TlsDeviceInfo {
     uint64_t active_bytes{0};
-    double beta0{0.0};
-    double beta1{1.0};
+    double beta0{0.0};  // Fixed overhead (μs), origin/main: 0.0
+    double beta1{1.0};  // Bandwidth correction factor, origin/main: 1.0
 
-    // Sample window for percentile calculation
+    // Sample window for robust percentile-based clamping
     static constexpr uint32_t kSampleWindow = 100;
     double beta0_samples[kSampleWindow]{0};
     double beta1_samples[kSampleWindow]{0};
     uint32_t sample_idx{0};
     bool window_full{false};
 
-    // Helper: get both p05 and p95 percentiles in one pass (assumes
-    // window_full)
     void getBeta0Percentiles(double& out_p05, double& out_p95) {
         if (!window_full) {
-            out_p05 = 5e-4;
-            out_p95 = 5e-4;
+            out_p05 = 0.0;
+            out_p95 = 500.0;  // 500μs
             return;
         }
         size_t idx_p05 = (kSampleWindow - 1) * 0.05;
@@ -77,8 +75,9 @@ struct TlsDeviceInfo {
 
     void getBeta1Percentiles(double& out_p05, double& out_p95) {
         if (!window_full) {
-            out_p05 = 2.0;
-            out_p95 = 2.0;
+            // Bandwidth correction factor: origin/main [0.5, 20.0]
+            out_p05 = 0.5;
+            out_p95 = 20.0;
             return;
         }
         size_t idx_p05 = (kSampleWindow - 1) * 0.05;
@@ -91,7 +90,6 @@ struct TlsDeviceInfo {
         out_p95 = beta1_samples[idx_p95];
     }
 
-    // Add sample to window
     void addSample(double b0, double b1) {
         beta0_samples[sample_idx] = b0;
         beta1_samples[sample_idx] = b1;
@@ -141,41 +139,36 @@ Status DeviceQuota::allocate(uint64_t length, const std::string& location,
             double beta1_g = dev.beta1.load(std::memory_order_relaxed);
             double beta0 = w * tl_dev.beta0 + (1.0 - w) * beta0_g;
             double beta1 = w * tl_dev.beta1 + (1.0 - w) * beta1_g;
-            double bw = dev.bw_gbps * 1e9 / 8;
-            double predicted_time = (weighted_active / bw) * beta1 + beta0;
+            double bw_bytes_per_sec = dev.bw_gbps * 1e9 / 8;
+            double theory_time_us = weighted_active / bw_bytes_per_sec * 1e6;
+            double predicted_time = beta0 + beta1 * theory_time_us;
             double score = penalty[rank] * predicted_time;
 
-            // QoS penalty: lower priority processes get penalized when higher
-            // priority processes are using the device
+            // QoS penalty: lower priority gets penalized when higher priority
+            // is active
             if (shared_quota_ && priority_ > PRIO_HIGH) {
                 uint64_t high_load = shared_quota_->getHighPrioLoad(dev_id);
                 uint64_t med_load = shared_quota_->getMediumPrioLoad(dev_id);
+                constexpr uint64_t QOS_THRESHOLD = 1024 * 1024;  // 1MB
 
-                // Threshold: consider device "contended" if > 1MB used by
-                // higher prio
-                constexpr uint64_t QOS_THRESHOLD = 1024 * 1024;
-
-                if (priority_ == PRIO_MEDIUM) {
-                    if (high_load > QOS_THRESHOLD) {
-                        score *= 2.0;
-                    }
-                } else if (priority_ == PRIO_LOW) {
-                    if (high_load > QOS_THRESHOLD || med_load > QOS_THRESHOLD) {
-                        score *= 5.0;
-                    }
+                if (priority_ == PRIO_MEDIUM && high_load > QOS_THRESHOLD) {
+                    score *= 2.0;
+                } else if (priority_ == PRIO_LOW &&
+                           (high_load > QOS_THRESHOLD ||
+                            med_load > QOS_THRESHOLD)) {
+                    score *= 5.0;
                 }
             }
 
             score_map[dev_id] = score;
 
-            // Idle discount: give unused devices a chance to be re-evaluated
+            // Idle discount: give unused devices a chance (anti-starvation)
             uint64_t last_ns =
                 dev.last_update_ns.load(std::memory_order_relaxed);
             if (last_ns > 0) {
                 uint64_t idle_ns = getFastTimeNanos() - last_ns;
-                if (idle_ns > 10e8) {  // idle > 1 seconds
-                    double discount =
-                        std::min(0.4, idle_ns / 60e8);  // max 40% off
+                if (idle_ns > 10e8) {  // idle > 1 second
+                    double discount = std::min(0.4, idle_ns / 60e8);  // max 40%
                     score_map[dev_id] *= (1.0 - discount);
                 }
             }
@@ -225,9 +218,9 @@ Status DeviceQuota::release(int dev_id, uint64_t length, double latency) {
 
     if (!update_quota_params_) return Status::OK();
 
-    double bw = dev.bw_gbps * 1e9 / 8;
-    double theory_time = static_cast<double>(length) / bw;
-    double obs_time = latency;
+    // Convert observed latency to microseconds
+    constexpr double SEC_TO_US = 1e6;
+    double obs_time = latency * SEC_TO_US;
 
     const double w = local_weight_;
     double beta0_g = dev.beta0.load(std::memory_order_relaxed);
@@ -235,23 +228,39 @@ Status DeviceQuota::release(int dev_id, uint64_t length, double latency) {
     double beta0 = w * tl_dev.beta0 + (1.0 - w) * beta0_g;
     double beta1 = w * tl_dev.beta1 + (1.0 - w) * beta1_g;
 
-    double pred_time = beta0 + beta1 * theory_time;
-    double err = obs_time - pred_time;
-    double rel_err = (pred_time > 1e-9) ? (err / pred_time) : 0.0;
+    // Estimate active bytes at request time (for more accurate update)
+    // At release time, active_bytes has already been decremented,
+    // so we add length back to estimate the value at request time.
+    uint64_t estimated_active = tl_dev.active_bytes + length;
+    if (local_weight_ < 1 - 1e-6) {
+        uint64_t overall_active =
+            dev.active_bytes.load(std::memory_order_relaxed) +
+            dev.diffusion_active_bytes.load(std::memory_order_relaxed);
+        estimated_active = std::max(estimated_active, overall_active);
+    }
 
+    // Predict using estimated active (origin/main formula)
+    double bw_bytes_per_sec = dev.bw_gbps * 1e9 / 8;
+    double theory_time_us = estimated_active / bw_bytes_per_sec * SEC_TO_US;
+    double pred_time = beta0 + beta1 * theory_time_us;
+    double err = obs_time - pred_time;
+    double rel_err = (pred_time > 1e-3) ? (err / pred_time) : 0.0;
+
+    // Adaptive learning rate
     double adapt_alpha = alpha_;
-    if (std::abs(err) > 0.05 * pred_time)
+    if (std::abs(err) > 0.05 * pred_time && pred_time > 1e-3)
         adapt_alpha = std::min(1.0, alpha_ * 5.0);
 
+    // EWMA update (origin/main style)
     double delta0 = adapt_alpha * err;
-    double delta1 = adapt_alpha * rel_err;
-
     double new_beta0_l = tl_dev.beta0 + w * delta0;
-    double new_beta1_l = tl_dev.beta1 * (1.0 + w * delta1);
     double new_beta0_g = beta0_g + (1.0 - w) * delta0;
+
+    double delta1 = adapt_alpha * rel_err;
+    double new_beta1_l = tl_dev.beta1 * (1.0 + w * delta1);
     double new_beta1_g = beta1_g * (1.0 + (1.0 - w) * delta1);
 
-    // Compute percentile bounds once (shared by local and global)
+    // Dynamic percentile-based clamping
     double beta0_min, beta0_max, beta1_min, beta1_max;
     if (use_robust_clamp_) {
         tl_dev.addSample(new_beta0_l, new_beta1_l);
@@ -260,23 +269,32 @@ Status DeviceQuota::release(int dev_id, uint64_t length, double latency) {
         tl_dev.getBeta0Percentiles(p05_beta0, p95_beta0);
         tl_dev.getBeta1Percentiles(p05_beta1, p95_beta1);
 
-        const double headroom = 1.1;
-        beta0_min = p05_beta0;
-        beta0_max = std::min(p95_beta0 * headroom, 5e-4);
-        beta1_min = p05_beta1;
-        beta1_max = std::min(p95_beta1 * headroom, 20.0);
+        double iqr_beta0 = p95_beta0 - p05_beta0;
+        double iqr_beta1 = p95_beta1 - p05_beta1;
+
+        if (tl_dev.window_full) {
+            beta0_min = std::max(0.0, p05_beta0);
+            beta0_max = p95_beta0 + 3.0 * iqr_beta0;
+            beta1_min = std::max(0.5, p05_beta1);
+            beta1_max = p95_beta1 + 3.0 * iqr_beta1;
+        } else {
+            // Cold-start: origin/main values in microseconds
+            beta0_min = 0.0;
+            beta0_max = 500.0;
+            beta1_min = 0.5;
+            beta1_max = 20.0;
+        }
     } else {
+        // Static bounds: origin/main values in microseconds
         beta0_min = 0.0;
-        beta0_max = 5e-4;
+        beta0_max = 500.0;
         beta1_min = 0.5;
         beta1_max = 20.0;
     }
 
-    // Apply clamping to local beta
     tl_dev.beta0 = std::clamp(new_beta0_l, beta0_min, beta0_max);
     tl_dev.beta1 = std::clamp(new_beta1_l, beta1_min, beta1_max);
 
-    // Apply clamping to global beta (if needed)
     if (local_weight_ < 1 - 1e-6) {
         dev.last_update_ns.store(getFastTimeNanos(), std::memory_order_relaxed);
         dev.beta0.store(std::clamp(new_beta0_g, beta0_min, beta0_max),

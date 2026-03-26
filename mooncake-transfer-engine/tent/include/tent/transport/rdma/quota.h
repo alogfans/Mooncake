@@ -59,9 +59,11 @@ class DeviceQuota {
         uint64_t padding1[7];
         std::atomic<uint64_t> diffusion_active_bytes{0};
         uint64_t padding2[7];
-        std::atomic<double> beta0{0.0};  // Fixed latency (PCIe, setup)
+        std::atomic<double> beta0{
+            0.0};  // Fixed overhead (microseconds), origin/main: 0.0
         uint64_t padding3[7];
-        std::atomic<double> beta1{1.0};  // Effective bandwidth correction
+        std::atomic<double> beta1{
+            1.0};  // Bandwidth correction factor, origin/main: 1.0
         uint64_t padding4[7];
         std::atomic<uint64_t> last_update_ns{
             0};  // Last update time (RDTSCP-based)

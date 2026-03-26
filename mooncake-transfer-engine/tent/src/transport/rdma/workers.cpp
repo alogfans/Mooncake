@@ -178,7 +178,7 @@ std::shared_ptr<RdmaEndPoint> Workers::getEndpoint(Workers::PostPath path) {
     return endpoint;
 }
 
-void Workers::disableEndpoint(RdmaSlice* slice) {
+void Workers::disableEndpoint(RdmaSlice* slice, int ibv_wc_status) {
     SegmentDesc* desc = nullptr;
     auto& segment_manager = transport_->metadata_->segmentManager();
     auto target_id = slice->task->request.target_id;
@@ -191,7 +191,7 @@ void Workers::disableEndpoint(RdmaSlice* slice) {
     if (desc) {
         auto& worker = worker_context_[tl_wid];
         auto& rail = worker.rails[desc->machine_id];
-        rail.markFailed(slice->source_dev_id, slice->target_dev_id);
+        rail.markFailed(slice->source_dev_id, slice->target_dev_id, ibv_wc_status);
     }
     if (slice->ep_weak_ptr) {
         slice->ep_weak_ptr->acknowledge(slice, FAILED);
@@ -289,7 +289,7 @@ void Workers::asyncPollCq() {
             LOG(WARNING) << "Slice " << slice
                          << " failed: transfer timeout (software)";
             auto num_slices = ep->acknowledge(slice, TIMEOUT);
-            disableEndpoint(slice);
+            disableEndpoint(slice, IBV_WC_RESP_TIMEOUT_ERR);
             worker.inflight_slices.fetch_sub(num_slices);
             slice_to_remove.push_back(slice);
         }
@@ -333,10 +333,10 @@ void Workers::asyncPollCq() {
                     LOG(WARNING)
                         << "Slice " << slice << " failed: retry count exceeded";
                     num_slices += ep->acknowledge(slice, FAILED);
-                    disableEndpoint(slice);
+                    disableEndpoint(slice, wc[i].status);
                 } else {
                     num_slices += ep->acknowledge(slice, PENDING);
-                    disableEndpoint(slice);
+                    disableEndpoint(slice, wc[i].status);
                     submit(slice);
                 }
             } else {

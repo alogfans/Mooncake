@@ -278,16 +278,20 @@ Status SharedQuotaManager::diffusion() {
             uint64_t bytes = hdr_->devices[d].pid_usages[s].used_bytes;
             uint8_t p_prio = hdr_->devices[d].pid_usages[s].priority;
             total_sum += bytes;
-            if (p_prio == PRIO_HIGH) high_sum += bytes;
-            else if (p_prio == PRIO_MEDIUM) med_sum += bytes;
-            else low_sum += bytes;
+            if (p_prio == PRIO_HIGH)
+                high_sum += bytes;
+            else if (p_prio == PRIO_MEDIUM)
+                med_sum += bytes;
+            else
+                low_sum += bytes;
         }
 
         hdr_->devices[d].active_bytes = total_sum;
         hdr_->devices[d].high_prio_bytes = high_sum;
         hdr_->devices[d].medium_prio_bytes = med_sum;
         hdr_->devices[d].low_prio_bytes = low_sum;
-        // For compatibility: set diffusion_active_bytes (sum of other processes)
+        // For compatibility: set diffusion_active_bytes (sum of other
+        // processes)
         uint64_t diffusion_active_bytes =
             total_sum < used_bytes ? 0 : total_sum - used_bytes;
         local_quota_->setDiffusionActiveBytes(dev_id, diffusion_active_bytes);
