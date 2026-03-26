@@ -46,6 +46,11 @@ Workers::Workers(RdmaTransport* transport)
     auto diffusion_interval =
         conf->get("transports/rdma/diffusion_interval", 10);
     device_quota_->setDiffusionInterval(diffusion_interval);
+    auto enable_quota = conf->get("transports/rdma/enable_quota", true);
+    device_quota_->setEnableQuota(enable_quota);
+    auto robust_clamping =
+        conf->get("transports/rdma/robust_clamping", true);
+    device_quota_->setRobustClamping(robust_clamping);
 }
 
 Workers::~Workers() {

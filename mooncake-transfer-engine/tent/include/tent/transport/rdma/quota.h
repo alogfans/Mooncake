@@ -119,6 +119,9 @@ class DeviceQuota {
     }
     uint8_t getPriority() const { return priority_; }
 
+    void setEnableQuota(bool enable) { enable_quota_ = enable; }
+    bool getEnableQuota() const { return enable_quota_; }
+
    private:
     std::shared_ptr<Topology> local_topology_;
     std::unordered_map<int, DeviceInfo> devices_;
