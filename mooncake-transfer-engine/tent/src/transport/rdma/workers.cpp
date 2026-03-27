@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "tent/transport/rdma/workers.h"
+#include "tent/transport/rdma/shared_quota.h"
 
 #include <sys/epoll.h>
 
@@ -106,7 +107,15 @@ Status Workers::submit(RdmaSliceList& slice_list, int worker_id) {
         }
     }
     auto& worker = worker_context_[worker_id];
-    worker.queue.push(slice_list);
+
+    // Get priority from first slice (all slices in list have same priority)
+    int priority = 0;  // default high
+    if (slice_list.first && slice_list.first->task) {
+        priority =
+            std::clamp(slice_list.first->priority, 0, kNumPriorityLevels - 1);
+    }
+
+    worker.queues[priority].push(slice_list);
     if (!worker.inflight_slices.fetch_add(slice_list.num_slices)) {
         std::lock_guard<std::mutex> lock(worker.mutex);
         if (worker.in_suspend) worker.cv.notify_all();
@@ -207,7 +216,64 @@ void Workers::disableEndpoint(RdmaSlice* slice, int ibv_wc_status) {
 void Workers::asyncPostSend() {
     auto& worker = worker_context_[tl_wid];
     std::vector<RdmaSliceList> result;
-    worker.queue.pop(result);
+
+    auto shared_quota =
+        device_quota_ ? device_quota_->getSharedQuota() : nullptr;
+
+    if (shared_quota) {
+        // Multi-process mode: use shared timeslice state
+        int timeslice_prio = PRIO_HIGH;  // default
+        if (!worker.requests.empty()) {
+            int dev_id = worker.requests.begin()->first.local_device_id;
+            for (int prio = 0; prio < kNumPriorityLevels; ++prio) {
+                if (shared_quota->canSend(dev_id, prio)) {
+                    timeslice_prio = prio;
+                    break;
+                }
+            }
+        }
+        worker.queues[timeslice_prio].pop(result);
+
+        // If empty, try other priorities (prevent starvation)
+        if (result.empty()) {
+            for (int prio = 0; prio < kNumPriorityLevels; ++prio) {
+                if (prio == timeslice_prio) continue;
+                worker.queues[prio].pop(result);
+                if (!result.empty()) break;
+            }
+        }
+    } else {
+        // Single-machine mode: use weighted random (9:3:1)
+        int rand_val = SimpleRandom::Get().next(kTotalWeight);
+        int cumulative = 0;
+        int order_idx = 0;
+        int order[kNumPriorityLevels];
+
+        for (int prio = 0; prio < kNumPriorityLevels; ++prio) {
+            cumulative += kPriorityWeight[prio];
+            if (rand_val < cumulative) {
+                for (int i = 0; i <= prio; ++i) {
+                    order[order_idx++] = i;
+                }
+                break;
+            }
+        }
+
+        // Try queues in weighted random order
+        for (int i = 0; i < order_idx; ++i) {
+            worker.queues[order[i]].pop(result);
+            if (!result.empty()) break;
+        }
+
+        // Fallback: try all queues
+        if (result.empty()) {
+            for (int prio = 0; prio < kNumPriorityLevels; ++prio) {
+                worker.queues[prio].pop(result);
+                if (!result.empty()) break;
+            }
+        }
+    }
+
     for (auto& slice_list : result) {
         if (slice_list.num_slices == 0) continue;
         auto slice = slice_list.first;
@@ -318,7 +384,7 @@ void Workers::asyncPollCq() {
             double overall_lat_sec = (poll_ts - slice->enqueue_ts) / 1e9;
             if (slice->retry_count == 0) {
                 device_quota_->release(slice->source_dev_id, slice->length,
-                                       overall_lat_sec);
+                                       overall_lat_sec, slice->priority);
             }
             if (slice->word != PENDING) continue;
             if (wc[i].status != IBV_WC_SUCCESS) {
@@ -507,8 +573,9 @@ Status Workers::selectOptimalDevice(RouteHint& source, RouteHint& target,
                                     RdmaSlice* slice) {
     auto& worker = worker_context_[tl_wid];
     if (slice->source_dev_id < 0) {
-        CHECK_STATUS(device_quota_->allocate(
-            slice->length, source.buffer->location, slice->source_dev_id));
+        CHECK_STATUS(
+            device_quota_->allocate(slice->length, source.buffer->location,
+                                    slice->source_dev_id, slice->priority));
     }
 
     if (slice->source_dev_id < 0)
@@ -601,31 +668,46 @@ Status Workers::selectFallbackDevice(RouteHint& source, RouteHint& target,
     if ((size_t)slice->retry_count >= total_combos)
         return Status::DeviceNotFound("No available path" LOC_MARK);
 
-    size_t idx = slice->retry_count;
-    while (idx < total_combos) {
-        size_t src_idx = idx / dst_total;
-        size_t dst_idx = idx % dst_total;
-        int sdev = getDeviceByFlatIndex(source, src_idx);
-        int tdev = getDeviceByFlatIndex(target, dst_idx);
-        bool reachable = true;
+    // First pass: try healthy rails only
+    // Second pass: try degraded rails if no healthy available
+    for (int pass = 0; pass < 2; ++pass) {
+        bool prefer_healthy = (pass == 0);
+        size_t idx = slice->retry_count;
+        while (idx < total_combos) {
+            size_t src_idx = idx / dst_total;
+            size_t dst_idx = idx % dst_total;
+            int sdev = getDeviceByFlatIndex(source, src_idx);
+            int tdev = getDeviceByFlatIndex(target, dst_idx);
+            bool reachable = true;
+            bool is_degraded = false;
 
-        if (same_machine) {
-            reachable = (sdev == tdev);  // loopback is safe
-        } else {
-            auto& worker = worker_context_[tl_wid];
-            auto& rail = worker.rails[target.segment->machine_id];
-            reachable = rail.available(sdev, tdev);
+            if (same_machine) {
+                reachable = (sdev == tdev);  // loopback is safe
+            } else {
+                auto& worker = worker_context_[tl_wid];
+                auto& rail = worker.rails[target.segment->machine_id];
+                reachable = rail.available(sdev, tdev);
+                if (reachable) {
+                    is_degraded = rail.isDegraded(sdev, tdev);
+                }
+            }
+
+            // In first pass, skip degraded rails
+            if (prefer_healthy && is_degraded) {
+                ++idx;
+                continue;
+            }
+
+            if (reachable) {
+                slice->source_dev_id = sdev;
+                slice->target_dev_id = tdev;
+                slice->source_lkey = source.buffer->lkey[slice->source_dev_id];
+                slice->target_rkey = target.buffer->rkey[slice->target_dev_id];
+                return Status::OK();
+            }
+
+            ++idx;
         }
-
-        if (reachable) {
-            slice->source_dev_id = sdev;
-            slice->target_dev_id = tdev;
-            slice->source_lkey = source.buffer->lkey[slice->source_dev_id];
-            slice->target_rkey = target.buffer->rkey[slice->target_dev_id];
-            return Status::OK();
-        }
-
-        ++idx;
     }
 
     return Status::DeviceNotFound("No available path" LOC_MARK);

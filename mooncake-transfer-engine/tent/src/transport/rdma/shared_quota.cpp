@@ -162,7 +162,9 @@ void SharedQuotaManager::reclaimDeadPidsInternal() {
             if (!isPidAlive(p)) {
                 // zero out slot — we'll recompute active_bytes in diffusion
                 dev.pid_usages[s].pid = 0;
-                dev.pid_usages[s].used_bytes = 0;
+                dev.pid_usages[s].high_prio_bytes = 0;
+                dev.pid_usages[s].medium_prio_bytes = 0;
+                dev.pid_usages[s].low_prio_bytes = 0;
             }
         }
     }
@@ -199,7 +201,9 @@ PidUsage* SharedQuotaManager::findOrCreatePidSlotLocked(int dev_id, pid_t pid) {
     }
     if (empty) {
         empty->pid = pid;
-        empty->used_bytes = 0;
+        empty->high_prio_bytes = 0;
+        empty->medium_prio_bytes = 0;
+        empty->low_prio_bytes = 0;
     }
     return empty;
 }
@@ -254,7 +258,6 @@ Status SharedQuotaManager::detachProcess() { return Status::OK(); }
 Status SharedQuotaManager::diffusion() {
     if (!hdr_) return Status::InvalidArgument("not attached");
     pid_t pid = getpid();
-    uint8_t prio = local_quota_->getPriority();
     int rc = lock();
     if (rc != 0)
         return Status::InternalError("lock failed: " +
@@ -268,23 +271,23 @@ Status SharedQuotaManager::diffusion() {
             unlock();
             return Status::InternalError("no free pid slot for device");
         }
-        auto used_bytes = local_quota_->getActiveBytes(dev_id);
-        slot->used_bytes = used_bytes;
-        slot->priority = prio;
+        // Report per-priority active bytes
+        slot->high_prio_bytes =
+            local_quota_->getActiveBytesByPriority(dev_id, PRIO_HIGH);
+        slot->medium_prio_bytes =
+            local_quota_->getActiveBytesByPriority(dev_id, PRIO_MEDIUM);
+        slot->low_prio_bytes =
+            local_quota_->getActiveBytesByPriority(dev_id, PRIO_LOW);
+
         uint64_t high_sum = 0, med_sum = 0, low_sum = 0, total_sum = 0;
         for (int s = 0; s < MAX_PID_SLOTS; ++s) {
             pid_t p = hdr_->devices[d].pid_usages[s].pid;
             if (p == 0) continue;
-            uint64_t bytes = hdr_->devices[d].pid_usages[s].used_bytes;
-            uint8_t p_prio = hdr_->devices[d].pid_usages[s].priority;
-            total_sum += bytes;
-            if (p_prio == PRIO_HIGH)
-                high_sum += bytes;
-            else if (p_prio == PRIO_MEDIUM)
-                med_sum += bytes;
-            else
-                low_sum += bytes;
+            high_sum += hdr_->devices[d].pid_usages[s].high_prio_bytes;
+            med_sum += hdr_->devices[d].pid_usages[s].medium_prio_bytes;
+            low_sum += hdr_->devices[d].pid_usages[s].low_prio_bytes;
         }
+        total_sum = high_sum + med_sum + low_sum;
 
         hdr_->devices[d].active_bytes = total_sum;
         hdr_->devices[d].high_prio_bytes = high_sum;
@@ -292,9 +295,14 @@ Status SharedQuotaManager::diffusion() {
         hdr_->devices[d].low_prio_bytes = low_sum;
         // For compatibility: set diffusion_active_bytes (sum of other
         // processes)
+        uint64_t my_bytes = slot->high_prio_bytes + slot->medium_prio_bytes +
+                            slot->low_prio_bytes;
         uint64_t diffusion_active_bytes =
-            total_sum < used_bytes ? 0 : total_sum - used_bytes;
+            total_sum < my_bytes ? 0 : total_sum - my_bytes;
         local_quota_->setDiffusionActiveBytes(dev_id, diffusion_active_bytes);
+
+        // Update timeslice state
+        updateTimeslice(d);
     }
 
     unlock();
@@ -314,6 +322,66 @@ uint64_t SharedQuotaManager::getMediumPrioLoad(int dev_id) const {
 uint64_t SharedQuotaManager::getLowPrioLoad(int dev_id) const {
     if (!hdr_ || dev_id < 0 || dev_id >= hdr_->num_devices) return 0;
     return hdr_->devices[dev_id].low_prio_bytes;
+}
+
+void SharedQuotaManager::updateTimeslice(int dev_idx) {
+    if (!hdr_) return;
+    uint64_t now = getCurrentTimeInNano();
+    auto& ts = hdr_->devices[dev_idx].timeslice;
+
+    // Initialize on first use
+    uint64_t current_end = ts.slice_end_ns.load(std::memory_order_relaxed);
+    if (current_end == 0) {
+        ts.current_prio.store(PRIO_HIGH, std::memory_order_relaxed);
+        ts.slice_end_ns.store(now + TIMESLICE_BASE_NS * QUOTA_WEIGHT[PRIO_HIGH],
+                              std::memory_order_relaxed);
+        return;
+    }
+
+    // Check if current timeslice has ended
+    if (now >= current_end) {
+        // Advance to next priority with pending work
+        uint64_t next_prio = PRIO_HIGH;
+        // Simple round-robin through priorities, skipping empty ones
+        for (int p = 1; p < NUM_PRIORITIES; ++p) {
+            int prio = (ts.current_prio.load(std::memory_order_relaxed) + p) %
+                       NUM_PRIORITIES;
+            if (hdr_->devices[dev_idx].high_prio_bytes > 0 &&
+                prio == PRIO_HIGH) {
+                next_prio = prio;
+                break;
+            }
+            if (hdr_->devices[dev_idx].medium_prio_bytes > 0 &&
+                prio == PRIO_MEDIUM) {
+                next_prio = prio;
+                break;
+            }
+            if (hdr_->devices[dev_idx].low_prio_bytes > 0 && prio == PRIO_LOW) {
+                next_prio = prio;
+                break;
+            }
+        }
+        ts.current_prio.store(next_prio, std::memory_order_relaxed);
+        ts.slice_end_ns.store(now + TIMESLICE_BASE_NS * QUOTA_WEIGHT[next_prio],
+                              std::memory_order_relaxed);
+    }
+}
+
+bool SharedQuotaManager::canSend(int dev_id, int priority) const {
+    if (!hdr_ || dev_id < 0 || dev_id >= hdr_->num_devices)
+        return true;  // Allow if no quota
+    if (priority < 0 || priority >= NUM_PRIORITIES) return true;
+
+    const auto& ts = hdr_->devices[dev_id].timeslice;
+    uint64_t current_prio = ts.current_prio.load(std::memory_order_relaxed);
+    uint64_t now = getCurrentTimeInNano();
+
+    // Check if we're still in current timeslice
+    if (now < ts.slice_end_ns.load(std::memory_order_relaxed))
+        return current_prio == priority;
+
+    // Timeslice ended, try to advance (non-blocking check)
+    return false;  // Caller should call updateTimeslice
 }
 
 }  // namespace tent

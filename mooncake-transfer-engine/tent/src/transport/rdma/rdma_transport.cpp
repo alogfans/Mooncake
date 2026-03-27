@@ -300,6 +300,7 @@ Status RdmaTransport::submitTransferTasks(
             slice->target_addr = request.target_offset + offset;
             slice->length = length;
             slice->task = &task;
+            slice->priority = request.priority;
             slice->retry_count = 0;
             slice->ep_weak_ptr = nullptr;
             slice->word = PENDING;

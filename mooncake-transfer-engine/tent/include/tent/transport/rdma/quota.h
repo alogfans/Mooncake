@@ -26,9 +26,15 @@
 
 #include "tent/common/status.h"
 #include "tent/runtime/topology.h"
+#include "tent/common/types.h"  // for PRIO_* constants
 
 namespace mooncake {
 namespace tent {
+
+// Bandwidth constants (Gbps)
+static constexpr double kDefaultBwGbps = 200.0;
+static constexpr double kMinBwGbps = 10.0;
+static constexpr double kMaxBwGbps = 400.0;
 
 class SharedQuotaManager;
 
@@ -55,8 +61,8 @@ class DeviceQuota {
         double bw_gbps;
         int numa_id;
         uint64_t padding0[5];
-        std::atomic<uint64_t> active_bytes{0};
-        uint64_t padding1[7];
+        std::atomic<uint64_t> active_bytes_by_prio[3];  // [high, medium, low]
+        uint64_t padding1[5];
         std::atomic<uint64_t> diffusion_active_bytes{0};
         uint64_t padding2[7];
         std::atomic<double> beta0{
@@ -68,6 +74,42 @@ class DeviceQuota {
         std::atomic<uint64_t> last_update_ns{
             0};  // Last update time (RDTSCP-based)
         uint64_t padding5[7];
+
+        // Get total active bytes across all priorities
+        uint64_t getTotalActiveBytes() const {
+            uint64_t sum = 0;
+            for (int i = 0; i < NUM_PRIORITIES; ++i)
+                sum += active_bytes_by_prio[i].load(std::memory_order_relaxed);
+            return sum;
+        }
+
+        // Get active bytes for specific priority
+        uint64_t getActiveBytes(int priority) const {
+            if (priority < 0 || priority >= NUM_PRIORITIES) return 0;
+            return active_bytes_by_prio[priority].load(
+                std::memory_order_relaxed);
+        }
+
+        // Add bytes to specific priority bucket
+        void addBytes(int priority, uint64_t bytes) {
+            if (priority >= 0 && priority < NUM_PRIORITIES)
+                active_bytes_by_prio[priority].fetch_add(
+                    bytes, std::memory_order_relaxed);
+        }
+
+        // Subtract bytes from specific priority bucket
+        void subBytes(int priority, uint64_t bytes) {
+            if (priority >= 0 && priority < NUM_PRIORITIES)
+                active_bytes_by_prio[priority].fetch_sub(
+                    bytes, std::memory_order_relaxed);
+        }
+
+        // Calculate bandwidth in bytes/sec (with fallback to default)
+        double getBandwidthBytesPerSec() const {
+            if (bw_gbps >= kMinBwGbps && bw_gbps <= kMaxBwGbps)
+                return bw_gbps * 1e9 / 8.0;
+            return kDefaultBwGbps * 1e9 / 8.0;  // 25e9
+        }
     };
 
    public:
@@ -83,18 +125,29 @@ class DeviceQuota {
 
     Status enableSharedQuota(const std::string &shm_name);
 
-    Status allocate(uint64_t length, const std::string &location,
-                    int &chosen_dev_id);
+    std::shared_ptr<SharedQuotaManager> getSharedQuota() const {
+        return shared_quota_;
+    }
 
-    Status release(int dev_id, uint64_t length, double latency);
+    Status allocate(uint64_t length, const std::string &location,
+                    int &chosen_dev_id, int priority = 0);
+
+    Status release(int dev_id, uint64_t length, double latency,
+                   int priority = 0);
 
     void setDiffusionActiveBytes(int dev_id, uint64_t value) {
         devices_[dev_id].diffusion_active_bytes.store(
             value, std::memory_order_relaxed);
     }
 
+    // Get total active bytes across all priorities
     uint64_t getActiveBytes(int dev_id) {
-        return devices_[dev_id].active_bytes.load(std::memory_order_relaxed);
+        return devices_[dev_id].getTotalActiveBytes();
+    }
+
+    // Get active bytes for specific priority
+    uint64_t getActiveBytesByPriority(int dev_id, int priority) {
+        return devices_[dev_id].getActiveBytes(priority);
     }
 
     void setLearningRate(double alpha) { alpha_ = std::clamp(alpha, 0.0, 1.0); }
@@ -113,12 +166,6 @@ class DeviceQuota {
 
     bool getRobustClamping() const { return use_robust_clamp_; }
 
-    // QoS priority: 0=high, 1=medium, 2=low
-    void setPriority(uint8_t priority) {
-        priority_ = std::min(priority, (uint8_t)2);
-    }
-    uint8_t getPriority() const { return priority_; }
-
     void setEnableQuota(bool enable) { enable_quota_ = enable; }
     bool getEnableQuota() const { return enable_quota_; }
 
@@ -136,7 +183,6 @@ class DeviceQuota {
     std::shared_ptr<SharedQuotaManager> shared_quota_;
     bool enable_quota_ = true;
     bool update_quota_params_ = true;
-    uint8_t priority_ = 0;  // QoS priority: 0=high, 1=medium, 2=low
 };
 
 }  // namespace tent

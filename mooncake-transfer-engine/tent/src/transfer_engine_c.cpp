@@ -215,6 +215,7 @@ int tent_submit(tent_engine_t engine, tent_batch_id_t batch_id,
         req_list[index].target_id = entries[index].target_id;
         req_list[index].target_offset = entries[index].target_offset;
         req_list[index].length = entries[index].length;
+        req_list[index].priority = entries[index].priority;
     }
     auto status = CAST(engine)->submitTransfer(batch_id, req_list);
     if (!status.ok()) {
@@ -240,6 +241,7 @@ int tent_submit_notif(tent_engine_t engine, tent_batch_id_t batch_id,
         req_list[index].target_id = entries[index].target_id;
         req_list[index].target_offset = entries[index].target_offset;
         req_list[index].length = entries[index].length;
+        req_list[index].priority = entries[index].priority;
     }
     mooncake::tent::Notification notifi;
     notifi.name = name;

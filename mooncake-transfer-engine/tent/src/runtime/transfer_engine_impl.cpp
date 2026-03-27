@@ -954,6 +954,8 @@ Status TransferEngineImpl::submitTransfer(
         }
 
         task.xport_priority = 0;
+        task.priority =
+            std::clamp(merged_request.priority, 0, NUM_PRIORITIES - 1);
         task.status = PENDING;
         task.request = merged_request;
         task.staging = false;

@@ -32,12 +32,18 @@ extern "C" {
 #define OPCODE_READ (0)
 #define OPCODE_WRITE (1)
 
+// QoS Priority levels (must match tent::PRIO_* values)
+#define TENT_PRIO_HIGH (0)
+#define TENT_PRIO_MEDIUM (1)
+#define TENT_PRIO_LOW (2)
+
 struct tent_request {
     int opcode;
     void* source;
     tent_segment_id_t target_id;
     uint64_t target_offset;
     uint64_t length;
+    int priority;  /* QoS priority: use TENT_PRIO_HIGH/MEDIUM/LOW, default=TENT_PRIO_HIGH */
 };
 
 typedef struct tent_request tent_request_t;

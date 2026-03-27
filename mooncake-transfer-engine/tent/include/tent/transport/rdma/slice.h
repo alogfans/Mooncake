@@ -28,6 +28,7 @@
 
 #include "tent/runtime/transport.h"
 #include "tent/runtime/slab.h"
+#include "tent/common/types.h"  // for PRIO_* constants
 
 namespace mooncake {
 namespace tent {
@@ -70,6 +71,7 @@ struct RdmaSlice {
     bool failed = false;
     uint64_t enqueue_ts = 0;
     uint64_t submit_ts = 0;
+    int priority = PRIO_HIGH;  // QoS priority
 };
 
 using RdmaSliceStorage = Slab<RdmaSlice>;

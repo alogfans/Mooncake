@@ -34,16 +34,33 @@ bool RailMonitor::available(int local_nic, int remote_nic) {
     auto it = rail_states_.find(std::make_pair(local_nic, remote_nic));
     if (it == rail_states_.end()) return false;
     auto &st = it->second;
+    auto now = std::chrono::steady_clock::now();
+
+    // Handle paused state recovery
     if (st.paused) {
-        auto now = std::chrono::steady_clock::now();
         if (now >= st.resume_time) {
             st.paused = false;
             st.error_count = 0;
+            st.health = RAIL_HEALTHY;
             updateBestMapping();
-            return true;
+        } else {
+            return false;
         }
-        return false;
     }
+
+    // Handle degraded state auto-recovery
+    // DEGRADED rail recovers after 5 seconds of no new degradation
+    if (st.health == RAIL_DEGRADED) {
+        static constexpr auto degraded_recovery = std::chrono::seconds(5);
+        if (now - st.last_degraded > degraded_recovery) {
+            st.health = RAIL_HEALTHY;
+            st.degraded_count = 0;
+            updateBestMapping();
+            LOG(INFO) << "Rail " << local_nic << " -> " << remote_nic
+                      << " recovered from DEGRADED";
+        }
+    }
+
     return true;
 }
 
@@ -96,10 +113,65 @@ void RailMonitor::markRecovered(int local_nic, int remote_nic) {
     st.error_count = 0;
     st.paused = false;
     st.resume_time = {};
+    st.health = RAIL_HEALTHY;
+    st.degraded_count = 0;
     updateBestMapping();
 
     LOG(INFO) << "Rail " << local_nic << " -> " << remote_nic
               << " marked recovered";
+}
+
+void RailMonitor::markDegraded(int local_nic, int remote_nic) {
+    auto it = rail_states_.find(std::make_pair(local_nic, remote_nic));
+    if (it == rail_states_.end()) {
+        rail_states_[std::make_pair(local_nic, remote_nic)] = RailState{};
+        it = rail_states_.find(std::make_pair(local_nic, remote_nic));
+    }
+
+    auto &st = it->second;
+    auto now = std::chrono::steady_clock::now();
+
+    st.health = RAIL_DEGRADED;
+    st.last_degraded = now;
+    st.degraded_count++;
+    if (st.degraded_count == 1) {
+        st.degraded_since = now;
+    }
+
+    // If degraded too many times, escalate to paused
+    static constexpr int kDegradedEscalationThreshold = 5;
+    if (st.degraded_count >= kDegradedEscalationThreshold) {
+        st.paused = true;
+        st.cooldown =
+            std::chrono::seconds(10);  // Shorter cooldown than hard failure
+        st.resume_time = now + st.cooldown;
+        st.health = RAIL_PAUSED;
+        LOG(INFO) << "Rail " << local_nic << " -> " << remote_nic
+                  << " escalated from DEGRADED to PAUSED (count="
+                  << st.degraded_count << ")";
+    } else {
+        LOG(INFO) << "Rail " << local_nic << " -> " << remote_nic
+                  << " marked DEGRADED (count=" << st.degraded_count << ")";
+    }
+
+    updateBestMapping();
+}
+
+bool RailMonitor::isDegraded(int local_nic, int remote_nic) {
+    auto it = rail_states_.find(std::make_pair(local_nic, remote_nic));
+    if (it == rail_states_.end()) return false;
+    // Also check and auto-recover
+    available(local_nic, remote_nic);
+    return it->second.health == RAIL_DEGRADED;
+}
+
+double RailMonitor::getWeight(int local_nic, int remote_nic) {
+    auto it = rail_states_.find(std::make_pair(local_nic, remote_nic));
+    if (it == rail_states_.end()) return 1.0;
+    // Also check and auto-recover
+    available(local_nic, remote_nic);
+    return (it->second.health == RAIL_DEGRADED) ? RailState::kDegradedWeight
+                                                : 1.0;
 }
 
 int RailMonitor::findBestRemoteDevice(int local_nic, int remote_numa) {

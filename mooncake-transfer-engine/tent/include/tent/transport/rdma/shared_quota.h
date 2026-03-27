@@ -31,6 +31,7 @@
 #include <vector>
 #include <iostream>
 #include <errno.h>
+#include <atomic>
 
 namespace mooncake {
 namespace tent {
@@ -38,18 +39,26 @@ namespace tent {
 static constexpr int MAX_DEVICES = 64;
 static constexpr int MAX_PID_SLOTS = 256;
 static constexpr uint64_t SHM_MAGIC = 0x2025082772805202ULL;
-static constexpr int SHM_VERSION = 2;  // bumped for QoS support
+static constexpr int SHM_VERSION = 4;  // bumped for QoS token bucket
 
-// Priority levels: 0=high, 1=medium, 2=low
-static constexpr uint8_t PRIO_HIGH = 0;
-static constexpr uint8_t PRIO_MEDIUM = 1;
-static constexpr uint8_t PRIO_LOW = 2;
+// Time-sliced quota constants
+static constexpr uint64_t TIMESLICE_BASE_NS = 1000000ull;  // 1ms base unit
+static constexpr uint64_t QUOTA_WEIGHT[] = {9, 3, 1};      // High:Medium:Low
+static constexpr uint64_t QUOTA_TOTAL = 13;                // 9 + 3 + 1
+
+// Per-device time slice state
+struct TimeSliceState {
+    std::atomic<uint64_t> current_prio;  // Current priority in timeslice
+    std::atomic<uint64_t> slice_end_ns;  // When current timeslice ends
+    uint8_t reserved[64 - sizeof(std::atomic<uint64_t>) * 2];
+};
 
 struct PidUsage {
-    pid_t pid;                     // 0 == free slot
-    volatile uint64_t used_bytes;  // local used bytes reported by this pid
-    uint8_t priority;              // 0=high, 1=medium, 2=low
-    uint8_t reserved[55];          // padding -> total 64B
+    pid_t pid;                            // 0 == free slot
+    volatile uint64_t high_prio_bytes;    // high priority active bytes
+    volatile uint64_t medium_prio_bytes;  // medium priority active bytes
+    volatile uint64_t low_prio_bytes;     // low priority active bytes
+    uint8_t reserved[40];                 // padding -> total 64B
 };
 
 struct SharedDeviceEntry {
@@ -58,6 +67,7 @@ struct SharedDeviceEntry {
     volatile uint64_t high_prio_bytes;
     volatile uint64_t medium_prio_bytes;
     volatile uint64_t low_prio_bytes;
+    TimeSliceState timeslice;  // QoS timeslice state
     PidUsage pid_usages[MAX_PID_SLOTS];
 };
 
@@ -85,7 +95,11 @@ class SharedQuotaManager {
     uint64_t getMediumPrioLoad(int dev_id) const;
     uint64_t getLowPrioLoad(int dev_id) const;
 
+    // Check if current timeslice allows the given priority to send
+    bool canSend(int dev_id, int priority) const;
+
    private:
+    void updateTimeslice(int dev_idx);  // Advance to next timeslice if needed
     Status attachProcess();
     Status detachProcess();
 

@@ -42,9 +42,15 @@ class RailMonitor {
 
     void markFailed(int local_nic, int remote_nic, int transport_error = 0);
 
+    void markDegraded(int local_nic, int remote_nic);
+
     void markRecovered(int local_nic, int remote_nic);
 
     int findBestRemoteDevice(int local_nic, int remote_numa);
+
+    bool isDegraded(int local_nic, int remote_nic);
+
+    double getWeight(int local_nic, int remote_nic);
 
     const Topology *remote() { return remote_; }
 
@@ -67,12 +73,22 @@ class RailMonitor {
         }
     };
 
+    enum RailHealth { RAIL_HEALTHY = 0, RAIL_DEGRADED = 1, RAIL_PAUSED = 2 };
+
     struct RailState {
         int error_count = 0;
         std::chrono::seconds cooldown{0};
         std::chrono::steady_clock::time_point last_error{};
         bool paused = false;
         std::chrono::steady_clock::time_point resume_time{};
+
+        // Multi-level health tracking
+        RailHealth health = RAIL_HEALTHY;
+        std::chrono::steady_clock::time_point degraded_since{};
+        std::chrono::steady_clock::time_point last_degraded{};
+        int degraded_count = 0;
+        static constexpr double kDegradedWeight =
+            0.5;  // Half weight if degraded
     };
 
     std::unordered_map<std::pair<int, int>, RailState, PairHash> rail_states_;

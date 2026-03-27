@@ -45,7 +45,7 @@ Status DeviceQuota::enableSharedQuota(const std::string& shm_name) {
 }
 
 struct TlsDeviceInfo {
-    uint64_t active_bytes{0};
+    uint64_t active_bytes_by_prio[3] = {0, 0, 0};  // [high, medium, low]
     double beta0{0.0};  // Fixed overhead (μs), origin/main: 0.0
     double beta1{1.0};  // Bandwidth correction factor, origin/main: 1.0
 
@@ -56,6 +56,9 @@ struct TlsDeviceInfo {
     uint32_t sample_count{0};
     static constexpr double kDecayFactor = 0.98;
     static constexpr uint32_t kWarmupSamples = 50;
+
+    // Measured bandwidth tracking
+    double measured_bw_gbps{0.0};  // EWMA of measured bandwidth
 
     void updateBounds(double b0, double b1) {
         sample_count++;
@@ -101,7 +104,7 @@ struct TlsDeviceInfo {
 thread_local std::unordered_map<int, TlsDeviceInfo> tl_device_info;
 
 Status DeviceQuota::allocate(uint64_t length, const std::string& location,
-                             int& chosen_dev_id) {
+                             int& chosen_dev_id, int priority) {
     auto entry = local_topology_->getMemEntry(location);
     if (!entry) return Status::InvalidArgument("Unknown location" LOC_MARK);
 
@@ -130,36 +133,28 @@ Status DeviceQuota::allocate(uint64_t length, const std::string& location,
             if (!devices_.count(dev_id)) continue;
             auto& dev = devices_[dev_id];
             auto& tl_dev = tl_device_info[dev_id];
+
+            // Total active bytes (all priorities) + cross-process diffusion
+            uint64_t dev_total = dev.getTotalActiveBytes();
             uint64_t overall_active_bytes =
                 dev.diffusion_active_bytes.load(std::memory_order_relaxed) +
-                dev.active_bytes.load(std::memory_order_relaxed);
-            double weighted_active = w * tl_dev.active_bytes +
+                dev_total;
+
+            // Load balancing: use actual device load, priority handled in
+            // Workers layer
+            double weighted_active = w * tl_dev.active_bytes_by_prio[priority] +
                                      (1.0 - w) * overall_active_bytes + length;
+
             double beta0_g = dev.beta0.load(std::memory_order_relaxed);
             double beta1_g = dev.beta1.load(std::memory_order_relaxed);
             double beta0 = w * tl_dev.beta0 + (1.0 - w) * beta0_g;
             double beta1 = w * tl_dev.beta1 + (1.0 - w) * beta1_g;
-            double bw_bytes_per_sec = dev.bw_gbps * 1e9 / 8;
+
+            double bw_bytes_per_sec = dev.getBandwidthBytesPerSec();
+
             double theory_time_us = weighted_active / bw_bytes_per_sec * 1e6;
             double predicted_time = beta0 + beta1 * theory_time_us;
             double score = penalty[rank] * predicted_time;
-
-            // QoS penalty: lower priority gets penalized when higher priority
-            // is active
-            if (shared_quota_ && priority_ > PRIO_HIGH) {
-                uint64_t high_load = shared_quota_->getHighPrioLoad(dev_id);
-                uint64_t med_load = shared_quota_->getMediumPrioLoad(dev_id);
-                constexpr uint64_t QOS_THRESHOLD = 1024 * 1024;  // 1MB
-
-                if (priority_ == PRIO_MEDIUM && high_load > QOS_THRESHOLD) {
-                    score *= 2.0;
-                } else if (priority_ == PRIO_LOW &&
-                           (high_load > QOS_THRESHOLD ||
-                            med_load > QOS_THRESHOLD)) {
-                    score *= 5.0;
-                }
-            }
-
             score_map[dev_id] = score;
 
             // Idle discount: give unused devices a chance (anti-starvation)
@@ -196,14 +191,14 @@ Status DeviceQuota::allocate(uint64_t length, const std::string& location,
     chosen_dev_id = filtered[rr_index % filtered.size()];
     rr_index++;
 
-    tl_device_info[chosen_dev_id].active_bytes += length;
+    tl_device_info[chosen_dev_id].active_bytes_by_prio[priority] += length;
     if (local_weight_ < 1 - 1e-6)
-        devices_[chosen_dev_id].active_bytes.fetch_add(
-            length, std::memory_order_relaxed);
+        devices_[chosen_dev_id].addBytes(priority, length);
     return Status::OK();
 }
 
-Status DeviceQuota::release(int dev_id, uint64_t length, double latency) {
+Status DeviceQuota::release(int dev_id, uint64_t length, double latency,
+                            int priority) {
     if (!enable_quota_) return Status::OK();
     auto it = devices_.find(dev_id);
     if (it == devices_.end())
@@ -212,9 +207,49 @@ Status DeviceQuota::release(int dev_id, uint64_t length, double latency) {
     auto& dev = it->second;
     auto& tl_dev = tl_device_info[dev_id];
 
-    if (local_weight_ < 1 - 1e-6)
-        dev.active_bytes.fetch_sub(length, std::memory_order_relaxed);
-    tl_dev.active_bytes -= length;
+    if (local_weight_ < 1 - 1e-6) dev.subBytes(priority, length);
+    tl_dev.active_bytes_by_prio[priority] -= length;
+
+    // Update measured bandwidth: bw = length / latency
+    // Initialize with default if not set
+    constexpr double kBwAlpha = 0.1;  // EWMA factor for bandwidth
+    constexpr double kMinLatencySec =
+        1e-6;  // 1us minimum to avoid division noise
+
+    // Skip measurement for very short transfers or invalid latencies
+    if (length >= 4096 && latency > kMinLatencySec) {
+        // Calculate measured bandwidth in Gbps
+        // bw (bytes/sec) = length / latency
+        // bw_gbps = bw / 1e9 * 8
+        double measured_bw =
+            (static_cast<double>(length) / latency) / 1e9 * 8.0;
+
+        // Clamp to reasonable range
+        measured_bw = std::clamp(measured_bw, kMinBwGbps, kMaxBwGbps);
+
+        // EWMA update of measured bandwidth
+        if (tl_dev.measured_bw_gbps < kMinBwGbps) {
+            // First measurement or uninitialized
+            tl_dev.measured_bw_gbps = measured_bw;
+        } else {
+            tl_dev.measured_bw_gbps =
+                (1.0 - kBwAlpha) * tl_dev.measured_bw_gbps +
+                kBwAlpha * measured_bw;
+        }
+
+        // Periodically update global bw_gbps (for cross-thread visibility)
+        if (local_weight_ < 1 - 1e-6) {
+            double current_global = dev.bw_gbps;
+            if (current_global < kMinBwGbps) {
+                dev.bw_gbps = tl_dev.measured_bw_gbps;
+            } else {
+                // Blend TLS measurement into global value
+                double blended =
+                    0.95 * current_global + 0.05 * tl_dev.measured_bw_gbps;
+                dev.bw_gbps = std::clamp(blended, kMinBwGbps, kMaxBwGbps);
+            }
+        }
+    }
 
     if (!update_quota_params_) return Status::OK();
 
@@ -231,16 +266,19 @@ Status DeviceQuota::release(int dev_id, uint64_t length, double latency) {
     // Estimate active bytes at request time (for more accurate update)
     // At release time, active_bytes has already been decremented,
     // so we add length back to estimate the value at request time.
-    uint64_t estimated_active = tl_dev.active_bytes + length;
+    uint64_t tl_total = 0;
+    for (int i = 0; i < NUM_PRIORITIES; ++i)
+        tl_total += tl_dev.active_bytes_by_prio[i];
+    uint64_t estimated_active = tl_total + length;
     if (local_weight_ < 1 - 1e-6) {
         uint64_t overall_active =
-            dev.active_bytes.load(std::memory_order_relaxed) +
+            dev.getTotalActiveBytes() +
             dev.diffusion_active_bytes.load(std::memory_order_relaxed);
         estimated_active = std::max(estimated_active, overall_active);
     }
 
     // Predict using estimated active (origin/main formula)
-    double bw_bytes_per_sec = dev.bw_gbps * 1e9 / 8;
+    double bw_bytes_per_sec = dev.getBandwidthBytesPerSec();
     double theory_time_us = estimated_active / bw_bytes_per_sec * SEC_TO_US;
     double pred_time = beta0 + beta1 * theory_time_us;
     double err = obs_time - pred_time;

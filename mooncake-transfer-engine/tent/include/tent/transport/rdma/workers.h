@@ -28,6 +28,7 @@
 #include "rail_monitor.h"
 #include "tent/common/utils/os.h"
 #include "tent/common/concurrent/bounded_mpsc_queue.h"
+#include "tent/common/types.h"  // for PRIO_* constants
 
 namespace mooncake {
 namespace tent {
@@ -175,9 +176,15 @@ class Workers {
         PerfMetric inflight_lat;
     };
 
+    // Priority queue configuration for proportional bandwidth allocation
+    // Target ratio under full load: High:Medium:Low = 9:3:1
+    static constexpr int kNumPriorityLevels = NUM_PRIORITIES;
+    static constexpr int kPriorityWeight[kNumPriorityLevels] = {9, 3, 1};
+    static constexpr int kTotalWeight = 13;  // 9 + 3 + 1
+
     struct WorkerContext {
         std::thread thread;
-        BoundedSliceQueue queue;
+        BoundedSliceQueue queues[kNumPriorityLevels];  // Priority queues
         GroupedRequests requests;
         std::unordered_set<RdmaSlice *> inflight_slice_set;
         std::atomic<int64_t> inflight_slices = 0;
@@ -188,7 +195,7 @@ class Workers {
 
         std::unordered_map<std::string, RailMonitor> rails;
         PerfMetricSummary perf;
-        uint64_t padding[16];
+        uint64_t padding[14];
     };
 
     WorkerContext *worker_context_;
