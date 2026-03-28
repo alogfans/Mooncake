@@ -38,6 +38,7 @@ add_library(tent_runtime_impl STATIC
     segment_tracker.cpp
     transfer_engine_impl.cpp
     transport_loader.cpp
+    transport_selector.cpp
 )
 
 target_link_libraries(tent_runtime_impl PUBLIC

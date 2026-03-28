@@ -87,16 +87,22 @@ const static std::string GPU_PREFIX = "cpu:";
 // Pointer attributes
 // ============================================================
 
-struct cudaPointerAttributes { int type; int device; };
+struct cudaPointerAttributes {
+    int type;
+    int device;
+};
 
 // CPU-only: just set the type to host and ignore the pointer
-// Note: CUDA API is cudaPointerGetAttributes(const cudaPointerAttributes* attr, const void* ptr)
-inline int cudaPointerGetAttributes_impl(const struct cudaPointerAttributes* attr, const void* ptr) {
+// Note: CUDA API is cudaPointerGetAttributes(const cudaPointerAttributes* attr,
+// const void* ptr)
+inline int cudaPointerGetAttributes_impl(
+    const struct cudaPointerAttributes* attr, const void* ptr) {
     (void)ptr;
     const_cast<struct cudaPointerAttributes*>(attr)->type = cudaMemoryTypeHost;
     return 0;
 }
-#define cudaPointerGetAttributes(attr, ptr) cudaPointerGetAttributes_impl(attr, ptr)
+#define cudaPointerGetAttributes(attr, ptr) \
+    cudaPointerGetAttributes_impl(attr, ptr)
 
 // ============================================================
 // IPC memory (not supported in CPU-only mode)

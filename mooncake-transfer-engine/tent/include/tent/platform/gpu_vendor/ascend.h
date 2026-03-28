@@ -83,16 +83,21 @@ const static std::string GPU_PREFIX = "ascend:";
 // Pointer attributes
 // ============================================================
 
-struct cudaPointerAttributes { int type; int device; };
+struct cudaPointerAttributes {
+    int type;
+    int device;
+};
 
 // Ascend doesn't have cudaPointerGetAttributes, use a stub
-inline int cudaPointerGetAttributes_ascend(const struct cudaPointerAttributes* attr, const void* ptr) {
+inline int cudaPointerGetAttributes_ascend(
+    const struct cudaPointerAttributes* attr, const void* ptr) {
     (void)ptr;
     aclrtMemBarrier(0, 0, 0, nullptr);
     const_cast<struct cudaPointerAttributes*>(attr)->type = cudaMemoryTypeHost;
     return ACL_ERROR_NOT_SUPPORTED;
 }
-#define cudaPointerGetAttributes(attr, ptr) cudaPointerGetAttributes_ascend(attr, ptr)
+#define cudaPointerGetAttributes(attr, ptr) \
+    cudaPointerGetAttributes_ascend(attr, ptr)
 
 // ============================================================
 // IPC memory

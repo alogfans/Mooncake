@@ -42,57 +42,38 @@ struct PluginHandle {
 
 static std::unordered_map<TransportType, PluginHandle> g_loaded_plugins;
 
-// Platform detection - returns the platform suffix for plugin loading
+// Platform detection - returns first available platform
 static std::string detectPlatform() {
-    // Try CUDA
-    void* handle = dlopen("libcuda.so", RTLD_NOW | RTLD_NOLOAD);
-    if (handle) {
-        dlclose(handle);
-        return "cuda";
-    }
+    // Detection order: CUDA -> MUSA -> HIP -> Ascend -> CPU
+    static const char* libraries[] = {"libcuda.so", "libmusa.so",
+                                      "libamdhip64.so", "libascendcl.so",
+                                      nullptr};
 
-    // Try MUSA (Moore Threads)
-    handle = dlopen("libmusa.so", RTLD_NOW | RTLD_NOLOAD);
-    if (handle) {
-        dlclose(handle);
-        return "musa";
-    }
+    static const char* platforms[] = {"cuda", "musa", "hip", "ascend", "cpu"};
 
-    // Try HIP (AMD)
-    handle = dlopen("libamdhip64.so", RTLD_NOW | RTLD_NOLOAD);
-    if (handle) {
-        dlclose(handle);
-        return "hip";
+    for (int i = 0; libraries[i] != nullptr; ++i) {
+        void* handle = dlopen(libraries[i], RTLD_NOW | RTLD_NOLOAD);
+        if (handle) {
+            dlclose(handle);
+            return platforms[i];
+        }
     }
-
-    // Try Ascend
-    handle = dlopen("libascendcl.so", RTLD_NOW | RTLD_NOLOAD);
-    if (handle) {
-        dlclose(handle);
-        return "ascend";
-    }
-
     return "cpu";
 }
 
 // Plugin search paths
-static const char* PLUGIN_SEARCH_PATHS[] = {
-    "/usr/local/lib/tent/transport",
-    "/usr/lib/tent/transport",
-    "/opt/tent/lib/transport",
-    "./lib/tent/transport",
-    "./lib",
-    nullptr
-};
+static const char* PLUGIN_SEARCH_PATHS[] = {"/usr/local/lib/tent/transport",
+                                            "/usr/lib/tent/transport",
+                                            "/opt/tent/lib/transport",
+                                            "./lib/tent/transport",
+                                            "./lib",
+                                            nullptr};
 
 /**
  * @brief Try to find and load a platform-specific plugin
  */
 static std::shared_ptr<Transport> tryLoadPlatformPlugin(
-    const std::string& base_name,
-    TransportType type,
-    bool optional = true) {
-
+    const std::string& base_name, TransportType type, bool optional = true) {
     // Check if already loaded
     auto it = g_loaded_plugins.find(type);
     if (it != g_loaded_plugins.end() && it->second.create_func) {
@@ -100,12 +81,13 @@ static std::shared_ptr<Transport> tryLoadPlatformPlugin(
     }
 
     std::string platform = detectPlatform();
-    LOG(INFO) << "Detected platform: " << platform << " for transport " << base_name;
+    LOG(INFO) << "Detected platform: " << platform << " for transport "
+              << base_name;
 
     // List of library names to try, in priority order
     std::vector<std::string> lib_names = {
         "libtent_" + base_name + "_" + platform + ".so",  // Platform-specific
-        "libtent_" + base_name + ".so",                    // Generic fallback
+        "libtent_" + base_name + ".so",                   // Generic fallback
     };
 
     for (const auto& lib_name : lib_names) {
@@ -115,7 +97,8 @@ static std::shared_ptr<Transport> tryLoadPlatformPlugin(
         // If not found, search in plugin directories
         if (!handle) {
             for (int i = 0; PLUGIN_SEARCH_PATHS[i] != nullptr; ++i) {
-                std::string full_path = std::string(PLUGIN_SEARCH_PATHS[i]) + "/" + lib_name;
+                std::string full_path =
+                    std::string(PLUGIN_SEARCH_PATHS[i]) + "/" + lib_name;
                 handle = dlopen(full_path.c_str(), RTLD_NOW | RTLD_LOCAL);
                 if (handle) {
                     LOG(INFO) << "Found plugin at: " << full_path;
@@ -128,7 +111,8 @@ static std::shared_ptr<Transport> tryLoadPlatformPlugin(
             continue;  // Try next library name
         }
 
-        // Build symbol name: "CreateRdmaTransport", "CreateNvlinkTransport", etc.
+        // Build symbol name: "CreateRdmaTransport", "CreateNvlinkTransport",
+        // etc.
         std::string symbol_name = "Create" + base_name;
         // Capitalize first letter
         if (!symbol_name.empty()) {
@@ -142,7 +126,8 @@ static std::shared_ptr<Transport> tryLoadPlatformPlugin(
 
         if (!create_func) {
             dlclose(handle);
-            LOG(WARNING) << "Plugin " << lib_name << " missing symbol " << symbol_name;
+            LOG(WARNING) << "Plugin " << lib_name << " missing symbol "
+                         << symbol_name;
             continue;  // Try next library name
         }
 
@@ -153,7 +138,7 @@ static std::shared_ptr<Transport> tryLoadPlatformPlugin(
         g_loaded_plugins[type] = plugin;
 
         LOG(INFO) << "Loaded transport plugin: " << lib_name
-                 << " (symbol=" << symbol_name << ")";
+                  << " (symbol=" << symbol_name << ")";
 
         return create_func();
     }
@@ -161,7 +146,8 @@ static std::shared_ptr<Transport> tryLoadPlatformPlugin(
     // All attempts failed
     if (optional) {
         LOG(INFO) << "Transport " << base_name
-                 << " not available as plugin (tried platform=" << platform << ")";
+                  << " not available as plugin (tried platform=" << platform
+                  << ")";
     } else {
         LOG(WARNING) << "Failed to load transport " << base_name;
     }
@@ -246,5 +232,5 @@ void TransferEngineImpl::unloadPlugins() {
     g_loaded_plugins.clear();
 }
 
-} // namespace tent
-} // namespace mooncake
+}  // namespace tent
+}  // namespace mooncake

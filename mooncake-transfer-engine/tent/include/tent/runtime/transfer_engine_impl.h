@@ -31,6 +31,7 @@
 #include "tent/common/status.h"
 #include "tent/common/types.h"
 #include "tent/common/concurrent/thread_local_storage.h"
+#include "tent/runtime/transport_selector.h"
 
 namespace mooncake {
 namespace tent {
@@ -205,6 +206,7 @@ class TransferEngineImpl {
     std::shared_ptr<Config> conf_;
     std::shared_ptr<ControlService> metadata_;
     std::shared_ptr<Topology> topology_;
+    std::unique_ptr<TransportSelector> transport_selector_;
     bool available_;
 
     std::array<std::shared_ptr<Transport>, kSupportedTransportTypes>

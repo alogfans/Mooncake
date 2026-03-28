@@ -66,25 +66,25 @@ inline std::string getGpuVendorName() {
 #endif
 }
 
-} // namespace tent
-} // namespace mooncake
+}  // namespace tent
+}  // namespace mooncake
 
 // ============================================================
 // Vendor-specific API mappings
 // ============================================================
 
 #if defined(USE_HIP)
-    #include "tent/platform/gpu_vendor/hip.h"
+#include "tent/platform/gpu_vendor/hip.h"
 #elif defined(USE_MUSA)
-    #include "tent/platform/gpu_vendor/musa.h"
+#include "tent/platform/gpu_vendor/musa.h"
 #elif defined(USE_MACA)
-    #include "tent/platform/gpu_vendor/maca.h"
+#include "tent/platform/gpu_vendor/maca.h"
 #elif defined(USE_ASCEND) || defined(USE_ASCEND_DIRECT)
-    #include "tent/platform/gpu_vendor/ascend.h"
+#include "tent/platform/gpu_vendor/ascend.h"
 #elif defined(USE_CUDA)
-    #include "tent/platform/gpu_vendor/cuda.h"
+#include "tent/platform/gpu_vendor/cuda.h"
 #else
-    #include "tent/platform/gpu_vendor/cpu.h"
+#include "tent/platform/gpu_vendor/cpu.h"
 #endif
 
 #endif  // TENT_PLATFORM_GPU_VENDOR_H

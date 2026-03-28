@@ -193,6 +193,10 @@ Status TransferEngineImpl::construct() {
         local_segment_name_ = randomSegmentName();
 
     CHECK_STATUS(setupLocalSegment());
+
+    // Initialize transport selector
+    transport_selector_ = std::make_unique<TransportSelector>(conf_);
+
     CHECK_STATUS(loadTransports());
 
     std::string transport_string;
@@ -641,7 +645,10 @@ static bool checkAvailability(const std::shared_ptr<Transport>& xport,
 static MemoryType getTypeEnum(const std::string& type) {
     if (type == "cpu" || type == "*") return MTYPE_CPU;
     if (type == "cuda") return MTYPE_CUDA;
-    if (type == "npu") return MTYPE_CUDA;
+    if (type == "ascend" || type == "npu") return MTYPE_ASCEND;
+    if (type == "hip") return MTYPE_HIP;
+    if (type == "musa") return MTYPE_MUSA;
+    if (type == "maca") return MTYPE_MACA;
     return MTYPE_UNKNOWN;
 }
 
@@ -656,29 +663,37 @@ TransportType TransferEngineImpl::getTransportType(const Request& request,
         if (!status.ok()) return UNSPEC;
     }
     auto local_mtype = Platform::getLoader().getMemoryType(request.source);
+
+    // Build selection context
+    SelectionContext ctx;
+    ctx.transfer_size = request.length;
+    ctx.priority_level = request.priority;
+
     if (desc->type == SegmentType::File) {
-        if (checkAvailability(transport_list_[GDS], local_mtype)) {
-            if (priority-- == 0) return GDS;
-        }
-        if (checkAvailability(transport_list_[IOURING], local_mtype)) {
-            if (priority-- == 0) return IOURING;
-        }
-        return UNSPEC;
+        // File segment: use selector with empty buffer_transports
+        ctx.segment_type = SegmentType::File;
+        ctx.same_machine = true;  // File is always local
+        ctx.local_memory_type = local_mtype;
+        ctx.remote_memory_type = MTYPE_CPU;
+        ctx.buffer_transports = nullptr;  // Empty - use policy priority
+
+        return transport_selector_->select(ctx, transport_list_, priority);
     } else {
+        // Memory segment
         auto entry = desc->findBuffer(request.target_offset, request.length);
         if (!entry) return UNSPEC;
         bool same_machine =
             (desc->machine_id ==
              metadata_->segmentManager().getLocal()->machine_id);
         auto remote_mtype = getTypeEnum(LocationParser(entry->location).type());
-        for (auto type : entry->transports) {
-            if ((type == NVLINK || type == SHM) && !same_machine) continue;
-            if (checkAvailability(transport_list_[type], local_mtype,
-                                  remote_mtype)) {
-                if (priority-- == 0) return type;
-            }
-        }
-        return UNSPEC;
+
+        ctx.segment_type = SegmentType::Memory;
+        ctx.same_machine = same_machine;
+        ctx.local_memory_type = local_mtype;
+        ctx.remote_memory_type = remote_mtype;
+        ctx.buffer_transports = &entry->transports;
+
+        return transport_selector_->select(ctx, transport_list_, priority);
     }
 }
 

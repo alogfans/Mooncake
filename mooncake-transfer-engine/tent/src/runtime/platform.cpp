@@ -116,7 +116,7 @@ static void insertFallbackMemEntry(int nic_list_count,
 }
 
 Status Platform::probeCpu(std::vector<Topology::NicEntry>& nic_list,
-                           std::vector<Topology::MemEntry>& mem_list) {
+                          std::vector<Topology::MemEntry>& mem_list) {
 #ifdef USE_RDMA
     auto detected_nic = listInfiniBandDevices();
     filterInfiniBandDevices(detected_nic, config_);
@@ -147,33 +147,29 @@ Platform::~Platform() = default;
 Status Platform::loadBackend() {
     // Try to load platform backend plugins in order of preference
     std::vector<std::string> platforms = {
-        "tent_platform_cuda",
-        "tent_platform_musa",
-        "tent_platform_hip",
-        "tent_platform_maca",
-        "tent_platform_ascend",
+        "tent_platform_cuda", "tent_platform_musa",   "tent_platform_hip",
+        "tent_platform_maca", "tent_platform_ascend",
     };
 
     const char* search_paths[] = {
-        "/usr/local/lib/tent/platform",
-        "/usr/lib/tent/platform",
-        "/opt/tent/lib/platform",
-        "./lib/tent/platform",
-        nullptr
-    };
+        "/usr/local/lib/tent/platform", "/usr/lib/tent/platform",
+        "/opt/tent/lib/platform", "./lib/tent/platform", nullptr};
 
     for (const auto& lib_name : platforms) {
         for (int i = 0; search_paths[i] != nullptr; ++i) {
-            std::string full_path = std::string(search_paths[i]) + "/" + lib_name + ".so";
+            std::string full_path =
+                std::string(search_paths[i]) + "/" + lib_name + ".so";
             void* handle = dlopen(full_path.c_str(), RTLD_NOW | RTLD_LOCAL);
             if (handle) {
-                auto create_func = reinterpret_cast<std::shared_ptr<IPlatformBackend>(*)()>(
-                    dlsym(handle, "CreatePlatformBackend"));
+                auto create_func =
+                    reinterpret_cast<std::shared_ptr<IPlatformBackend> (*)()>(
+                        dlsym(handle, "CreatePlatformBackend"));
                 if (create_func) {
                     backend_ = create_func();
                     if (backend_ && backend_->initialize(config_).ok()) {
-                        LOG(INFO) << "Loaded platform backend: " << backend_->name()
-                                 << " from " << full_path;
+                        LOG(INFO)
+                            << "Loaded platform backend: " << backend_->name()
+                            << " from " << full_path;
                         return Status::OK();
                     }
                 }
@@ -233,8 +229,8 @@ MemoryType Platform::getMemoryType(void* addr) {
     return MTYPE_CPU;
 }
 
-const std::vector<RangeLocation> Platform::getLocation(
-    void* start, size_t len, bool skip_prefault) {
+const std::vector<RangeLocation> Platform::getLocation(void* start, size_t len,
+                                                       bool skip_prefault) {
     if (backend_) {
         return backend_->getLocation(start, len, skip_prefault);
     }
@@ -244,7 +240,8 @@ const std::vector<RangeLocation> Platform::getLocation(
     std::vector<RangeLocation> entries;
 
     uintptr_t aligned_start = alignPage((uintptr_t)start);
-    int n = (uintptr_t(start) - aligned_start + len + kPageSize - 1) / kPageSize;
+    int n =
+        (uintptr_t(start) - aligned_start + len + kPageSize - 1) / kPageSize;
     void** pages = (void**)malloc(sizeof(void*) * n);
     int* status = (int*)malloc(sizeof(int) * n);
 

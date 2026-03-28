@@ -39,7 +39,7 @@ namespace mooncake {
 namespace tent {
 
 class PlatformBackend : public IPlatformBackend {
-public:
+   public:
     std::string name() const override {
 #if defined(USE_CUDA)
         return "CUDA";
@@ -66,7 +66,8 @@ public:
             LOG(WARNING) << name() << " not available";
             return Status::InternalError(name() + " not available");
         }
-        LOG(INFO) << name() << " backend initialized with " << count << " device(s)";
+        LOG(INFO) << name() << " backend initialized with " << count
+                  << " device(s)";
 #else
         LOG(INFO) << "CPU backend initialized";
 #endif
@@ -74,7 +75,7 @@ public:
     }
 
     Status probe(std::vector<Topology::NicEntry>& nic_list,
-                std::vector<Topology::MemEntry>& mem_list) override {
+                 std::vector<Topology::MemEntry>& mem_list) override {
 #if defined(HAS_DEVICE_SUPPORT)
         int device_count = 0;
         auto ret = cudaGetDeviceCount(&device_count);
@@ -102,11 +103,14 @@ public:
             gpu_prefix.find(location.type() + ":") == 0) {
             int device = 0;
             auto err = cudaGetDevice(&device);
-            if (err != CUDA_SUCCESS) return Status::InternalError("cudaGetDevice failed");
+            if (err != CUDA_SUCCESS)
+                return Status::InternalError("cudaGetDevice failed");
             err = cudaSetDevice(location.index());
-            if (err != CUDA_SUCCESS) return Status::InternalError("cudaSetDevice failed");
+            if (err != CUDA_SUCCESS)
+                return Status::InternalError("cudaSetDevice failed");
             err = cudaMalloc(pptr, size);
-            if (err != CUDA_SUCCESS) return Status::InternalError("cudaMalloc failed");
+            if (err != CUDA_SUCCESS)
+                return Status::InternalError("cudaMalloc failed");
             cudaSetDevice(device);
             return Status::OK();
         }
@@ -117,7 +121,8 @@ public:
         LocationParser location(options.location);
         if (location.type() == "cpu") socket_id = location.index();
         *pptr = numa_alloc_onnode(size, socket_id);
-        return *pptr ? Status::OK() : Status::InternalError("numa_alloc failed");
+        return *pptr ? Status::OK()
+                     : Status::InternalError("numa_alloc failed");
     }
 
     Status free(void* ptr, size_t size) override {
@@ -126,7 +131,9 @@ public:
         auto ret = cudaPointerGetAttributes(&attr, ptr);
         if (ret == CUDA_SUCCESS && attr.type == cudaMemoryTypeDevice) {
             auto err = cudaFree(ptr);
-            return (err == CUDA_SUCCESS) ? Status::OK() : Status::InternalError("cudaFree failed");
+            return (err == CUDA_SUCCESS)
+                       ? Status::OK()
+                       : Status::InternalError("cudaFree failed");
         }
 #endif
         numa_free(ptr, size);
@@ -136,7 +143,9 @@ public:
     Status copy(void* dst, void* src, size_t length) override {
 #if defined(HAS_DEVICE_SUPPORT)
         auto err = cudaMemcpy(dst, src, length, cudaMemcpyDefault);
-        return (err == CUDA_SUCCESS) ? Status::OK() : Status::InternalError("cudaMemcpy failed");
+        return (err == CUDA_SUCCESS)
+                   ? Status::OK()
+                   : Status::InternalError("cudaMemcpy failed");
 #else
         memcpy(dst, src, length);
         return Status::OK();
@@ -148,14 +157,27 @@ public:
         cudaPointerAttributes attr;
         auto ret = cudaPointerGetAttributes(&attr, addr);
         if (ret == CUDA_SUCCESS && attr.type == cudaMemoryTypeDevice) {
+#if defined(USE_CUDA)
             return MTYPE_CUDA;
+#elif defined(USE_ASCEND)
+            return MTYPE_ASCEND;
+#elif defined(USE_HIP)
+            return MTYPE_HIP;
+#elif defined(USE_MUSA)
+            return MTYPE_MUSA;
+#elif defined(USE_MACA)
+            return MTYPE_MACA;
+#else
+            return MTYPE_CUDA;  // Fallback
+#endif
         }
 #endif
         (void)addr;
         return MTYPE_CPU;
     }
 
-    const std::vector<RangeLocation> getLocation(void* start, size_t len, bool skip_prefault) override {
+    const std::vector<RangeLocation> getLocation(void* start, size_t len,
+                                                 bool skip_prefault) override {
         std::vector<RangeLocation> locations;
 #if defined(HAS_DEVICE_SUPPORT)
         cudaPointerAttributes attr;
@@ -200,16 +222,16 @@ public:
 #endif
     }
 
-private:
+   private:
     std::shared_ptr<Config> config_;
 };
 
 // Export the backend - symbol name is the same for all platforms
 extern "C" {
-    std::shared_ptr<mooncake::tent::IPlatformBackend> CreatePlatformBackend() {
-        return std::make_shared<PlatformBackend>();
-    }
+std::shared_ptr<mooncake::tent::IPlatformBackend> CreatePlatformBackend() {
+    return std::make_shared<PlatformBackend>();
+}
 }
 
-} // namespace tent
-} // namespace mooncake
+}  // namespace tent
+}  // namespace mooncake

@@ -32,7 +32,15 @@
 namespace mooncake {
 namespace tent {
 
-enum MemoryType { MTYPE_UNKNOWN, MTYPE_CPU, MTYPE_CUDA };
+enum MemoryType {
+    MTYPE_UNKNOWN,
+    MTYPE_CPU,
+    MTYPE_CUDA,    // NVIDIA CUDA
+    MTYPE_ASCEND,  // Huawei Ascend NPU
+    MTYPE_HIP,     // AMD HIP (ROCm)
+    MTYPE_MUSA,    // Moore Threads MUSA
+    MTYPE_MACA,    // Iluvatar CoreX MACA
+};
 
 /**
  * @brief Platform backend interface for plugin implementations
@@ -41,7 +49,7 @@ enum MemoryType { MTYPE_UNKNOWN, MTYPE_CPU, MTYPE_CUDA };
  * by plugins that implement this interface.
  */
 class IPlatformBackend {
-public:
+   public:
     virtual ~IPlatformBackend() = default;
 
     virtual std::string name() const = 0;
@@ -49,10 +57,11 @@ public:
 
     // Device discovery
     virtual Status probe(std::vector<Topology::NicEntry>& nic_list,
-                        std::vector<Topology::MemEntry>& mem_list) = 0;
+                         std::vector<Topology::MemEntry>& mem_list) = 0;
 
     // Memory operations
-    virtual Status allocate(void** pptr, size_t size, MemoryOptions& options) = 0;
+    virtual Status allocate(void** pptr, size_t size,
+                            MemoryOptions& options) = 0;
     virtual Status free(void* ptr, size_t size) = 0;
     virtual Status copy(void* dst, void* src, size_t length) = 0;
     virtual MemoryType getMemoryType(void* addr) = 0;
@@ -71,18 +80,18 @@ public:
  * It delegates all operations to a loaded platform backend plugin.
  */
 class Platform {
-public:
+   public:
     /**
      * @brief Get the singleton Platform instance
      * @param config Optional configuration
      * @return Reference to the Platform instance
      */
-    static Platform &getInstance(std::shared_ptr<Config> config = nullptr);
+    static Platform& getInstance(std::shared_ptr<Config> config = nullptr);
 
     /**
      * @brief Alias for getInstance() for backward compatibility
      */
-    static Platform &getLoader(std::shared_ptr<Config> conf = nullptr) {
+    static Platform& getLoader(std::shared_ptr<Config> conf = nullptr) {
         return getInstance(conf);
     }
 
@@ -90,14 +99,14 @@ public:
     ~Platform();
 
     // Forward all operations to the backend plugin
-    Status probe(std::vector<Topology::NicEntry> &nic_list,
-                 std::vector<Topology::MemEntry> &mem_list);
-    Status allocate(void **pptr, size_t size, MemoryOptions &options);
-    Status free(void *ptr, size_t size);
-    Status copy(void *dst, void *src, size_t length);
-    MemoryType getMemoryType(void *addr);
-    const std::vector<RangeLocation> getLocation(
-        void *start, size_t len, bool skip_prefault = false);
+    Status probe(std::vector<Topology::NicEntry>& nic_list,
+                 std::vector<Topology::MemEntry>& mem_list);
+    Status allocate(void** pptr, size_t size, MemoryOptions& options);
+    Status free(void* ptr, size_t size);
+    Status copy(void* dst, void* src, size_t length);
+    MemoryType getMemoryType(void* addr);
+    const std::vector<RangeLocation> getLocation(void* start, size_t len,
+                                                 bool skip_prefault = false);
     const std::string type() const;
 
     /**
@@ -105,7 +114,7 @@ public:
      */
     std::shared_ptr<IPlatformBackend> getBackend() const { return backend_; }
 
-private:
+   private:
     std::shared_ptr<Config> config_;
     std::shared_ptr<IPlatformBackend> backend_;
 

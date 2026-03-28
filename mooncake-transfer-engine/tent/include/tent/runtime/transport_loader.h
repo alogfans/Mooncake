@@ -17,7 +17,8 @@
  * @brief Transport plugin loading mechanism
  *
  * This file provides both:
- * 1. TENT_EXPORT_TRANSPORT macro - for transport implementations to export themselves
+ * 1. TENT_EXPORT_TRANSPORT macro - for transport implementations to export
+ * themselves
  * 2. TransportLoader class - for the runtime to dynamically load transports
  */
 
@@ -51,20 +52,20 @@ namespace tent {
  * loaded via dlopen/dlsym.
  *
  * IMPORTANT: This macro only exports symbols when TENT_BUILD_PLUGIN is defined.
- * When linking statically into the main library, these symbols are not generated.
+ * When linking statically into the main library, these symbols are not
+ * generated.
  */
 #ifdef TENT_BUILD_PLUGIN
-#define TENT_EXPORT_TRANSPORT(TransportClass, LibraryName) \
-    extern "C" { \
-        std::shared_ptr<mooncake::tent::Transport> Create##TransportClass() { \
-            return std::make_shared<TransportClass>(); \
-        } \
-        const char* GetTransportPluginLibrary() { \
-            return LibraryName; \
-        } \
+#define TENT_EXPORT_TRANSPORT(TransportClass, LibraryName)                \
+    extern "C" {                                                          \
+    std::shared_ptr<mooncake::tent::Transport> Create##TransportClass() { \
+        return std::make_shared<TransportClass>();                        \
+    }                                                                     \
+    const char* GetTransportPluginLibrary() { return LibraryName; }       \
     }
 #else
-#define TENT_EXPORT_TRANSPORT(TransportClass, LibraryName)  /* No export when static */
+#define TENT_EXPORT_TRANSPORT(TransportClass, \
+                              LibraryName) /* No export when static */
 #endif
 
 // ============================================================
@@ -83,13 +84,13 @@ namespace tent {
  *   extern "C" std::shared_ptr<Transport> Create##Name##Transport();
  */
 class TransportLoader {
-public:
+   public:
     struct PluginInfo {
-        std::string name;           // "rdma", "tcp", etc.
-        std::string library;        // "libtent_##name##.so"
-        std::string symbol;         // "Create##Name##Transport"
-        TransportType type;         // RDMA, TCP, etc.
-        bool optional = true;       // Don't fail if load fails
+        std::string name;      // "rdma", "tcp", etc.
+        std::string library;   // "libtent_##name##.so"
+        std::string symbol;    // "Create##Name##Transport"
+        TransportType type;    // RDMA, TCP, etc.
+        bool optional = true;  // Don't fail if load fails
     };
 
     TransportLoader() = default;
@@ -129,9 +130,9 @@ public:
      */
     void unloadAll();
 
-private:
+   private:
     struct LoadedPlugin {
-        void* handle = nullptr;                           // dlopen handle
+        void* handle = nullptr;                       // dlopen handle
         std::shared_ptr<Transport> (*create_func)();  // Factory function
         PluginInfo info;
     };
@@ -142,7 +143,7 @@ private:
     void* findSymbol(void* handle, const std::string& name);
 };
 
-} // namespace tent
-} // namespace mooncake
+}  // namespace tent
+}  // namespace mooncake
 
 #endif  // TENT_TRANSPORT_LOADER_H
