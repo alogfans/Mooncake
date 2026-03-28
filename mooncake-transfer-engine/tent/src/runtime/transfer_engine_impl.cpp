@@ -301,6 +301,9 @@ Status TransferEngineImpl::deconstruct() {
         entry.freelist.clear();
     });
 
+    // Unload dynamically loaded plugins before destroying transports
+    unloadPlugins();
+
     // Now safe to destroy transports (workers join here)
     for (auto& transport : transport_list_) transport.reset();
     local_segment_tracker_.reset();

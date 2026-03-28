@@ -272,3 +272,8 @@ Status IOUringTransport::removeMemoryBuffer(BufferDesc& desc) {
 
 }  // namespace tent
 }  // namespace mooncake
+
+#include "tent/runtime/transport_loader.h"
+
+using mooncake::tent::IOUringTransport;
+TENT_EXPORT_TRANSPORT(IOUringTransport, "libtent_iouring.so");

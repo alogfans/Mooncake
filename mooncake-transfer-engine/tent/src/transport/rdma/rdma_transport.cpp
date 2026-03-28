@@ -594,3 +594,8 @@ void RdmaTransport::notifyWorkerThread() {
 }
 }  // namespace tent
 }  // namespace mooncake
+
+#include "tent/runtime/transport_loader.h"
+
+using mooncake::tent::RdmaTransport;
+TENT_EXPORT_TRANSPORT(RdmaTransport, "libtent_rdma.so");

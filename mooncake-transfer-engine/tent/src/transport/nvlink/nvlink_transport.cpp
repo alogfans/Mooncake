@@ -330,3 +330,8 @@ Status NVLinkTransport::setPeerAccess() {
 }
 }  // namespace tent
 }  // namespace mooncake
+
+#include "tent/runtime/transport_loader.h"
+
+using mooncake::tent::NVLinkTransport;
+TENT_EXPORT_TRANSPORT(NVLinkTransport, "libtent_nvlink.so");

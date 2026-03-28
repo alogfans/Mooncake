@@ -753,3 +753,8 @@ void AscendDirectTransport::copyWithAsync(Request::OpCode opcode,
 
 }  // namespace tent
 }  // namespace mooncake
+
+#include "tent/runtime/transport_loader.h"
+
+using mooncake::tent::AscendDirectTransport;
+TENT_EXPORT_TRANSPORT(AscendDirectTransport, "libtent_ascend.so");

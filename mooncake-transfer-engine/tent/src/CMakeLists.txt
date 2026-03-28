@@ -61,12 +61,19 @@ endif()
 
 set(YALANTING_TARGET yalantinglibs::yalantinglibs)
 if (NOT TARGET ${YALANTING_TARGET})
-    if (CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-        find_package(yalantinglibs CONFIG REQUIRED)
-    else()
-        message(FATAL_ERROR
-            "yalantinglibs::yalantinglibs target not found")
-    endif()
+    find_package(yalantinglibs CONFIG REQUIRED)
+endif()
+
+# Build mode selection
+option(TENT_BUILD_STATIC "Build with static linking (platform-specific)" ON)
+option(TENT_BUILD_DYNAMIC "Build with dynamic plugins (platform-independent)" OFF)
+
+if(TENT_BUILD_DYNAMIC)
+    message(STATUS "TENT Build Mode: DYNAMIC (platform-independent core + plugins)")
+    set(TENT_USE_PLUGINS ON)
+else()
+    message(STATUS "TENT Build Mode: STATIC (platform-specific, all linked)")
+    set(TENT_USE_PLUGINS OFF)
 endif()
 
 add_subdirectory(common)

@@ -356,3 +356,8 @@ Status GdsTransport::removeMemoryBuffer(BufferDesc& desc) {
 
 }  // namespace tent
 }  // namespace mooncake
+
+#include "tent/runtime/transport_loader.h"
+
+using mooncake::tent::GdsTransport;
+TENT_EXPORT_TRANSPORT(GdsTransport, "libtent_gds.so");

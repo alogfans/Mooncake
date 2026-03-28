@@ -559,3 +559,8 @@ Status MnnvlTransport::setPeerAccess() {
 
 }  // namespace tent
 }  // namespace mooncake
+
+#include "tent/runtime/transport_loader.h"
+
+using mooncake::tent::MnnvlTransport;
+TENT_EXPORT_TRANSPORT(MnnvlTransport, "libtent_mnnvl.so");

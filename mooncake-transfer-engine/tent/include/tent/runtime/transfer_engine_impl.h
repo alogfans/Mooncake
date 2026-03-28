@@ -49,9 +49,9 @@ class ProxyManager;
 struct TaskInfo {
     TransportType type{UNSPEC};
     int sub_task_id{-1};
-    bool derived{false};  // merged by other tasks
-    int xport_priority{0};   // for transport fallback
-    int priority{PRIO_HIGH}; // QoS priority
+    bool derived{false};      // merged by other tasks
+    int xport_priority{0};    // for transport fallback
+    int priority{PRIO_HIGH};  // QoS priority
     Request request;
     bool staging{false};
     TransferStatusEnum status{TransferStatusEnum::PENDING};
@@ -176,6 +176,8 @@ class TransferEngineImpl {
                                    bool invalidate_on_fail = true);
 
     Status loadTransports();
+
+    void unloadPlugins();
 
     void findStagingPolicy(const Request& req,
                            std::vector<std::string>& policy);
