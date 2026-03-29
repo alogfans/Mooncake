@@ -112,6 +112,7 @@ void RdmaEndPoint::setPeerNicPath(const std::string &peer_nic_path) {
 
 int RdmaEndPoint::setupConnectionsByActive() {
     std::string peer_server_name, peer_nic_name;
+    std::string peer_nic_path_local;
 
     {
         RWSpinlock::WriteGuard guard(lock_);
@@ -120,8 +121,10 @@ int RdmaEndPoint::setupConnectionsByActive() {
             return 0;
         }
 
+        peer_nic_path_local = peer_nic_path_;
+
         // loopback mode
-        if (context_.nicPath() == peer_nic_path_) {
+        if (context_.nicPath() == peer_nic_path_local) {
             auto segment_desc =
                 context_.engine().meta()->getSegmentDescByID(LOCAL_SEGMENT_ID);
             if (segment_desc) {
@@ -134,18 +137,18 @@ int RdmaEndPoint::setupConnectionsByActive() {
             return ERR_DEVICE_NOT_FOUND;
         }
 
-        peer_server_name = getServerNameFromNicPath(peer_nic_path_);
-        peer_nic_name = getNicNameFromNicPath(peer_nic_path_);
+        peer_server_name = getServerNameFromNicPath(peer_nic_path_local);
+        peer_nic_name = getNicNameFromNicPath(peer_nic_path_local);
     }
 
     if (peer_server_name.empty() || peer_nic_name.empty()) {
-        LOG(ERROR) << "Parse peer nic path failed: " << peer_nic_path_;
+        LOG(ERROR) << "Parse peer nic path failed: " << peer_nic_path_local;
         return ERR_INVALID_ARGUMENT;
     }
 
     HandShakeDesc local_desc, peer_desc;
     local_desc.local_nic_path = context_.nicPath();
-    local_desc.peer_nic_path = peer_nic_path_;
+    local_desc.peer_nic_path = peer_nic_path_local;
     local_desc.qp_num = qpNum();
 
     int rc = context_.engine().sendHandshake(peer_server_name, local_desc,
@@ -157,7 +160,7 @@ int RdmaEndPoint::setupConnectionsByActive() {
         return ERR_REJECT_HANDSHAKE;
     }
 
-    if (peer_desc.local_nic_path != peer_nic_path_ ||
+    if (peer_desc.local_nic_path != peer_nic_path_local ||
         peer_desc.peer_nic_path != local_desc.local_nic_path) {
         LOG(ERROR) << "Invalid argument: received packet mismatch, "
                       "local.local_nic_path: "
@@ -189,6 +192,7 @@ int RdmaEndPoint::setupConnectionsByActive() {
 int RdmaEndPoint::setupConnectionsByPassive(const HandShakeDesc &peer_desc,
                                             HandShakeDesc &local_desc) {
     std::string peer_server_name, peer_nic_name;
+    std::string peer_nic_path_local;
 
     {
         RWSpinlock::WriteGuard guard(lock_);
@@ -197,28 +201,30 @@ int RdmaEndPoint::setupConnectionsByPassive(const HandShakeDesc &peer_desc,
             disconnectUnlocked();
         }
 
+        peer_nic_path_local = peer_nic_path_;
+
         if (peer_desc.peer_nic_path != context_.nicPath() ||
-            peer_desc.local_nic_path != peer_nic_path_) {
+            peer_desc.local_nic_path != peer_nic_path_local) {
             local_desc.reply_msg =
                 "Invalid argument: peer nic path inconsistency, expect " +
-                context_.nicPath() + " + " + peer_nic_path_ + ", while got " +
+                context_.nicPath() + " + " + peer_nic_path_local + ", while got " +
                 peer_desc.peer_nic_path + " + " + peer_desc.local_nic_path;
 
             LOG(ERROR) << local_desc.reply_msg;
             return ERR_REJECT_HANDSHAKE;
         }
 
-        peer_server_name = getServerNameFromNicPath(peer_nic_path_);
-        peer_nic_name = getNicNameFromNicPath(peer_nic_path_);
+        peer_server_name = getServerNameFromNicPath(peer_nic_path_local);
+        peer_nic_name = getNicNameFromNicPath(peer_nic_path_local);
         if (peer_server_name.empty() || peer_nic_name.empty()) {
             local_desc.reply_msg =
-                "Parse peer nic path failed: " + peer_nic_path_;
+                "Parse peer nic path failed: " + peer_nic_path_local;
             LOG(ERROR) << local_desc.reply_msg;
             return ERR_INVALID_ARGUMENT;
         }
 
         local_desc.local_nic_path = context_.nicPath();
-        local_desc.peer_nic_path = peer_nic_path_;
+        local_desc.peer_nic_path = peer_nic_path_local;
         local_desc.qp_num = qpNum();
     }
 
@@ -237,7 +243,7 @@ int RdmaEndPoint::setupConnectionsByPassive(const HandShakeDesc &peer_desc,
                                          &local_desc.reply_msg);
     }
     local_desc.reply_msg =
-        "Peer nic not found in that server: " + peer_nic_path_;
+        "Peer nic not found in that server: " + peer_nic_path_local;
     LOG(ERROR) << local_desc.reply_msg;
     return ERR_DEVICE_NOT_FOUND;
 }

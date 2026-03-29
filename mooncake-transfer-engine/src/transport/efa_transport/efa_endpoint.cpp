@@ -169,6 +169,7 @@ int EfaEndPoint::insertPeerAddr(const std::string &peer_addr) {
 int EfaEndPoint::setupConnectionsByActive() {
     std::string peer_server_name, peer_nic_name;
     std::string local_efa_addr;
+    std::string peer_nic_path_local;
 
     {
         RWSpinlock::WriteGuard guard(lock_);
@@ -177,8 +178,10 @@ int EfaEndPoint::setupConnectionsByActive() {
             return 0;
         }
 
+        peer_nic_path_local = peer_nic_path_;
+
         // Loopback mode
-        if (context_.nicPath() == peer_nic_path_) {
+        if (context_.nicPath() == peer_nic_path_local) {
             // For loopback, insert our own address
             int ret = insertPeerAddr(getLocalAddr());
             if (ret != 0) {
@@ -189,20 +192,20 @@ int EfaEndPoint::setupConnectionsByActive() {
             return 0;
         }
 
-        peer_server_name = getServerNameFromNicPath(peer_nic_path_);
-        peer_nic_name = getNicNameFromNicPath(peer_nic_path_);
+        peer_server_name = getServerNameFromNicPath(peer_nic_path_local);
+        peer_nic_name = getNicNameFromNicPath(peer_nic_path_local);
         local_efa_addr = getLocalAddr();
     }
 
     if (peer_server_name.empty() || peer_nic_name.empty()) {
-        LOG(ERROR) << "Parse peer EFA nic path failed: " << peer_nic_path_;
+        LOG(ERROR) << "Parse peer EFA nic path failed: " << peer_nic_path_local;
         return ERR_INVALID_ARGUMENT;
     }
 
     // Exchange addresses via handshake
     TransferMetadata::HandShakeDesc local_desc, peer_desc;
     local_desc.local_nic_path = context_.nicPath();
-    local_desc.peer_nic_path = peer_nic_path_;
+    local_desc.peer_nic_path = peer_nic_path_local;
     local_desc.efa_addr = local_efa_addr;
 
     int rc = context_.engine().sendHandshake(peer_server_name, local_desc,
