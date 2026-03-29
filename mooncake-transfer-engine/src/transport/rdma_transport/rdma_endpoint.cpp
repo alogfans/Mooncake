@@ -211,7 +211,8 @@ int RdmaEndPoint::setupConnectionsByPassive(const HandShakeDesc &peer_desc,
         peer_server_name = getServerNameFromNicPath(peer_nic_path_);
         peer_nic_name = getNicNameFromNicPath(peer_nic_path_);
         if (peer_server_name.empty() || peer_nic_name.empty()) {
-            local_desc.reply_msg = "Parse peer nic path failed: " + peer_nic_path_;
+            local_desc.reply_msg =
+                "Parse peer nic path failed: " + peer_nic_path_;
             LOG(ERROR) << local_desc.reply_msg;
             return ERR_INVALID_ARGUMENT;
         }
