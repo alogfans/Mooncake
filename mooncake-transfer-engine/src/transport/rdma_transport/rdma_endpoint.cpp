@@ -111,37 +111,42 @@ void RdmaEndPoint::setPeerNicPath(const std::string &peer_nic_path) {
 }
 
 int RdmaEndPoint::setupConnectionsByActive() {
-    RWSpinlock::WriteGuard guard(lock_);
-    if (connected()) {
-        LOG(INFO) << "Connection has been established";
-        return 0;
+    std::string peer_server_name, peer_nic_name;
+
+    {
+        RWSpinlock::WriteGuard guard(lock_);
+        if (connected()) {
+            LOG(INFO) << "Connection has been established";
+            return 0;
+        }
+
+        // loopback mode
+        if (context_.nicPath() == peer_nic_path_) {
+            auto segment_desc =
+                context_.engine().meta()->getSegmentDescByID(LOCAL_SEGMENT_ID);
+            if (segment_desc) {
+                for (auto &nic : segment_desc->devices)
+                    if (nic.name == context_.deviceName())
+                        return doSetupConnection(nic.gid, nic.lid, qpNum());
+            }
+            LOG(ERROR) << "Peer NIC " << context_.deviceName()
+                       << " not found in localhost";
+            return ERR_DEVICE_NOT_FOUND;
+        }
+
+        peer_server_name = getServerNameFromNicPath(peer_nic_path_);
+        peer_nic_name = getNicNameFromNicPath(peer_nic_path_);
     }
 
-    // loopback mode
-    if (context_.nicPath() == peer_nic_path_) {
-        auto segment_desc =
-            context_.engine().meta()->getSegmentDescByID(LOCAL_SEGMENT_ID);
-        if (segment_desc) {
-            for (auto &nic : segment_desc->devices)
-                if (nic.name == context_.deviceName())
-                    return doSetupConnection(nic.gid, nic.lid, qpNum());
-        }
-        LOG(ERROR) << "Peer NIC " << context_.deviceName()
-                   << " not found in localhost";
-        return ERR_DEVICE_NOT_FOUND;
+    if (peer_server_name.empty() || peer_nic_name.empty()) {
+        LOG(ERROR) << "Parse peer nic path failed: " << peer_nic_path_;
+        return ERR_INVALID_ARGUMENT;
     }
 
     HandShakeDesc local_desc, peer_desc;
     local_desc.local_nic_path = context_.nicPath();
     local_desc.peer_nic_path = peer_nic_path_;
     local_desc.qp_num = qpNum();
-
-    auto peer_server_name = getServerNameFromNicPath(peer_nic_path_);
-    auto peer_nic_name = getNicNameFromNicPath(peer_nic_path_);
-    if (peer_server_name.empty() || peer_nic_name.empty()) {
-        LOG(ERROR) << "Parse peer nic path failed: " << peer_nic_path_;
-        return ERR_INVALID_ARGUMENT;
-    }
 
     int rc = context_.engine().sendHandshake(peer_server_name, local_desc,
                                              peer_desc);
@@ -166,6 +171,12 @@ int RdmaEndPoint::setupConnectionsByActive() {
     auto segment_desc =
         context_.engine().meta()->getSegmentDescByName(peer_server_name);
     if (segment_desc) {
+        RWSpinlock::WriteGuard guard(lock_);
+        // Check again after re-acquiring lock to prevent race condition
+        if (connected()) {
+            LOG(INFO) << "Connection established by another thread";
+            return 0;
+        }
         for (auto &nic : segment_desc->devices)
             if (nic.name == peer_nic_name)
                 return doSetupConnection(nic.gid, nic.lid, peer_desc.qp_num);
@@ -177,38 +188,48 @@ int RdmaEndPoint::setupConnectionsByActive() {
 
 int RdmaEndPoint::setupConnectionsByPassive(const HandShakeDesc &peer_desc,
                                             HandShakeDesc &local_desc) {
-    RWSpinlock::WriteGuard guard(lock_);
-    if (connected()) {
-        LOG(WARNING) << "Re-establish connection: " << toString();
-        disconnectUnlocked();
+    std::string peer_server_name, peer_nic_name;
+
+    {
+        RWSpinlock::WriteGuard guard(lock_);
+        if (connected()) {
+            LOG(WARNING) << "Re-establish connection: " << toString();
+            disconnectUnlocked();
+        }
+
+        if (peer_desc.peer_nic_path != context_.nicPath() ||
+            peer_desc.local_nic_path != peer_nic_path_) {
+            local_desc.reply_msg =
+                "Invalid argument: peer nic path inconsistency, expect " +
+                context_.nicPath() + " + " + peer_nic_path_ + ", while got " +
+                peer_desc.peer_nic_path + " + " + peer_desc.local_nic_path;
+
+            LOG(ERROR) << local_desc.reply_msg;
+            return ERR_REJECT_HANDSHAKE;
+        }
+
+        peer_server_name = getServerNameFromNicPath(peer_nic_path_);
+        peer_nic_name = getNicNameFromNicPath(peer_nic_path_);
+        if (peer_server_name.empty() || peer_nic_name.empty()) {
+            local_desc.reply_msg = "Parse peer nic path failed: " + peer_nic_path_;
+            LOG(ERROR) << local_desc.reply_msg;
+            return ERR_INVALID_ARGUMENT;
+        }
+
+        local_desc.local_nic_path = context_.nicPath();
+        local_desc.peer_nic_path = peer_nic_path_;
+        local_desc.qp_num = qpNum();
     }
-
-    if (peer_desc.peer_nic_path != context_.nicPath() ||
-        peer_desc.local_nic_path != peer_nic_path_) {
-        local_desc.reply_msg =
-            "Invalid argument: peer nic path inconsistency, expect " +
-            context_.nicPath() + " + " + peer_nic_path_ + ", while got " +
-            peer_desc.peer_nic_path + " + " + peer_desc.local_nic_path;
-
-        LOG(ERROR) << local_desc.reply_msg;
-        return ERR_REJECT_HANDSHAKE;
-    }
-
-    auto peer_server_name = getServerNameFromNicPath(peer_nic_path_);
-    auto peer_nic_name = getNicNameFromNicPath(peer_nic_path_);
-    if (peer_server_name.empty() || peer_nic_name.empty()) {
-        local_desc.reply_msg = "Parse peer nic path failed: " + peer_nic_path_;
-        LOG(ERROR) << local_desc.reply_msg;
-        return ERR_INVALID_ARGUMENT;
-    }
-
-    local_desc.local_nic_path = context_.nicPath();
-    local_desc.peer_nic_path = peer_nic_path_;
-    local_desc.qp_num = qpNum();
 
     auto segment_desc =
         context_.engine().meta()->getSegmentDescByName(peer_server_name);
     if (segment_desc) {
+        RWSpinlock::WriteGuard guard(lock_);
+        // Check again after re-acquiring lock to prevent race condition
+        if (connected()) {
+            LOG(INFO) << "Connection established by another thread";
+            return 0;
+        }
         for (auto &nic : segment_desc->devices)
             if (nic.name == peer_nic_name)
                 return doSetupConnection(nic.gid, nic.lid, peer_desc.qp_num,
