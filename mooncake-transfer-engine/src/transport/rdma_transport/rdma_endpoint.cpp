@@ -207,8 +207,9 @@ int RdmaEndPoint::setupConnectionsByPassive(const HandShakeDesc &peer_desc,
             peer_desc.local_nic_path != peer_nic_path_local) {
             local_desc.reply_msg =
                 "Invalid argument: peer nic path inconsistency, expect " +
-                context_.nicPath() + " + " + peer_nic_path_local + ", while got " +
-                peer_desc.peer_nic_path + " + " + peer_desc.local_nic_path;
+                context_.nicPath() + " + " + peer_nic_path_local +
+                ", while got " + peer_desc.peer_nic_path + " + " +
+                peer_desc.local_nic_path;
 
             LOG(ERROR) << local_desc.reply_msg;
             return ERR_REJECT_HANDSHAKE;
