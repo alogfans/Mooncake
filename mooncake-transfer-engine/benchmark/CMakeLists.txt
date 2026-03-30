@@ -12,13 +12,8 @@ add_executable(tebench ${TEBENCH_SOURCES})
 target_link_libraries(tebench PUBLIC transfer_engine tent)
 
 # Set RPATH for finding libasio.so and plugin .so files at runtime
-if(TENT_USE_PLUGINS)
-    set_target_properties(tebench PROPERTIES
-        BUILD_WITH_INSTALL_RPATH TRUE
-        INSTALL_RPATH "$ORIGIN/../lib:$ORIGIN/../../mooncake-asio"
-        BUILD_RPATH "$ORIGIN/../lib:$ORIGIN/lib:$ORIGIN"
-    )
-else()
-    set_target_properties(tebench PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE
-                                             INSTALL_RPATH "$ORIGIN/../lib:$ORIGIN/../../mooncake-asio")
-endif()
+# Note: plugins are at $ORIGIN/../../lib/tent/ and libtent_shared.so is at $ORIGIN/../../lib/
+set_target_properties(tebench PROPERTIES
+    BUILD_WITH_INSTALL_RPATH TRUE
+    INSTALL_RPATH "$ORIGIN/../../lib:$ORIGIN/../lib:$ORIGIN/../../../mooncake-asio"
+)

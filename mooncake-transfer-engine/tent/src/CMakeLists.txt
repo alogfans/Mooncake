@@ -121,6 +121,10 @@ else()
             tent_runtime
             tent_interface
     )
+    # Set output directory for shared library
+    set_target_properties(tent_shared PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+    )
     install(TARGETS tent_shared
         ARCHIVE DESTINATION lib
         LIBRARY DESTINATION lib

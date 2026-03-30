@@ -164,8 +164,8 @@ Status Platform::loadBackend() {
 #else
     // PLUGIN mode: Try to load platform backend plugins
     std::vector<std::string> platforms = {
-        "tent_platform_cuda", "tent_platform_musa",   "tent_platform_hip",
-        "tent_platform_maca", "tent_platform_ascend",
+        "libtent_platform_cuda", "libtent_platform_musa",   "libtent_platform_hip",
+        "libtent_platform_maca", "libtent_platform_ascend", "libtent_platform_cpu",
     };
 
     const char* search_paths[] = {

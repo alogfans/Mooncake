@@ -126,9 +126,10 @@ static std::shared_ptr<Transport> tryLoadPlatformPlugin(
 
         if (!handle) continue;
 
-        std::string symbol_name = "Create" + base_name;
-        if (!symbol_name.empty()) symbol_name[0] = toupper(symbol_name[0]);
-        symbol_name += "Transport";
+        // Capitalize first letter of base_name for symbol name
+        std::string base_cap = base_name;
+        if (!base_cap.empty()) base_cap[0] = toupper(base_cap[0]);
+        std::string symbol_name = "Create" + base_cap + "Transport";
 
         auto create_func = reinterpret_cast<CreateTransportFunc>(
             dlsym(handle, symbol_name.c_str()));
