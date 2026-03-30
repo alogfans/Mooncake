@@ -103,17 +103,17 @@ add_subdirectory(python)
 
 file(GLOB TENT_ENGINE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp")
 
-# Always build static library (used by tests and examples)
-add_library(tent STATIC ${TENT_ENGINE_SOURCES})
-target_link_libraries(
-    tent
-    PUBLIC
-        tent_runtime
-        tent_interface
-)
-
-# Build shared library in shared/plugin modes
-if(TENT_BUILD_SHARED)
+if(TENT_BUILD_MODE STREQUAL "static")
+    # Static mode only: build static library
+    add_library(tent STATIC ${TENT_ENGINE_SOURCES})
+    target_link_libraries(
+        tent
+        PUBLIC
+            tent_runtime
+            tent_interface
+    )
+else()
+    # Shared and plugin modes: build shared library only
     add_library(tent_shared SHARED ${TENT_ENGINE_SOURCES})
     target_link_libraries(
         tent_shared
@@ -125,4 +125,7 @@ if(TENT_BUILD_SHARED)
         ARCHIVE DESTINATION lib
         LIBRARY DESTINATION lib
         RUNTIME DESTINATION bin)
+
+    # Create alias for tests/examples that use 'tent'
+    add_library(tent ALIAS tent_shared)
 endif()

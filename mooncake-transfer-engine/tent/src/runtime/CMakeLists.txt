@@ -43,9 +43,9 @@ add_library(tent_runtime_impl STATIC
 
 # Define build mode for transport_loader.cpp
 if(TENT_USE_PLUGINS)
-    target_compile_definitions(tent_runtime_impl PRIVATE TENT_PLUGIN_MODE)
+    target_compile_definitions(tent_runtime_impl PRIVATE TENT_PLUGIN_TRANSPORTS)
 else()
-    target_compile_definitions(tent_runtime_impl PRIVATE TENT_STATIC_MODE)
+    target_compile_definitions(tent_runtime_impl PRIVATE TENT_BUILTIN_TRANSPORTS)
 endif()
 
 target_link_libraries(tent_runtime_impl PUBLIC

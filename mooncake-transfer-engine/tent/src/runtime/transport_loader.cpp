@@ -16,7 +16,7 @@
 #include "tent/transport/shm/shm_transport.h"
 #include "tent/transport/tcp/tcp_transport.h"
 
-#ifdef TENT_STATIC_MODE
+#ifdef TENT_BUILTIN_TRANSPORTS
 // Static linking: include transport headers directly
 #ifdef USE_RDMA
 #include "tent/transport/rdma/rdma_transport.h"
@@ -38,9 +38,9 @@
 #if defined(USE_ASCEND) || defined(USE_ASCEND_DIRECT)
 #include "tent/transport/ascend/ascend_direct_transport.h"
 #endif
-#endif  // TENT_STATIC_MODE
+#endif  // TENT_BUILTIN_TRANSPORTS
 
-#ifdef TENT_PLUGIN_MODE
+#ifdef TENT_PLUGIN_TRANSPORTS
 // Plugin mode: use dlopen to load transports
 #include <dlfcn.h>
 #include <glob.h>
@@ -51,7 +51,7 @@
 namespace mooncake {
 namespace tent {
 
-#ifdef TENT_PLUGIN_MODE
+#ifdef TENT_PLUGIN_TRANSPORTS
 
 // ============================================================================
 // Plugin Mode Implementation
@@ -160,7 +160,7 @@ static std::shared_ptr<Transport> tryLoadPlatformPlugin(
     return nullptr;
 }
 
-#endif  // TENT_PLUGIN_MODE
+#endif  // TENT_PLUGIN_TRANSPORTS
 
 // ============================================================================
 // Common loadTransports implementation
@@ -174,7 +174,7 @@ Status TransferEngineImpl::loadTransports() {
     if (conf_->get("transports/shm/enable", false))
         transport_list_[SHM] = std::make_shared<ShmTransport>();
 
-#ifdef TENT_STATIC_MODE
+#ifdef TENT_BUILTIN_TRANSPORTS
     // --------------------------------------------------------------------
     // STATIC MODE: Direct instantiation
     // --------------------------------------------------------------------
@@ -213,7 +213,7 @@ Status TransferEngineImpl::loadTransports() {
     }
 #endif
 
-#else  // TENT_PLUGIN_MODE
+#else  // TENT_PLUGIN_TRANSPORTS
     // --------------------------------------------------------------------
     // PLUGIN MODE: Dynamic loading via dlopen
     // --------------------------------------------------------------------
@@ -245,12 +245,12 @@ Status TransferEngineImpl::loadTransports() {
         auto ascend = tryLoadPlatformPlugin("ascend", AscendDirect, true);
         if (ascend) transport_list_[AscendDirect] = ascend;
     }
-#endif  // TENT_STATIC_MODE
+#endif  // TENT_BUILTIN_TRANSPORTS
 
     return Status::OK();
 }
 
-#ifdef TENT_PLUGIN_MODE
+#ifdef TENT_PLUGIN_TRANSPORTS
 void TransferEngineImpl::unloadPlugins() {
     for (auto& kv : g_loaded_plugins) {
         if (kv.second.handle) {
