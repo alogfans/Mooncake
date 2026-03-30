@@ -23,27 +23,18 @@ namespace mooncake {
 namespace tent {
 
 // Transport type name mapping
-static const std::unordered_map<std::string, TransportType> kTransportNameMap = {
-    {"rdma", RDMA},
-    {"tcp", TCP},
-    {"shm", SHM},
-    {"nvlink", NVLINK},
-    {"gds", GDS},
-    {"io_uring", IOURING},
-    {"ascend", AscendDirect},
-    {"mnnvl", MNNVL},
+static const std::unordered_map<std::string, TransportType> kTransportNameMap =
+    {
+        {"rdma", RDMA},           {"tcp", TCP},     {"shm", SHM},
+        {"nvlink", NVLINK},       {"gds", GDS},     {"io_uring", IOURING},
+        {"ascend", AscendDirect}, {"mnnvl", MNNVL},
 };
 
-static const std::unordered_map<TransportType, std::string> kTransportTypeNames = {
-    {RDMA, "rdma"},
-    {TCP, "tcp"},
-    {SHM, "shm"},
-    {NVLINK, "nvlink"},
-    {GDS, "gds"},
-    {IOURING, "io_uring"},
-    {AscendDirect, "ascend"},
-    {MNNVL, "mnnvl"},
-    {UNSPEC, "unspec"},
+static const std::unordered_map<TransportType, std::string>
+    kTransportTypeNames = {
+        {RDMA, "rdma"},           {TCP, "tcp"},     {SHM, "shm"},
+        {NVLINK, "nvlink"},       {GDS, "gds"},     {IOURING, "io_uring"},
+        {AscendDirect, "ascend"}, {MNNVL, "mnnvl"}, {UNSPEC, "unspec"},
 };
 
 // Memory type name mapping for pattern matching
@@ -75,25 +66,26 @@ std::vector<SelectionPolicy> TransportSelector::getDefaultPolicies() {
         {
             "file_storage",
             SegmentType::File,
-            std::nullopt,              // same_machine doesn't matter for file
-            std::nullopt,              // local_memory_pattern
-            std::nullopt,              // remote_memory_pattern
-            std::nullopt,              // min_size
-            std::nullopt,              // max_size
-            std::nullopt,              // min_priority
-            {},                        // rdma_device_ids (empty = all devices)
-            {GDS, IOURING}             // File segment priority (original: GDS → IOURING)
+            std::nullopt,   // same_machine doesn't matter for file
+            std::nullopt,   // local_memory_pattern
+            std::nullopt,   // remote_memory_pattern
+            std::nullopt,   // min_size
+            std::nullopt,   // max_size
+            std::nullopt,   // min_priority
+            {},             // rdma_device_ids (empty = all devices)
+            {GDS, IOURING}  // File segment priority (original: GDS → IOURING)
         },
         {
             "memory_default",
             SegmentType::Memory,
-            std::nullopt,              // any machine
-            std::nullopt,              // any local memory
-            std::nullopt,              // any remote memory
-            std::nullopt,              // any size
-            std::nullopt,              // min_priority
-            {},                        // rdma_device_ids (empty = all devices)
-            {}                         // Empty priority = use buffer_transports order (original behavior)
+            std::nullopt,  // any machine
+            std::nullopt,  // any local memory
+            std::nullopt,  // any remote memory
+            std::nullopt,  // any size
+            std::nullopt,  // min_priority
+            {},            // rdma_device_ids (empty = all devices)
+            {}  // Empty priority = use buffer_transports order (original
+                // behavior)
         },
     };
 }
@@ -105,7 +97,8 @@ void TransportSelector::loadPolicies() {
     auto policies_array = config_->getArray<json>("policy");
 
     if (policies_array.empty()) {
-        LOG(INFO) << "No 'policy' configured, using default transport selection";
+        LOG(INFO)
+            << "No 'policy' configured, using default transport selection";
         policies_ = getDefaultPolicies();
         return;
     }
@@ -138,10 +131,12 @@ void TransportSelector::loadPolicies() {
 
         // Parse memory patterns (optional)
         if (policy_json.contains("local_memory")) {
-            policy.local_memory_pattern = policy_json["local_memory"].get<std::string>();
+            policy.local_memory_pattern =
+                policy_json["local_memory"].get<std::string>();
         }
         if (policy_json.contains("remote_memory")) {
-            policy.remote_memory_pattern = policy_json["remote_memory"].get<std::string>();
+            policy.remote_memory_pattern =
+                policy_json["remote_memory"].get<std::string>();
         }
 
         // Parse size filters (optional)
@@ -163,7 +158,8 @@ void TransportSelector::loadPolicies() {
         if (policy_json.contains("rdma_device_names")) {
             for (const auto& device_name : policy_json["rdma_device_names"]) {
                 if (device_name.is_string()) {
-                    policy.rdma_device_names.push_back(device_name.get<std::string>());
+                    policy.rdma_device_names.push_back(
+                        device_name.get<std::string>());
                 }
             }
         }
@@ -173,7 +169,8 @@ void TransportSelector::loadPolicies() {
         if (policy_json.contains("priority")) {
             for (const auto& transport_str : policy_json["priority"]) {
                 if (!transport_str.is_string()) continue;
-                TransportType type = parseTransportType(transport_str.get<std::string>());
+                TransportType type =
+                    parseTransportType(transport_str.get<std::string>());
                 if (type != UNSPEC) {
                     policy.priority.push_back(type);
                 }
@@ -182,8 +179,8 @@ void TransportSelector::loadPolicies() {
 
         policies_.push_back(std::move(policy));
         LOG(INFO) << "Loaded transport policy: " << policy.name
-                 << " (segment_type=" << segment_type_str
-                 << ", priority_count=" << policy.priority.size() << ")";
+                  << " (segment_type=" << segment_type_str
+                  << ", priority_count=" << policy.priority.size() << ")";
     }
 }
 
@@ -192,7 +189,8 @@ TransportSelector::TransportSelector(std::shared_ptr<Config> config)
     loadPolicies();
 }
 
-bool TransportSelector::matchesMemoryPattern(const std::string& pattern, MemoryType type) const {
+bool TransportSelector::matchesMemoryPattern(const std::string& pattern,
+                                             MemoryType type) const {
     if (pattern == kMemoryTypeWildcard) {
         return true;
     }
@@ -200,22 +198,34 @@ bool TransportSelector::matchesMemoryPattern(const std::string& pattern, MemoryT
     // Convert MemoryType to string for comparison
     std::string type_str;
     switch (type) {
-        case MTYPE_CPU:    type_str = kMemoryTypeCpu; break;
-        case MTYPE_CUDA:   type_str = kMemoryTypeCuda; break;
-        case MTYPE_ASCEND: type_str = kMemoryTypeNpu; break;  // "npu" for ascend
-        case MTYPE_HIP:    type_str = "hip"; break;
-        case MTYPE_MUSA:   type_str = "musa"; break;
-        case MTYPE_MACA:   type_str = "maca"; break;
-        default:           type_str = "unknown"; break;
+        case MTYPE_CPU:
+            type_str = kMemoryTypeCpu;
+            break;
+        case MTYPE_CUDA:
+            type_str = kMemoryTypeCuda;
+            break;
+        case MTYPE_ASCEND:
+            type_str = kMemoryTypeNpu;
+            break;  // "npu" for ascend
+        case MTYPE_HIP:
+            type_str = "hip";
+            break;
+        case MTYPE_MUSA:
+            type_str = "musa";
+            break;
+        case MTYPE_MACA:
+            type_str = "maca";
+            break;
+        default:
+            type_str = "unknown";
+            break;
     }
 
     return pattern == type_str;
 }
 
-bool TransportSelector::matchesPolicy(
-    const SelectionPolicy& policy,
-    const SelectionContext& context) const {
-
+bool TransportSelector::matchesPolicy(const SelectionPolicy& policy,
+                                      const SelectionContext& context) const {
     // Check segment type
     if (policy.segment_type != context.segment_type) {
         return false;
@@ -230,14 +240,16 @@ bool TransportSelector::matchesPolicy(
 
     // Check local memory pattern
     if (policy.local_memory_pattern.has_value()) {
-        if (!matchesMemoryPattern(policy.local_memory_pattern.value(), context.local_memory_type)) {
+        if (!matchesMemoryPattern(policy.local_memory_pattern.value(),
+                                  context.local_memory_type)) {
             return false;
         }
     }
 
     // Check remote memory pattern
     if (policy.remote_memory_pattern.has_value()) {
-        if (!matchesMemoryPattern(policy.remote_memory_pattern.value(), context.remote_memory_type)) {
+        if (!matchesMemoryPattern(policy.remote_memory_pattern.value(),
+                                  context.remote_memory_type)) {
             return false;
         }
     }
@@ -265,10 +277,9 @@ bool TransportSelector::matchesPolicy(
 }
 
 bool TransportSelector::isTransportAvailable(
-    TransportType type,
-    const SelectionContext& context,
-    const std::array<std::shared_ptr<Transport>, kSupportedTransportTypes>& available_transports) const {
-
+    TransportType type, const SelectionContext& context,
+    const std::array<std::shared_ptr<Transport>, kSupportedTransportTypes>&
+        available_transports) const {
     // Check if transport type is valid
     if (type < 0 || type >= kSupportedTransportTypes) {
         return false;
@@ -321,9 +332,9 @@ bool TransportSelector::isTransportAvailable(
 
 TransportType TransportSelector::select(
     const SelectionContext& context,
-    const std::array<std::shared_ptr<Transport>, kSupportedTransportTypes>& available_transports,
+    const std::array<std::shared_ptr<Transport>, kSupportedTransportTypes>&
+        available_transports,
     int priority_offset) {
-
     // Reset cached device list
     last_rdma_device_names_.clear();
 
@@ -340,7 +351,8 @@ TransportType TransportSelector::select(
 
     if (!matching_policy) {
         LOG(WARNING) << "No matching transport policy for segment_type="
-                     << (context.segment_type == SegmentType::File ? "file" : "memory")
+                     << (context.segment_type == SegmentType::File ? "file"
+                                                                   : "memory")
                      << ", size=" << context.transfer_size
                      << ", priority_level=" << context.priority_level;
         return UNSPEC;
@@ -353,8 +365,13 @@ TransportType TransportSelector::select(
             TransportType type = matching_policy->priority[i];
             if (isTransportAvailable(type, context, available_transports)) {
                 if (priority_index-- <= 0) {
-                    std::string devices_str = last_rdma_device_names_.empty()
-                        ? "all" : "[" + std::to_string(last_rdma_device_names_.size()) + " devices]";
+                    std::string devices_str =
+                        last_rdma_device_names_.empty()
+                            ? "all"
+                            : "[" +
+                                  std::to_string(
+                                      last_rdma_device_names_.size()) +
+                                  " devices]";
                     VLOG(1) << "Selected transport " << transportTypeName(type)
                             << " for policy " << matching_policy->name
                             << ", rdma_devices=" << devices_str;
@@ -370,8 +387,13 @@ TransportType TransportSelector::select(
         for (auto type : *context.buffer_transports) {
             if (isTransportAvailable(type, context, available_transports)) {
                 if (priority_offset-- <= 0) {
-                    std::string devices_str = last_rdma_device_names_.empty()
-                        ? "all" : "[" + std::to_string(last_rdma_device_names_.size()) + " devices]";
+                    std::string devices_str =
+                        last_rdma_device_names_.empty()
+                            ? "all"
+                            : "[" +
+                                  std::to_string(
+                                      last_rdma_device_names_.size()) +
+                                  " devices]";
                     VLOG(1) << "Selected transport " << transportTypeName(type)
                             << " from buffer_transports"
                             << ", rdma_devices=" << devices_str;
@@ -384,5 +406,5 @@ TransportType TransportSelector::select(
     return UNSPEC;
 }
 
-} // namespace tent
-} // namespace mooncake
+}  // namespace tent
+}  // namespace mooncake

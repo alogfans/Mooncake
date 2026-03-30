@@ -66,14 +66,12 @@ struct PluginHandle {
 
 static std::unordered_map<TransportType, PluginHandle> g_loaded_plugins;
 
-static const char* PLUGIN_SEARCH_PATHS[] = {
-    "/usr/local/lib/tent/transport",
-    "/usr/lib/tent/transport",
-    "/opt/tent/lib/transport",
-    "./lib/tent/transport",
-    "./lib",
-    nullptr
-};
+static const char* PLUGIN_SEARCH_PATHS[] = {"/usr/local/lib/tent/transport",
+                                            "/usr/lib/tent/transport",
+                                            "/opt/tent/lib/transport",
+                                            "./lib/tent/transport",
+                                            "./lib",
+                                            nullptr};
 
 static std::string detectPlatform() {
     static const char* libraries[] = {"libcuda.so", "libmusa.so",
@@ -94,7 +92,6 @@ static std::string detectPlatform() {
 
 static std::shared_ptr<Transport> tryLoadPlatformPlugin(
     const std::string& base_name, TransportType type, bool optional = true) {
-
     auto it = g_loaded_plugins.find(type);
     if (it != g_loaded_plugins.end() && it->second.create_func) {
         return it->second.create_func();
@@ -220,7 +217,7 @@ Status TransferEngineImpl::loadTransports() {
     }
 #endif
 
-#else  // TENT_PLUGIN_TRANSPORTS
+#else   // TENT_PLUGIN_TRANSPORTS
     // --------------------------------------------------------------------
     // PLUGIN MODE: Dynamic loading via dlopen
     // --------------------------------------------------------------------
@@ -268,5 +265,5 @@ void TransferEngineImpl::unloadPlugins() {
 }
 #endif
 
-} // namespace tent
-} // namespace mooncake
+}  // namespace tent
+}  // namespace mooncake

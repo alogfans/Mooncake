@@ -145,7 +145,8 @@ Platform::Platform(std::shared_ptr<Config> config) : config_(config) {
 Platform::~Platform() = default;
 
 // Forward declare the extern "C" factory function from backend.cpp
-extern "C" std::shared_ptr<mooncake::tent::IPlatformBackend> CreatePlatformBackend();
+extern "C" std::shared_ptr<mooncake::tent::IPlatformBackend>
+CreatePlatformBackend();
 
 Status Platform::loadBackend() {
 #ifdef TENT_BUILTIN_TRANSPORTS
@@ -156,7 +157,8 @@ Status Platform::loadBackend() {
         if (status.ok()) {
             LOG(INFO) << "Using builtin platform backend: " << backend_->name();
         } else {
-            LOG(WARNING) << "Builtin backend init failed: " << status.ToString();
+            LOG(WARNING) << "Builtin backend init failed: "
+                         << status.ToString();
             backend_.reset();
         }
     }
@@ -164,8 +166,9 @@ Status Platform::loadBackend() {
 #else
     // PLUGIN mode: Try to load platform backend plugins
     std::vector<std::string> platforms = {
-        "libtent_platform_cuda", "libtent_platform_musa",   "libtent_platform_hip",
-        "libtent_platform_maca", "libtent_platform_ascend", "libtent_platform_cpu",
+        "libtent_platform_cuda",   "libtent_platform_musa",
+        "libtent_platform_hip",    "libtent_platform_maca",
+        "libtent_platform_ascend", "libtent_platform_cpu",
     };
 
     const char* search_paths[] = {

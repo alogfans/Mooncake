@@ -25,8 +25,8 @@
  *       "name": "high_prio_fast",
  *       "segment_type": "memory",
  *       "min_priority": 5,
- *       "rdma_device_names": ["mlx5_0", "mlx5_1", "mlx5_2", "mlx5_3", "mlx5_4", "mlx5_5"],
- *       "priority": ["nvlink", "rdma", "shm"]
+ *       "rdma_device_names": ["mlx5_0", "mlx5_1", "mlx5_2", "mlx5_3", "mlx5_4",
+ * "mlx5_5"], "priority": ["nvlink", "rdma", "shm"]
  *     },
  *     {
  *       "name": "low_prio_slow",
@@ -76,13 +76,14 @@ class Transport;
  * @brief Selection context for a single request
  */
 struct SelectionContext {
-    SegmentType segment_type;           // File or Memory
-    bool same_machine;                  // Local or remote
-    MemoryType local_memory_type;       // CPU, CUDA, etc.
-    MemoryType remote_memory_type;      // CPU, CUDA, etc. (for remote)
-    const std::vector<TransportType>* buffer_transports;  // Pointer to transports in buffer
-    size_t transfer_size;               // Transfer size in bytes
-    int priority_level;                 // Request priority level (higher = more urgent)
+    SegmentType segment_type;       // File or Memory
+    bool same_machine;              // Local or remote
+    MemoryType local_memory_type;   // CPU, CUDA, etc.
+    MemoryType remote_memory_type;  // CPU, CUDA, etc. (for remote)
+    const std::vector<TransportType>*
+        buffer_transports;  // Pointer to transports in buffer
+    size_t transfer_size;   // Transfer size in bytes
+    int priority_level;     // Request priority level (higher = more urgent)
 };
 
 /**
@@ -96,15 +97,16 @@ struct SelectionPolicy {
     SegmentType segment_type;
 
     // Location filter
-    std::optional<bool> same_machine;   // nullopt = don't care
+    std::optional<bool> same_machine;  // nullopt = don't care
 
-    // Memory type filters (supports patterns: "cuda", "cpu", "npu", "*" for any)
+    // Memory type filters (supports patterns: "cuda", "cpu", "npu", "*" for
+    // any)
     std::optional<std::string> local_memory_pattern;
     std::optional<std::string> remote_memory_pattern;
 
     // Size filter (nullopt = no limit)
-    std::optional<uint64_t> min_size;   // Minimum transfer size
-    std::optional<uint64_t> max_size;   // Maximum transfer size
+    std::optional<uint64_t> min_size;  // Minimum transfer size
+    std::optional<uint64_t> max_size;  // Maximum transfer size
 
     // Priority filter: match requests with priority >= min_priority
     // nullopt = match any priority level
@@ -123,26 +125,30 @@ struct SelectionPolicy {
  * @brief Configuration-driven transport selector
  */
 class TransportSelector {
-public:
+   public:
     TransportSelector(std::shared_ptr<Config> config);
 
     /**
      * @brief Select the best transport for a given context
      * @param context Selection context
-     * @param available_transports Array of available transports (indexed by TransportType)
+     * @param available_transports Array of available transports (indexed by
+     * TransportType)
      * @param priority_offset Priority offset for fallback (0 = first choice)
      * @return Selected transport type, or UNSPEC if none available
      */
     TransportType select(
         const SelectionContext& context,
-        const std::array<std::shared_ptr<Transport>, kSupportedTransportTypes>& available_transports,
+        const std::array<std::shared_ptr<Transport>, kSupportedTransportTypes>&
+            available_transports,
         int priority_offset = 0);
 
     /**
      * @brief Get the RDMA device names for the last selected policy
      * @return Vector of device names, empty if no restriction
      */
-    const std::vector<std::string>& getRdmaDeviceNames() const { return last_rdma_device_names_; }
+    const std::vector<std::string>& getRdmaDeviceNames() const {
+        return last_rdma_device_names_;
+    }
 
     /**
      * @brief Parse transport type from string
@@ -154,10 +160,11 @@ public:
      */
     static std::string transportTypeName(TransportType type);
 
-private:
+   private:
     std::vector<SelectionPolicy> policies_;
     std::shared_ptr<Config> config_;
-    std::vector<std::string> last_rdma_device_names_;  // Cached from last selection
+    std::vector<std::string>
+        last_rdma_device_names_;  // Cached from last selection
 
     /**
      * @brief Load policies from configuration
@@ -167,20 +174,22 @@ private:
     /**
      * @brief Check if a policy matches the context
      */
-    bool matchesPolicy(const SelectionPolicy& policy, const SelectionContext& context) const;
+    bool matchesPolicy(const SelectionPolicy& policy,
+                       const SelectionContext& context) const;
 
     /**
      * @brief Check if memory type matches pattern
      */
-    bool matchesMemoryPattern(const std::string& pattern, MemoryType type) const;
+    bool matchesMemoryPattern(const std::string& pattern,
+                              MemoryType type) const;
 
     /**
      * @brief Check if transport is available for the context
      */
     bool isTransportAvailable(
-        TransportType type,
-        const SelectionContext& context,
-        const std::array<std::shared_ptr<Transport>, kSupportedTransportTypes>& available_transports) const;
+        TransportType type, const SelectionContext& context,
+        const std::array<std::shared_ptr<Transport>, kSupportedTransportTypes>&
+            available_transports) const;
 
     /**
      * @brief Get default policies (used when no config provided)
@@ -188,7 +197,7 @@ private:
     static std::vector<SelectionPolicy> getDefaultPolicies();
 };
 
-} // namespace tent
-} // namespace mooncake
+}  // namespace tent
+}  // namespace mooncake
 
 #endif  // TENT_TRANSPORT_SELECTOR_H
