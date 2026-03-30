@@ -3,15 +3,31 @@
 # 2. tent_runtime - Rest of runtime (depends on transports)
 
 # Platform library - used by both transports and runtime
-add_library(tent_platform STATIC
-    platform.cpp
-    slab.cpp
-    topology.cpp
-    segment.cpp
-    segment_manager.cpp
-    segment_registry.cpp
-    metastore.cpp
-)
+# In BUILTIN mode, include backend.cpp from platform/ for static linking
+if(TENT_USE_PLUGINS)
+    set(PLATFORM_SOURCES
+        platform.cpp
+        slab.cpp
+        topology.cpp
+        segment.cpp
+        segment_manager.cpp
+        segment_registry.cpp
+        metastore.cpp
+    )
+else()
+    set(PLATFORM_SOURCES
+        platform.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../platform/backend.cpp
+        slab.cpp
+        topology.cpp
+        segment.cpp
+        segment_manager.cpp
+        segment_registry.cpp
+        metastore.cpp
+    )
+endif()
+
+add_library(tent_platform STATIC ${PLATFORM_SOURCES})
 
 if (TARGET metastore_redis)
   add_definitions(-DUSE_REDIS)
@@ -30,6 +46,15 @@ endif()
 
 target_link_libraries(tent_platform PUBLIC numa tent_common)
 
+# Define build mode for platform.cpp
+if(TENT_USE_PLUGINS)
+    target_compile_definitions(tent_platform PRIVATE TENT_PLUGIN_TRANSPORTS)
+    message(STATUS "Platform: PLUGIN mode (dlopen loading)")
+else()
+    target_compile_definitions(tent_platform PRIVATE TENT_BUILTIN_TRANSPORTS)
+    message(STATUS "Platform: BUILTIN mode (static linking)")
+endif()
+
 # Rest of runtime (depends on transports)
 add_library(tent_runtime_impl STATIC
     control_plane.cpp
@@ -44,8 +69,10 @@ add_library(tent_runtime_impl STATIC
 # Define build mode for transport_loader.cpp
 if(TENT_USE_PLUGINS)
     target_compile_definitions(tent_runtime_impl PRIVATE TENT_PLUGIN_TRANSPORTS)
+    message(STATUS "Transport loader: PLUGIN mode (dlopen loading)")
 else()
     target_compile_definitions(tent_runtime_impl PRIVATE TENT_BUILTIN_TRANSPORTS)
+    message(STATUS "Transport loader: BUILTIN mode (static linking)")
 endif()
 
 target_link_libraries(tent_runtime_impl PUBLIC
@@ -62,4 +89,4 @@ add_library(tent_runtime ALIAS tent_runtime_impl)
 add_library(tent_runtime_all INTERFACE)
 target_link_libraries(tent_runtime_all INTERFACE tent_runtime_impl)
 
-message(STATUS "Runtime: ${TENT_BUILD_MODE} mode, transports statically linked")
+message(STATUS "Runtime library built, build mode: ${TENT_BUILD_MODE}")

@@ -82,7 +82,7 @@ std::vector<SelectionPolicy> TransportSelector::getDefaultPolicies() {
             std::nullopt,              // max_size
             std::nullopt,              // min_priority
             {},                        // rdma_device_ids (empty = all devices)
-            {GDS, IOURING, RDMA}       // File segment priority (original: GDS → IOURING)
+            {GDS, IOURING}             // File segment priority (original: GDS → IOURING)
         },
         {
             "memory_default",

@@ -144,8 +144,25 @@ Platform::Platform(std::shared_ptr<Config> config) : config_(config) {
 
 Platform::~Platform() = default;
 
+// Forward declare the extern "C" factory function from backend.cpp
+extern "C" std::shared_ptr<mooncake::tent::IPlatformBackend> CreatePlatformBackend();
+
 Status Platform::loadBackend() {
-    // Try to load platform backend plugins in order of preference
+#ifdef TENT_BUILTIN_TRANSPORTS
+    // BUILTIN mode: backend.cpp is statically linked with current platform
+    backend_ = CreatePlatformBackend();
+    if (backend_) {
+        auto status = backend_->initialize(config_);
+        if (status.ok()) {
+            LOG(INFO) << "Using builtin platform backend: " << backend_->name();
+        } else {
+            LOG(WARNING) << "Builtin backend init failed: " << status.ToString();
+            backend_.reset();
+        }
+    }
+    return Status::OK();
+#else
+    // PLUGIN mode: Try to load platform backend plugins
     std::vector<std::string> platforms = {
         "tent_platform_cuda", "tent_platform_musa",   "tent_platform_hip",
         "tent_platform_maca", "tent_platform_ascend",
@@ -180,14 +197,24 @@ Status Platform::loadBackend() {
 
     LOG(INFO) << "No platform backend plugin found, using CPU-only mode";
     return Status::OK();
+#endif
 }
 
 Status Platform::probe(std::vector<Topology::NicEntry>& nic_list,
                        std::vector<Topology::MemEntry>& mem_list) {
     if (backend_) {
-        return backend_->probe(nic_list, mem_list);
+        auto ret = backend_->probe(nic_list, mem_list);
+        if (!ret.ok()) return ret;
     }
-    return probeCpu(nic_list, mem_list);
+    // Always probe RDMA NICs (for CPU mode or when backend doesn't handle them)
+#ifdef USE_RDMA
+    auto detected_nic = listInfiniBandDevices();
+    filterInfiniBandDevices(detected_nic, config_);
+    for (auto& entry : detected_nic) nic_list.push_back(entry);
+#endif
+    insertFallbackMemEntry((int)nic_list.size(), mem_list);
+    discoverCpuTopology(nic_list, mem_list);
+    return Status::OK();
 }
 
 Status Platform::allocate(void** pptr, size_t size, MemoryOptions& options) {

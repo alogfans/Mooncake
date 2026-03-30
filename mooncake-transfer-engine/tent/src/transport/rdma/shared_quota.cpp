@@ -378,7 +378,7 @@ bool SharedQuotaManager::canSend(int dev_id, int priority) const {
 
     // Check if we're still in current timeslice
     if (now < ts.slice_end_ns.load(std::memory_order_relaxed))
-        return current_prio == priority;
+        return (int)current_prio == priority;
 
     // Timeslice ended, try to advance (non-blocking check)
     return false;  // Caller should call updateTimeslice

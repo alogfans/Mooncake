@@ -624,26 +624,6 @@ Status TransferEngineImpl::lazyFreeBatch() {
     return Status::OK();
 }
 
-static bool checkAvailability(const std::shared_ptr<Transport>& xport,
-                              MemoryType local) {
-    if (local == MTYPE_CPU) return xport && xport->capabilities().dram_to_file;
-    if (local == MTYPE_CUDA) return xport && xport->capabilities().gpu_to_file;
-    return false;
-}
-
-static bool checkAvailability(const std::shared_ptr<Transport>& xport,
-                              MemoryType local, MemoryType remote) {
-    if (local == MTYPE_CPU && remote == MTYPE_CPU)
-        return xport && xport->capabilities().dram_to_dram;
-    if (local == MTYPE_CUDA && remote == MTYPE_CUDA)
-        return xport && xport->capabilities().gpu_to_gpu;
-    if (local == MTYPE_CPU && remote == MTYPE_CUDA)
-        return xport && xport->capabilities().dram_to_gpu;
-    if (local == MTYPE_CUDA && remote == MTYPE_CPU)
-        return xport && xport->capabilities().gpu_to_dram;
-    return false;
-}
-
 static MemoryType getTypeEnum(const std::string& type) {
     if (type == "cpu" || type == "*") return MTYPE_CPU;
     if (type == "cuda") return MTYPE_CUDA;

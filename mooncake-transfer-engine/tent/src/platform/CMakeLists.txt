@@ -4,6 +4,9 @@
 # Set common include directory for all platform plugins
 set(TENT_PLATFORM_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../include)
 
+# Set output directory for plugins
+set(PLATFORM_PLUGIN_OUTPUT_DIR "${CMAKE_BINARY_DIR}/lib/tent/platform")
+
 file(GLOB BACKEND_SOURCES "*.cpp")
 
 # Find available platforms
@@ -25,6 +28,7 @@ if (CUDAToolkit_FOUND)
     )
     set_target_properties(tent_platform_cuda PROPERTIES
         OUTPUT_NAME "tent_platform_cuda"
+        LIBRARY_OUTPUT_DIRECTORY "${PLATFORM_PLUGIN_OUTPUT_DIR}"
     )
     install(TARGETS tent_platform_cuda LIBRARY DESTINATION lib/tent/platform)
     message(STATUS "  Platform plugin: CUDA")
@@ -41,6 +45,7 @@ if (USE_MUSA)
     target_link_libraries(tent_platform_musa PUBLIC musa musart numa)
     set_target_properties(tent_platform_musa PROPERTIES
         OUTPUT_NAME "tent_platform_musa"
+        LIBRARY_OUTPUT_DIRECTORY "${PLATFORM_PLUGIN_OUTPUT_DIR}"
     )
     install(TARGETS tent_platform_musa LIBRARY DESTINATION lib/tent/platform)
     message(STATUS "  Platform plugin: MUSA")
@@ -57,6 +62,7 @@ if (USE_HIP)
     target_link_libraries(tent_platform_hip PUBLIC amdhip64 numa)
     set_target_properties(tent_platform_hip PROPERTIES
         OUTPUT_NAME "tent_platform_hip"
+        LIBRARY_OUTPUT_DIRECTORY "${PLATFORM_PLUGIN_OUTPUT_DIR}"
     )
     install(TARGETS tent_platform_hip LIBRARY DESTINATION lib/tent/platform)
     message(STATUS "  Platform plugin: HIP")
@@ -73,6 +79,7 @@ if (USE_MACA)
     target_link_libraries(tent_platform_maca PUBLIC mcr numa)
     set_target_properties(tent_platform_maca PROPERTIES
         OUTPUT_NAME "tent_platform_maca"
+        LIBRARY_OUTPUT_DIRECTORY "${PLATFORM_PLUGIN_OUTPUT_DIR}"
     )
     install(TARGETS tent_platform_maca LIBRARY DESTINATION lib/tent/platform)
     message(STATUS "  Platform plugin: MACA")
@@ -89,6 +96,7 @@ if (USE_ASCEND OR USE_ASCEND_DIRECT)
     target_link_libraries(tent_platform_ascend PUBLIC ascendcl numa)
     set_target_properties(tent_platform_ascend PROPERTIES
         OUTPUT_NAME "tent_platform_ascend"
+        LIBRARY_OUTPUT_DIRECTORY "${PLATFORM_PLUGIN_OUTPUT_DIR}"
     )
     install(TARGETS tent_platform_ascend LIBRARY DESTINATION lib/tent/platform)
     message(STATUS "  Platform plugin: Ascend")
@@ -103,6 +111,7 @@ target_include_directories(tent_platform_cpu PUBLIC
 target_link_libraries(tent_platform_cpu PUBLIC numa)
 set_target_properties(tent_platform_cpu PROPERTIES
     OUTPUT_NAME "tent_platform_cpu"
+    LIBRARY_OUTPUT_DIRECTORY "${PLATFORM_PLUGIN_OUTPUT_DIR}"
 )
 install(TARGETS tent_platform_cpu LIBRARY DESTINATION lib/tent/platform)
 message(STATUS "  Platform plugin: CPU (fallback)")

@@ -179,9 +179,15 @@ Status TransferEngineImpl::loadTransports() {
     // STATIC MODE: Direct instantiation
     // --------------------------------------------------------------------
 #ifdef USE_RDMA
-    if (conf_->get("transports/rdma/enable", true) &&
-        topology_->getNicCount(Topology::NIC_RDMA)) {
+    int rdma_count = topology_->getNicCount(Topology::NIC_RDMA);
+    LOG(INFO) << "RDMA NIC count: " << rdma_count;
+    if (conf_->get("transports/rdma/enable", true) && rdma_count > 0) {
         transport_list_[RDMA] = std::make_shared<RdmaTransport>();
+        LOG(INFO) << "RDMA transport loaded";
+    } else {
+        LOG(WARNING) << "RDMA transport not loaded: enable="
+                     << conf_->get("transports/rdma/enable", true)
+                     << ", nic_count=" << rdma_count;
     }
 #endif
 
