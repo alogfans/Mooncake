@@ -41,6 +41,13 @@ add_library(tent_runtime_impl STATIC
     transport_selector.cpp
 )
 
+# Define build mode for transport_loader.cpp
+if(TENT_USE_PLUGINS)
+    target_compile_definitions(tent_runtime_impl PRIVATE TENT_PLUGIN_MODE)
+else()
+    target_compile_definitions(tent_runtime_impl PRIVATE TENT_STATIC_MODE)
+endif()
+
 target_link_libraries(tent_runtime_impl PUBLIC
     numa
     tent_common
@@ -55,4 +62,4 @@ add_library(tent_runtime ALIAS tent_runtime_impl)
 add_library(tent_runtime_all INTERFACE)
 target_link_libraries(tent_runtime_all INTERFACE tent_runtime_impl)
 
-message(STATUS "Runtime: Platform-independent core (no GPU dependencies)")
+message(STATUS "Runtime: ${TENT_BUILD_MODE} mode, transports statically linked")

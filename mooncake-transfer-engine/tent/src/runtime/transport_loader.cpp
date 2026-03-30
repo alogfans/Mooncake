@@ -12,29 +12,53 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-/**
- * @file transport_loader.cpp
- * @brief Platform-independent transport plugin loader
- *
- * This file contains NO platform-specific code. All transports are
- * loaded as plugins at runtime.
- */
-
 #include "tent/runtime/transfer_engine_impl.h"
 #include "tent/transport/shm/shm_transport.h"
 #include "tent/transport/tcp/tcp_transport.h"
 
+#ifdef TENT_STATIC_MODE
+// Static linking: include transport headers directly
+#ifdef USE_RDMA
+#include "tent/transport/rdma/rdma_transport.h"
+#endif
+
+#ifdef USE_CUDA
+#include "tent/transport/nvlink/nvlink_transport.h"
+#include "tent/transport/mnnvl/mnnvl_transport.h"
+#endif
+
+#ifdef USE_GDS
+#include "tent/transport/gds/gds_transport.h"
+#endif
+
+#ifdef USE_URING
+#include "tent/transport/io_uring/io_uring_transport.h"
+#endif
+
+#if defined(USE_ASCEND) || defined(USE_ASCEND_DIRECT)
+#include "tent/transport/ascend/ascend_direct_transport.h"
+#endif
+#endif  // TENT_STATIC_MODE
+
+#ifdef TENT_PLUGIN_MODE
+// Plugin mode: use dlopen to load transports
 #include <dlfcn.h>
 #include <glob.h>
 #include <glog/logging.h>
+#include <mutex>
+#endif
 
 namespace mooncake {
 namespace tent {
 
-// Function pointer type for transport creation
+#ifdef TENT_PLUGIN_MODE
+
+// ============================================================================
+// Plugin Mode Implementation
+// ============================================================================
+
 using CreateTransportFunc = std::shared_ptr<Transport> (*)();
 
-// Loaded plugin handles (for cleanup)
 struct PluginHandle {
     void* handle = nullptr;
     CreateTransportFunc create_func = nullptr;
@@ -42,39 +66,35 @@ struct PluginHandle {
 
 static std::unordered_map<TransportType, PluginHandle> g_loaded_plugins;
 
-// Platform detection - returns first available platform
+static const char* PLUGIN_SEARCH_PATHS[] = {
+    "/usr/local/lib/tent/transport",
+    "/usr/lib/tent/transport",
+    "/opt/tent/lib/transport",
+    "./lib/tent/transport",
+    "./lib",
+    nullptr
+};
+
 static std::string detectPlatform() {
-    // Detection order: CUDA -> MUSA -> HIP -> Ascend -> CPU
     static const char* libraries[] = {"libcuda.so", "libmusa.so",
                                       "libamdhip64.so", "libascendcl.so",
                                       nullptr};
-
-    static const char* platforms[] = {"cuda", "musa", "hip", "ascend", "cpu"};
-
     for (int i = 0; libraries[i] != nullptr; ++i) {
         void* handle = dlopen(libraries[i], RTLD_NOW | RTLD_NOLOAD);
         if (handle) {
             dlclose(handle);
-            return platforms[i];
+            if (i == 0) return "cuda";
+            if (i == 1) return "musa";
+            if (i == 2) return "hip";
+            if (i == 3) return "ascend";
         }
     }
     return "cpu";
 }
 
-// Plugin search paths
-static const char* PLUGIN_SEARCH_PATHS[] = {"/usr/local/lib/tent/transport",
-                                            "/usr/lib/tent/transport",
-                                            "/opt/tent/lib/transport",
-                                            "./lib/tent/transport",
-                                            "./lib",
-                                            nullptr};
-
-/**
- * @brief Try to find and load a platform-specific plugin
- */
 static std::shared_ptr<Transport> tryLoadPlatformPlugin(
     const std::string& base_name, TransportType type, bool optional = true) {
-    // Check if already loaded
+
     auto it = g_loaded_plugins.find(type);
     if (it != g_loaded_plugins.end() && it->second.create_func) {
         return it->second.create_func();
@@ -84,17 +104,14 @@ static std::shared_ptr<Transport> tryLoadPlatformPlugin(
     LOG(INFO) << "Detected platform: " << platform << " for transport "
               << base_name;
 
-    // List of library names to try, in priority order
     std::vector<std::string> lib_names = {
-        "libtent_" + base_name + "_" + platform + ".so",  // Platform-specific
-        "libtent_" + base_name + ".so",                   // Generic fallback
+        "libtent_" + base_name + "_" + platform + ".so",
+        "libtent_" + base_name + ".so",
     };
 
     for (const auto& lib_name : lib_names) {
-        // Try direct path first
         void* handle = dlopen(lib_name.c_str(), RTLD_NOW | RTLD_LOCAL);
 
-        // If not found, search in plugin directories
         if (!handle) {
             for (int i = 0; PLUGIN_SEARCH_PATHS[i] != nullptr; ++i) {
                 std::string full_path =
@@ -107,20 +124,12 @@ static std::shared_ptr<Transport> tryLoadPlatformPlugin(
             }
         }
 
-        if (!handle) {
-            continue;  // Try next library name
-        }
+        if (!handle) continue;
 
-        // Build symbol name: "CreateRdmaTransport", "CreateNvlinkTransport",
-        // etc.
         std::string symbol_name = "Create" + base_name;
-        // Capitalize first letter
-        if (!symbol_name.empty()) {
-            symbol_name[0] = toupper(symbol_name[0]);
-        }
+        if (!symbol_name.empty()) symbol_name[0] = toupper(symbol_name[0]);
         symbol_name += "Transport";
 
-        // Find the factory function
         auto create_func = reinterpret_cast<CreateTransportFunc>(
             dlsym(handle, symbol_name.c_str()));
 
@@ -128,10 +137,9 @@ static std::shared_ptr<Transport> tryLoadPlatformPlugin(
             dlclose(handle);
             LOG(WARNING) << "Plugin " << lib_name << " missing symbol "
                          << symbol_name;
-            continue;  // Try next library name
+            continue;
         }
 
-        // Success! Store the plugin handle
         PluginHandle plugin;
         plugin.handle = handle;
         plugin.create_func = create_func;
@@ -139,11 +147,9 @@ static std::shared_ptr<Transport> tryLoadPlatformPlugin(
 
         LOG(INFO) << "Loaded transport plugin: " << lib_name
                   << " (symbol=" << symbol_name << ")";
-
         return create_func();
     }
 
-    // All attempts failed
     if (optional) {
         LOG(INFO) << "Transport " << base_name
                   << " not available as plugin (tried platform=" << platform
@@ -154,75 +160,97 @@ static std::shared_ptr<Transport> tryLoadPlatformPlugin(
     return nullptr;
 }
 
-/**
- * @brief Load all transports as plugins
- *
- * All transports are loaded as plugins. No static linking fallback.
- * This ensures the core library is platform-independent.
- */
+#endif  // TENT_PLUGIN_MODE
+
+// ============================================================================
+// Common loadTransports implementation
+// ============================================================================
+
 Status TransferEngineImpl::loadTransports() {
-    // Built-in transports (platform-independent, always available)
+    // Built-in transports (always available)
     if (conf_->get("transports/tcp/enable", true))
         transport_list_[TCP] = std::make_shared<TcpTransport>();
 
     if (conf_->get("transports/shm/enable", false))
         transport_list_[SHM] = std::make_shared<ShmTransport>();
 
-    // Load all optional transports as plugins
-    // These are platform-specific and loaded at runtime
+#ifdef TENT_STATIC_MODE
+    // --------------------------------------------------------------------
+    // STATIC MODE: Direct instantiation
+    // --------------------------------------------------------------------
+#ifdef USE_RDMA
+    if (conf_->get("transports/rdma/enable", true) &&
+        topology_->getNicCount(Topology::NIC_RDMA)) {
+        transport_list_[RDMA] = std::make_shared<RdmaTransport>();
+    }
+#endif
 
-    // RDMA transport
+#ifdef USE_URING
+    if (conf_->get("transports/io_uring/enable", true))
+        transport_list_[IOURING] = std::make_shared<IOUringTransport>();
+#endif
+
+#ifdef USE_CUDA
+    bool enable_mnnvl = getenv("MC_ENABLE_MNNVL") != nullptr;
+    if (enable_mnnvl) {
+        if (conf_->get("transports/mnnvl/enable", true))
+            transport_list_[MNNVL] = std::make_shared<MnnvlTransport>();
+    } else {
+        if (conf_->get("transports/nvlink/enable", true))
+            transport_list_[NVLINK] = std::make_shared<NVLinkTransport>();
+    }
+#endif
+
+#ifdef USE_GDS
+    if (conf_->get("transports/gds/enable", false))
+        transport_list_[GDS] = std::make_shared<GdsTransport>();
+#endif
+
+#if defined(USE_ASCEND) || defined(USE_ASCEND_DIRECT)
+    if (conf_->get("transports/ascend_direct/enable", true)) {
+        transport_list_[AscendDirect] =
+            std::make_shared<AscendDirectTransport>();
+    }
+#endif
+
+#else  // TENT_PLUGIN_MODE
+    // --------------------------------------------------------------------
+    // PLUGIN MODE: Dynamic loading via dlopen
+    // --------------------------------------------------------------------
     if (conf_->get("transports/rdma/enable", true)) {
         auto rdma = tryLoadPlatformPlugin("rdma", RDMA, true);
-        if (rdma) {
-            transport_list_[RDMA] = rdma;
-        }
+        if (rdma) transport_list_[RDMA] = rdma;
     }
 
-    // IOUring transport
     if (conf_->get("transports/io_uring/enable", true)) {
         auto iouring = tryLoadPlatformPlugin("iouring", IOURING, true);
-        if (iouring) {
-            transport_list_[IOURING] = iouring;
-        }
+        if (iouring) transport_list_[IOURING] = iouring;
     }
 
-    // NVLink/MNNVL transport
     bool enable_mnnvl = getenv("MC_ENABLE_MNNVL") != nullptr;
     if (enable_mnnvl) {
         auto mnnvl = tryLoadPlatformPlugin("mnnvl", MNNVL, true);
-        if (mnnvl) {
-            transport_list_[MNNVL] = mnnvl;
-        }
+        if (mnnvl) transport_list_[MNNVL] = mnnvl;
     } else {
         auto nvlink = tryLoadPlatformPlugin("nvlink", NVLINK, true);
-        if (nvlink) {
-            transport_list_[NVLINK] = nvlink;
-        }
+        if (nvlink) transport_list_[NVLINK] = nvlink;
     }
 
-    // GDS transport
     if (conf_->get("transports/gds/enable", false)) {
         auto gds = tryLoadPlatformPlugin("gds", GDS, true);
-        if (gds) {
-            transport_list_[GDS] = gds;
-        }
+        if (gds) transport_list_[GDS] = gds;
     }
 
-    // AscendDirect transport
     if (conf_->get("transports/ascend_direct/enable", true)) {
         auto ascend = tryLoadPlatformPlugin("ascend", AscendDirect, true);
-        if (ascend) {
-            transport_list_[AscendDirect] = ascend;
-        }
+        if (ascend) transport_list_[AscendDirect] = ascend;
     }
+#endif  // TENT_STATIC_MODE
 
     return Status::OK();
 }
 
-/**
- * @brief Cleanup loaded plugins on shutdown
- */
+#ifdef TENT_PLUGIN_MODE
 void TransferEngineImpl::unloadPlugins() {
     for (auto& kv : g_loaded_plugins) {
         if (kv.second.handle) {
@@ -231,6 +259,7 @@ void TransferEngineImpl::unloadPlugins() {
     }
     g_loaded_plugins.clear();
 }
+#endif
 
-}  // namespace tent
-}  // namespace mooncake
+} // namespace tent
+} // namespace mooncake

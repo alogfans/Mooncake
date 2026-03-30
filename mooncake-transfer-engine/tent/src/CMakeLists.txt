@@ -64,16 +64,32 @@ if (NOT TARGET ${YALANTING_TARGET})
     find_package(yalantinglibs CONFIG REQUIRED)
 endif()
 
+# ============================================================================
 # Build mode selection
-option(TENT_BUILD_STATIC "Build with static linking (platform-specific)" ON)
-option(TENT_BUILD_DYNAMIC "Build with dynamic plugins (platform-independent)" OFF)
+# ============================================================================
+# Three modes:
+#   static  - Pure static library (libtent.a), all transports linked
+#   shared  - Single shared library (libtent.so), all transports linked
+#   plugin  - Shared library (libtent.so) + transport plugins (*.so)
 
-if(TENT_BUILD_DYNAMIC)
-    message(STATUS "TENT Build Mode: DYNAMIC (platform-independent core + plugins)")
+set(TENT_BUILD_MODE "static" CACHE STRING "TENT build mode: static, shared, or plugin")
+set_property(CACHE TENT_BUILD_MODE PROPERTY STRINGS "static;shared;plugin")
+
+if(TENT_BUILD_MODE STREQUAL "plugin")
+    # Mode 3: Plugin mode - core .so + transport plugins
+    message(STATUS "TENT Build Mode: PLUGIN (libtent.so + transport_*.so)")
     set(TENT_USE_PLUGINS ON)
-else()
-    message(STATUS "TENT Build Mode: STATIC (platform-specific, all linked)")
+    set(TENT_BUILD_SHARED ON)
+elseif(TENT_BUILD_MODE STREQUAL "shared")
+    # Mode 2: Shared mode - single .so with all transports
+    message(STATUS "TENT Build Mode: SHARED (libtent.so with all transports)")
     set(TENT_USE_PLUGINS OFF)
+    set(TENT_BUILD_SHARED ON)
+else()
+    # Mode 1: Static mode (default)
+    message(STATUS "TENT Build Mode: STATIC (libtent.a with all transports)")
+    set(TENT_USE_PLUGINS OFF)
+    set(TENT_BUILD_SHARED OFF)
 endif()
 
 add_subdirectory(common)
@@ -87,6 +103,7 @@ add_subdirectory(python)
 
 file(GLOB TENT_ENGINE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp")
 
+# Always build static library (used by tests and examples)
 add_library(tent STATIC ${TENT_ENGINE_SOURCES})
 target_link_libraries(
     tent
@@ -95,15 +112,17 @@ target_link_libraries(
         tent_interface
 )
 
-add_library(tent_shared SHARED ${TENT_ENGINE_SOURCES})
-target_link_libraries(
-    tent_shared
-    PUBLIC
-        tent_runtime
-        tent_interface
-)
-
-install(TARGETS tent_shared
-    ARCHIVE DESTINATION lib
-    LIBRARY DESTINATION lib
-    RUNTIME DESTINATION bin)
+# Build shared library in shared/plugin modes
+if(TENT_BUILD_SHARED)
+    add_library(tent_shared SHARED ${TENT_ENGINE_SOURCES})
+    target_link_libraries(
+        tent_shared
+        PUBLIC
+            tent_runtime
+            tent_interface
+    )
+    install(TARGETS tent_shared
+        ARCHIVE DESTINATION lib
+        LIBRARY DESTINATION lib
+        RUNTIME DESTINATION bin)
+endif()

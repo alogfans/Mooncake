@@ -305,8 +305,10 @@ Status TransferEngineImpl::deconstruct() {
         entry.freelist.clear();
     });
 
+#ifdef TENT_PLUGIN_MODE
     // Unload dynamically loaded plugins before destroying transports
     unloadPlugins();
+#endif
 
     // Now safe to destroy transports (workers join here)
     for (auto& transport : transport_list_) transport.reset();
