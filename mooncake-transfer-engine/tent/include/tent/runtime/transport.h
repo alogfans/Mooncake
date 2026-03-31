@@ -45,9 +45,12 @@ struct Capabilities {
 class Transport {
    public:
     struct SubBatch {
-        SubBatch() {}
+        SubBatch() : device_mask(~0ULL) {}
         virtual ~SubBatch() {}
         virtual size_t size() const = 0;
+
+        // Bitmask of allowed devices (~0 = all devices)
+        uint64_t device_mask;
     };
 
     using SubBatchRef = SubBatch *;

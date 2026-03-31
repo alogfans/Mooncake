@@ -196,6 +196,7 @@ Status TransferEngineImpl::construct() {
 
     // Initialize transport selector
     transport_selector_ = std::make_unique<TransportSelector>(conf_);
+    transport_selector_->setTopology(topology_);
 
     CHECK_STATUS(loadTransports());
 
@@ -634,15 +635,15 @@ static MemoryType getTypeEnum(const std::string& type) {
     return MTYPE_UNKNOWN;
 }
 
-TransportType TransferEngineImpl::getTransportType(const Request& request,
-                                                   int priority) {
+SelectionResult TransferEngineImpl::getTransportType(const Request& request,
+                                                     int fallback_index) {
     SegmentDesc* desc;
     if (request.target_id == LOCAL_SEGMENT_ID) {
         desc = metadata_->segmentManager().getLocal().get();
     } else {
         auto status = metadata_->segmentManager().getRemoteCached(
             desc, request.target_id);
-        if (!status.ok()) return UNSPEC;
+        if (!status.ok()) return SelectionResult{};
     }
     auto local_mtype = Platform::getLoader().getMemoryType(request.source);
 
@@ -659,11 +660,12 @@ TransportType TransferEngineImpl::getTransportType(const Request& request,
         ctx.remote_memory_type = MTYPE_CPU;
         ctx.buffer_transports = nullptr;  // Empty - use policy priority
 
-        return transport_selector_->select(ctx, transport_list_, priority);
+        return transport_selector_->select(ctx, transport_list_,
+                                           fallback_index);
     } else {
         // Memory segment
         auto entry = desc->findBuffer(request.target_offset, request.length);
-        if (!entry) return UNSPEC;
+        if (!entry) return SelectionResult{};
         bool same_machine =
             (desc->machine_id ==
              metadata_->segmentManager().getLocal()->machine_id);
@@ -675,7 +677,8 @@ TransportType TransferEngineImpl::getTransportType(const Request& request,
         ctx.remote_memory_type = remote_mtype;
         ctx.buffer_transports = &entry->transports;
 
-        return transport_selector_->select(ctx, transport_list_, priority);
+        return transport_selector_->select(ctx, transport_list_,
+                                           fallback_index);
     }
 }
 
@@ -907,15 +910,15 @@ void TransferEngineImpl::findStagingPolicy(const Request& request,
     }
 }
 
-TransportType TransferEngineImpl::resolveTransport(const Request& req,
-                                                   int priority,
-                                                   bool invalidate_on_fail) {
-    auto type = getTransportType(req, priority);
-    if (type == UNSPEC && invalidate_on_fail) {
+SelectionResult TransferEngineImpl::resolveTransport(const Request& req,
+                                                     int fallback_index,
+                                                     bool invalidate_on_fail) {
+    auto result = getTransportType(req, fallback_index);
+    if (result.transport == UNSPEC && invalidate_on_fail) {
         metadata_->segmentManager().invalidateRemote(req.target_id);
-        type = getTransportType(req, priority);
+        result = getTransportType(req, fallback_index);
     }
-    return type;
+    return result;
 }
 
 Status TransferEngineImpl::submitTransfer(
@@ -953,7 +956,7 @@ Status TransferEngineImpl::submitTransfer(
             continue;
         }
 
-        task.xport_priority = 0;
+        task.fallback_index = 0;
         task.priority =
             std::clamp(merged_request.priority, 0, NUM_PRIORITIES - 1);
         task.status = PENDING;
@@ -961,7 +964,11 @@ Status TransferEngineImpl::submitTransfer(
         task.staging = false;
         task.start_time =
             submit_time;  // Record start time for latency tracking
-        task.type = resolveTransport(merged_request, 0);
+
+        auto select_result = resolveTransport(merged_request, 0);
+        task.type = select_result.transport;
+        task.device_mask = select_result.device_mask;
+
         if (task.type == UNSPEC) {
             LOG(WARNING) << "Unable to find registered buffer for request: "
                          << printRequest(merged_request);
@@ -1007,6 +1014,15 @@ Status TransferEngineImpl::submitTransfer(
         if (classified_request_list[type].empty()) continue;
         auto& transport = transport_list_[type];
         auto& sub_batch = batch->sub_batch[type];
+
+        // Set device_mask on SubBatch for RDMA transport
+        if (type == RDMA && !task_id_list[type].empty()) {
+            // Use the device_mask from the first task (all tasks in this batch
+            // should have the same policy)
+            sub_batch->device_mask =
+                batch->task_list[task_id_list[type][0]].device_mask;
+        }
+
         auto status = transport->submitTransferTasks(
             sub_batch, classified_request_list[type]);
         if (!status.ok()) {
@@ -1076,8 +1092,9 @@ Status TransferEngineImpl::resubmitTransferTask(Batch* batch, size_t task_id) {
     if (task.staging)
         task.staging = false;
     else
-        task.xport_priority++;
-    auto type = resolveTransport(task.request, task.xport_priority);
+        task.fallback_index++;
+    auto result = resolveTransport(task.request, task.fallback_index);
+    auto type = result.transport;
     if (type == UNSPEC)
         return Status::InvalidEntry("All available transports are failed");
 
@@ -1088,6 +1105,7 @@ Status TransferEngineImpl::resubmitTransferTask(Batch* batch, size_t task_id) {
     auto& sub_batch = batch->sub_batch[type];
     task.sub_task_id = sub_batch->size();
     task.type = type;
+    task.device_mask = result.device_mask;
     return transport->submitTransferTasks(sub_batch, {task.request});
 }
 

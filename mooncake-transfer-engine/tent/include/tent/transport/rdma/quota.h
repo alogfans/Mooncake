@@ -130,7 +130,8 @@ class DeviceQuota {
     }
 
     Status allocate(uint64_t length, const std::string &location,
-                    int &chosen_dev_id, int priority = 0);
+                    int &chosen_dev_id, int priority = 0,
+                    uint64_t device_mask = ~0ULL);
 
     Status release(int dev_id, uint64_t length, double latency,
                    int priority = 0);

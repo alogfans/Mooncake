@@ -301,6 +301,7 @@ Status RdmaTransport::submitTransferTasks(
             slice->length = length;
             slice->task = &task;
             slice->priority = request.priority;
+            slice->device_mask = rdma_batch->device_mask;
             slice->retry_count = 0;
             slice->ep_weak_ptr = nullptr;
             slice->word = PENDING;

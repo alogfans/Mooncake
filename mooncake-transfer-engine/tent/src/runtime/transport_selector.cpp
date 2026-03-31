@@ -71,7 +71,7 @@ std::vector<SelectionPolicy> TransportSelector::getDefaultPolicies() {
             std::nullopt,   // remote_memory_pattern
             std::nullopt,   // min_size
             std::nullopt,   // max_size
-            std::nullopt,   // min_priority
+            std::nullopt,   // priority
             {},             // rdma_device_ids (empty = all devices)
             {GDS, IOURING}  // File segment priority (original: GDS → IOURING)
         },
@@ -147,32 +147,31 @@ void TransportSelector::loadPolicies() {
             policy.max_size = policy_json["max_size"].get<uint64_t>();
         }
 
-        // Parse min_priority filter (optional)
-        if (policy_json.contains("min_priority")) {
-            policy.min_priority = policy_json["min_priority"].get<int>();
+        // Parse priority filter (optional)
+        if (policy_json.contains("priority")) {
+            policy.priority = policy_json["priority"].get<int>();
         } else {
-            policy.min_priority = std::nullopt;
+            policy.priority = std::nullopt;
         }
 
-        // Parse rdma_device_names (optional)
-        if (policy_json.contains("rdma_device_names")) {
-            for (const auto& device_name : policy_json["rdma_device_names"]) {
+        // Parse devices (optional)
+        if (policy_json.contains("devices")) {
+            for (const auto& device_name : policy_json["devices"]) {
                 if (device_name.is_string()) {
-                    policy.rdma_device_names.push_back(
-                        device_name.get<std::string>());
+                    policy.devices.push_back(device_name.get<std::string>());
                 }
             }
         }
 
-        // Parse priority list
-        policy.priority.clear();
-        if (policy_json.contains("priority")) {
-            for (const auto& transport_str : policy_json["priority"]) {
+        // Parse transports list
+        policy.transports.clear();
+        if (policy_json.contains("transports")) {
+            for (const auto& transport_str : policy_json["transports"]) {
                 if (!transport_str.is_string()) continue;
                 TransportType type =
                     parseTransportType(transport_str.get<std::string>());
                 if (type != UNSPEC) {
-                    policy.priority.push_back(type);
+                    policy.transports.push_back(type);
                 }
             }
         }
@@ -180,7 +179,7 @@ void TransportSelector::loadPolicies() {
         policies_.push_back(std::move(policy));
         LOG(INFO) << "Loaded transport policy: " << policy.name
                   << " (segment_type=" << segment_type_str
-                  << ", priority_count=" << policy.priority.size() << ")";
+                  << ", transports_count=" << policy.transports.size() << ")";
     }
 }
 
@@ -266,9 +265,9 @@ bool TransportSelector::matchesPolicy(const SelectionPolicy& policy,
         }
     }
 
-    // Check min_priority constraint: request priority must be >= min_priority
-    if (policy.min_priority.has_value()) {
-        if (context.priority_level < policy.min_priority.value()) {
+    // Check priority constraint: exact match required
+    if (policy.priority.has_value()) {
+        if (context.priority_level != policy.priority.value()) {
             return false;
         }
     }
@@ -330,22 +329,19 @@ bool TransportSelector::isTransportAvailable(
     return false;
 }
 
-TransportType TransportSelector::select(
+SelectionResult TransportSelector::select(
     const SelectionContext& context,
     const std::array<std::shared_ptr<Transport>, kSupportedTransportTypes>&
         available_transports,
     int priority_offset) {
-    // Reset cached device list
-    last_rdma_device_names_.clear();
+    SelectionResult result;
 
-    // Find the first matching policy
+    // Find the first matching policy (JSON order wins)
     const SelectionPolicy* matching_policy = nullptr;
     for (const auto& policy : policies_) {
         if (matchesPolicy(policy, context)) {
             matching_policy = &policy;
-            // Cache the device list from the matched policy
-            last_rdma_device_names_ = matching_policy->rdma_device_names;
-            break;
+            break;  // First match wins
         }
     }
 
@@ -355,31 +351,43 @@ TransportType TransportSelector::select(
                                                                    : "memory")
                      << ", size=" << context.transfer_size
                      << ", priority_level=" << context.priority_level;
-        return UNSPEC;
+        return result;  // UNSPEC, all devices
     }
 
-    // If policy has priority list, use it
-    if (!matching_policy->priority.empty()) {
+    // Convert device names to mask
+    result.device_mask = ~0ULL;  // Default: all devices
+    if (!matching_policy->devices.empty() && topology_) {
+        result.device_mask = 0;
+        for (const auto& name : matching_policy->devices) {
+            int dev_id = topology_->getNicId(name);
+            if (dev_id >= 0 && dev_id < 64) {
+                result.device_mask |= (1ULL << dev_id);
+            } else {
+                LOG(WARNING) << "RDMA device not found or ID >= 64: " << name;
+            }
+        }
+        if (result.device_mask == 0) {
+            result.device_mask = ~0ULL;  // Fallback to all if none found
+        }
+    }
+
+    // If policy has transports list, use it
+    if (!matching_policy->transports.empty()) {
         int priority_index = priority_offset;
-        for (size_t i = 0; i < matching_policy->priority.size(); ++i) {
-            TransportType type = matching_policy->priority[i];
+        for (size_t i = 0; i < matching_policy->transports.size(); ++i) {
+            TransportType type = matching_policy->transports[i];
             if (isTransportAvailable(type, context, available_transports)) {
                 if (priority_index-- <= 0) {
-                    std::string devices_str =
-                        last_rdma_device_names_.empty()
-                            ? "all"
-                            : "[" +
-                                  std::to_string(
-                                      last_rdma_device_names_.size()) +
-                                  " devices]";
+                    result.transport = type;
                     VLOG(1) << "Selected transport " << transportTypeName(type)
                             << " for policy " << matching_policy->name
-                            << ", rdma_devices=" << devices_str;
-                    return type;
+                            << ", device_mask=0x" << std::hex
+                            << result.device_mask << std::dec;
+                    return result;
                 }
             }
         }
-        return UNSPEC;
+        return result;  // UNSPEC
     }
 
     // Otherwise, use buffer_transports order (original behavior)
@@ -387,23 +395,18 @@ TransportType TransportSelector::select(
         for (auto type : *context.buffer_transports) {
             if (isTransportAvailable(type, context, available_transports)) {
                 if (priority_offset-- <= 0) {
-                    std::string devices_str =
-                        last_rdma_device_names_.empty()
-                            ? "all"
-                            : "[" +
-                                  std::to_string(
-                                      last_rdma_device_names_.size()) +
-                                  " devices]";
+                    result.transport = type;
                     VLOG(1) << "Selected transport " << transportTypeName(type)
                             << " from buffer_transports"
-                            << ", rdma_devices=" << devices_str;
-                    return type;
+                            << ", device_mask=0x" << std::hex
+                            << result.device_mask << std::dec;
+                    return result;
                 }
             }
         }
     }
 
-    return UNSPEC;
+    return result;
 }
 
 }  // namespace tent

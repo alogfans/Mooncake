@@ -50,9 +50,10 @@ class ProxyManager;
 struct TaskInfo {
     TransportType type{UNSPEC};
     int sub_task_id{-1};
-    bool derived{false};      // merged by other tasks
-    int xport_priority{0};    // for transport fallback
-    int priority{PRIO_HIGH};  // QoS priority
+    bool derived{false};          // merged by other tasks
+    int fallback_index{0};        // transport fallback index
+    int priority{PRIO_HIGH};      // QoS priority
+    uint64_t device_mask{~0ULL};  // Device mask for quota allocation
     Request request;
     bool staging{false};
     TransferStatusEnum status{TransferStatusEnum::PENDING};
@@ -166,15 +167,16 @@ class TransferEngineImpl {
 
     Status lazyFreeBatch();
 
-    TransportType getTransportType(const Request& request, int priority = 0);
+    SelectionResult getTransportType(const Request& request,
+                                     int fallback_index = 0);
 
     std::vector<TransportType> getSupportedTransports(
         TransportType request_type);
 
     Status resubmitTransferTask(Batch* batch, size_t task_id);
 
-    TransportType resolveTransport(const Request& req, int priority,
-                                   bool invalidate_on_fail = true);
+    SelectionResult resolveTransport(const Request& req, int fallback_index,
+                                     bool invalidate_on_fail = true);
 
     Status loadTransports();
 

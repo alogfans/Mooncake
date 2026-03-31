@@ -573,9 +573,9 @@ Status Workers::selectOptimalDevice(RouteHint& source, RouteHint& target,
                                     RdmaSlice* slice) {
     auto& worker = worker_context_[tl_wid];
     if (slice->source_dev_id < 0) {
-        CHECK_STATUS(
-            device_quota_->allocate(slice->length, source.buffer->location,
-                                    slice->source_dev_id, slice->priority));
+        CHECK_STATUS(device_quota_->allocate(
+            slice->length, source.buffer->location, slice->source_dev_id,
+            slice->priority, slice->device_mask));
     }
 
     if (slice->source_dev_id < 0)

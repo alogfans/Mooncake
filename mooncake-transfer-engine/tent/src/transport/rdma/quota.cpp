@@ -104,7 +104,8 @@ struct TlsDeviceInfo {
 thread_local std::unordered_map<int, TlsDeviceInfo> tl_device_info;
 
 Status DeviceQuota::allocate(uint64_t length, const std::string& location,
-                             int& chosen_dev_id, int priority) {
+                             int& chosen_dev_id, int priority,
+                             uint64_t device_mask) {
     auto entry = local_topology_->getMemEntry(location);
     if (!entry) return Status::InvalidArgument("Unknown location" LOC_MARK);
 
@@ -113,9 +114,13 @@ Status DeviceQuota::allocate(uint64_t length, const std::string& location,
         for (size_t rank = 0; rank < Topology::DevicePriorityRanks; ++rank) {
             auto& list = entry->device_list[rank];
             if (list.empty()) continue;
-            chosen_dev_id = list[id % list.size()];
-            id++;
-            return Status::OK();
+            for (int dev_id : list) {
+                if ((device_mask & (1ULL << dev_id)) == 0)
+                    continue;  // Filter by mask
+                chosen_dev_id = dev_id;
+                id++;
+                return Status::OK();
+            }
         }
         return Status::DeviceNotFound("no eligible devices for " + location);
     }
@@ -131,6 +136,8 @@ Status DeviceQuota::allocate(uint64_t length, const std::string& location,
             continue;
         for (int dev_id : entry->device_list[rank]) {
             if (!devices_.count(dev_id)) continue;
+            if ((device_mask & (1ULL << dev_id)) == 0)
+                continue;  // Filter by mask
             auto& dev = devices_[dev_id];
             auto& tl_dev = tl_device_info[dev_id];
 

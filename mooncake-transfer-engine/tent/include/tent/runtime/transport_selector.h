@@ -24,25 +24,21 @@
  *     {
  *       "name": "high_prio_fast",
  *       "segment_type": "memory",
- *       "min_priority": 5,
- *       "rdma_device_names": ["mlx5_0", "mlx5_1", "mlx5_2", "mlx5_3", "mlx5_4",
- * "mlx5_5"], "priority": ["nvlink", "rdma", "shm"]
+ *       "priority": 0,
+ *       "devices": ["mlx5_0", "mlx5_1", "mlx5_2"],
+ *       "transports": ["nvlink", "rdma", "shm"]
  *     },
  *     {
  *       "name": "low_prio_slow",
  *       "segment_type": "memory",
- *       "rdma_device_names": ["mlx5_0", "mlx5_1"],
- *       "priority": ["rdma", "tcp"]
+ *       "priority": 2,
+ *       "devices": ["mlx5_0"],
+ *       "transports": ["rdma", "tcp"]
  *     },
  *     {
  *       "name": "file_storage",
  *       "segment_type": "file",
- *       "priority": ["gds", "io_uring", "rdma"]
- *     },
- *     {
- *       "name": "default",
- *       "segment_type": "memory",
- *       "priority": []
+ *       "transports": ["gds", "io_uring", "rdma"]
  *     }
  *   ]
  * }
@@ -108,17 +104,25 @@ struct SelectionPolicy {
     std::optional<uint64_t> min_size;  // Minimum transfer size
     std::optional<uint64_t> max_size;  // Maximum transfer size
 
-    // Priority filter: match requests with priority >= min_priority
+    // Priority filter: exact match required (request.priority == priority)
     // nullopt = match any priority level
-    std::optional<int> min_priority;
+    std::optional<int> priority;
 
-    // RDMA device allocation: list of device names this policy can use
+    // Device allocation: list of device names this policy can use
     // e.g., ["mlx5_0", "mlx5_1", "rocep5s0f0"]
     // Empty = use all available devices
-    std::vector<std::string> rdma_device_names;
+    std::vector<std::string> devices;
 
-    // Transport priority list (evaluated in order)
-    std::vector<TransportType> priority;
+    // Transport preference list (evaluated in order)
+    std::vector<TransportType> transports;
+};
+
+/**
+ * @brief Result of transport selection
+ */
+struct SelectionResult {
+    TransportType transport = UNSPEC;
+    uint64_t device_mask = ~0ULL;  // Bitmask of allowed devices (~0 = all)
 };
 
 /**
@@ -129,26 +133,25 @@ class TransportSelector {
     TransportSelector(std::shared_ptr<Config> config);
 
     /**
+     * @brief Set topology for device name to ID conversion
+     */
+    void setTopology(std::shared_ptr<Topology> topology) {
+        topology_ = topology;
+    }
+
+    /**
      * @brief Select the best transport for a given context
      * @param context Selection context
      * @param available_transports Array of available transports (indexed by
      * TransportType)
      * @param priority_offset Priority offset for fallback (0 = first choice)
-     * @return Selected transport type, or UNSPEC if none available
+     * @return SelectionResult containing transport type and device mask
      */
-    TransportType select(
+    SelectionResult select(
         const SelectionContext& context,
         const std::array<std::shared_ptr<Transport>, kSupportedTransportTypes>&
             available_transports,
         int priority_offset = 0);
-
-    /**
-     * @brief Get the RDMA device names for the last selected policy
-     * @return Vector of device names, empty if no restriction
-     */
-    const std::vector<std::string>& getRdmaDeviceNames() const {
-        return last_rdma_device_names_;
-    }
 
     /**
      * @brief Parse transport type from string
@@ -163,8 +166,7 @@ class TransportSelector {
    private:
     std::vector<SelectionPolicy> policies_;
     std::shared_ptr<Config> config_;
-    std::vector<std::string>
-        last_rdma_device_names_;  // Cached from last selection
+    std::shared_ptr<Topology> topology_;  // For device name to ID mapping
 
     /**
      * @brief Load policies from configuration
