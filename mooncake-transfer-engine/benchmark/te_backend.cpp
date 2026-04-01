@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <fstream>
+#include <sstream>
 
 #include "te_backend.h"
 #include "utils.h"
@@ -56,6 +57,20 @@ static inline int getCudaDeviceNumaID(int cuda_id) { return 0; }
 
 volatile bool g_te_running = true;
 volatile bool g_te_triggered_sig = false;
+
+static std::vector<std::string> splitDeviceList(const std::string& str) {
+    std::vector<std::string> result;
+    if (str.empty()) return result;
+    std::stringstream ss(str);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+        // Trim whitespace
+        item.erase(0, item.find_first_not_of(" \t"));
+        item.erase(item.find_last_not_of(" \t") + 1);
+        if (!item.empty()) result.push_back(item);
+    }
+    return result;
+}
 
 void signalHandlerV0(int signum) {
     if (g_te_triggered_sig) {
@@ -167,7 +182,13 @@ int TEBenchRunner::freeBuffers() {
 TEBenchRunner::TEBenchRunner() {
     signal(SIGINT, signalHandlerV0);
     signal(SIGTERM, signalHandlerV0);
-    engine_ = std::make_unique<mooncake::TransferEngine>(true);
+
+    auto device_filter = splitDeviceList(XferBenchConfig::rdma_whitelist);
+    if (!device_filter.empty()) {
+        engine_ = std::make_unique<mooncake::TransferEngine>(true, device_filter);
+    } else {
+        engine_ = std::make_unique<mooncake::TransferEngine>(true);
+    }
     auto conn_str = XferBenchConfig::metadata_type == "p2p"
                         ? "P2PHANDSHAKE"
                         : XferBenchConfig::metadata_url_list;

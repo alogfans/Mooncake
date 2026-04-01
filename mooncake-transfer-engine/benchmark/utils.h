@@ -68,6 +68,7 @@ struct XferBenchConfig {
     static int rpc_server_port;
     static std::string xport_type;
     static std::string backend;
+    static std::string rdma_whitelist;
     static bool notifi;
 
     static int local_gpu_id;
