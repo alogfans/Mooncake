@@ -130,16 +130,26 @@ Status DeviceQuota::allocate(uint64_t length, const std::string &location,
 Status DeviceQuota::release(int dev_id, uint64_t length, double latency,
                             int priority) {
     if (!enable_quota_) return Status::OK();
+
     auto it = devices_.find(dev_id);
     if (it == devices_.end())
         return Status::InvalidArgument("device not found");
+
     auto &dev = it->second;
     auto &tl_dev = tl_device_info[dev_id];
+
+    // Update active bytes
     tl_dev.active_bytes_by_prio[priority] -= length;
     if (local_weight_ < 1 - 1e-6) dev.subBytes(priority, length);
+
+    // Early exit if latency learning disabled
     if (!sched_params_.enable_latency_learning || !update_quota_params_)
         return Status::OK();
+
+    // Filter out small transfers (noise reduction)
     if (length < 4096 || latency < 1e-6) return Status::OK();
+
+    // Update beta parameters with exponential smoothing
     constexpr double US = 1e6;
     double obs_time_us = latency * US;
     double theory_time_us =
@@ -148,16 +158,51 @@ Status DeviceQuota::release(int dev_id, uint64_t length, double latency,
         dev.getBandwidthBytesPerSec() * US;
     double pred_time = tl_dev.beta0 + tl_dev.beta1 * theory_time_us;
     double err = obs_time_us - pred_time;
+    double rel_err = (theory_time_us > 1e-3) ? (err / theory_time_us) : 0.0;
+
     double alpha = sched_params_.alpha;
+    double new_beta1 = tl_dev.beta1 * (1.0 + alpha * rel_err);
     tl_dev.beta0 += alpha * err;
-    tl_dev.beta1 *= (1.0 + alpha * err / (theory_time_us + 1.0));
+
+    // Adaptive bounds tracking
+    tl_dev.sample_count++;
+    if (tl_dev.sample_count <= TlsDeviceInfo::kWarmupSamples) {
+        tl_dev.beta1_min_observed = std::min(tl_dev.beta1_min_observed, new_beta1);
+        tl_dev.beta1_max_observed = std::max(tl_dev.beta1_max_observed, new_beta1);
+    } else {
+        tl_dev.beta1_min_observed =
+            TlsDeviceInfo::kDecayFactor * tl_dev.beta1_min_observed +
+            (1 - TlsDeviceInfo::kDecayFactor) *
+                std::min(tl_dev.beta1_min_observed, new_beta1);
+        tl_dev.beta1_max_observed =
+            TlsDeviceInfo::kDecayFactor * tl_dev.beta1_max_observed +
+            (1 - TlsDeviceInfo::kDecayFactor) *
+                std::max(tl_dev.beta1_max_observed, new_beta1);
+    }
+
+    // Clamp to adaptive bounds
+    double beta1_min = std::max(0.1, tl_dev.beta1_min_observed * 0.5);
+    double beta1_max = tl_dev.beta1_max_observed * 1.5;
     tl_dev.beta0 = std::clamp(tl_dev.beta0, 0.0, 500.0);
-    tl_dev.beta1 = std::clamp(tl_dev.beta1, 0.1, 10.0);
+    tl_dev.beta1 = std::clamp(new_beta1, beta1_min, beta1_max);
+
+    // Update global state
     if (local_weight_ < 1 - 1e-6) {
         dev.last_update_ns.store(getFastTimeNanos(), std::memory_order_relaxed);
         dev.beta0.store(tl_dev.beta0, std::memory_order_relaxed);
         dev.beta1.store(tl_dev.beta1, std::memory_order_relaxed);
+
+        // Periodic diffusion for shared quota
+        if (shared_quota_) {
+            thread_local uint64_t tl_last_ts = 0;
+            uint64_t now = getCurrentTimeInNano();
+            if (now - tl_last_ts > diffusion_interval_) {
+                tl_last_ts = now;
+                return shared_quota_->diffusion();
+            }
+        }
     }
+
     return Status::OK();
 }
 
