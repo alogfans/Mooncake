@@ -170,28 +170,25 @@ class DeviceQuota {
     void setEnableQuota(bool enable) { enable_quota_ = enable; }
     bool getEnableQuota() const { return enable_quota_; }
 
-    // Update device bandwidth from IBV port speed (bandwidth passthrough)
-    void updateDeviceBandwidth(int dev_id, int ibv_speed) {
-        auto it = devices_.find(dev_id);
-        if (it != devices_.end()) {
-            it->second.bw_gbps = speedToGbps(ibv_speed);
-        }
+    // Scheduling parameters
+    struct SchedulingParams {
+        double preferred_dev_discount = 0.7;  // Preference discount factor
+        double local_overload_threshold_mb =
+            10.0;  // MB threshold for local overload
+        double cross_numa_penalty_base = 10.0;  // Base penalty for cross-NUMA
+        double beta1_min = 0.5;
+        double beta1_max = 5.0;
+        double alpha = 0.01;  // Learning rate
+        bool enable_cross_numa_fallback = true;
+        bool enable_latency_learning = true;
+    };
+
+    void setSchedulingParams(const SchedulingParams &params) {
+        sched_params_ = params;
     }
 
-    // Convert IBV_SPEED enum to Gbps
-    static double speedToGbps(int speed) {
-        switch (speed) {
-            case 1:   return 10.0;    // SDR: 2.5 Gbps/lane * 4
-            case 2:   return 30.0;    // DDR: 5 Gbps/lane * 4
-            case 4:   return 40.0;    // QDR: 10 Gbps/lane * 4
-            case 8:   return 41.25;   // FDR10: 10.3125 Gbps/lane * 4
-            case 16:  return 56.0;    // FDR: 14.0625 Gbps/lane * 4
-            case 32:  return 100.0;   // EDR: 25 Gbps/lane * 4
-            case 64:  return 200.0;   // HDR: 50 Gbps/lane * 4
-            case 128: return 400.0;   // NDR: 100 Gbps/lane * 4
-            case 256: return 800.0;   // XDR: 200 Gbps/lane * 4
-            default:  return 200.0;   // Default to HDR
-        }
+    const SchedulingParams &getSchedulingParams() const {
+        return sched_params_;
     }
 
    private:
@@ -208,6 +205,7 @@ class DeviceQuota {
     std::shared_ptr<SharedQuotaManager> shared_quota_;
     bool enable_quota_ = true;
     bool update_quota_params_ = true;
+    SchedulingParams sched_params_;
 };
 
 }  // namespace tent

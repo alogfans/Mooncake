@@ -603,7 +603,8 @@ int RdmaTransport::getDeviceSpeed(const std::string& device_name) const {
     return -1;
 }
 
-std::vector<std::pair<std::string, int>> RdmaTransport::getDeviceSpeeds() const {
+std::vector<std::pair<std::string, int>> RdmaTransport::getDeviceSpeeds()
+    const {
     std::vector<std::pair<std::string, int>> result;
     for (const auto& ctx : context_set_) {
         result.push_back({ctx->name(), ctx->activeSpeed()});

@@ -119,7 +119,6 @@ class RdmaTransport : public Transport {
     // Get all device names and their speeds
     std::vector<std::pair<std::string, int>> getDeviceSpeeds() const;
 
-
    private:
     bool installed_;
     std::shared_ptr<Config> conf_;

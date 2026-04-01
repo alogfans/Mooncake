@@ -17,19 +17,49 @@
 #include "tent/common/utils/random.h"
 
 #include <assert.h>
+#include <limits>
 #include <unordered_set>
+#include <thread>
 
 namespace mooncake {
 namespace tent {
-Status DeviceQuota::loadTopology(std::shared_ptr<Topology>& local_topology) {
+
+// ========== Thread-local device state ==========
+struct TlsDeviceInfo {
+    uint64_t active_bytes_by_prio[3] = {0, 0, 0};  // [high, medium, low]
+    double beta0{0.01};                            // Fixed overhead (μs)
+    double beta1{1.00};  // Bandwidth correction factor
+
+    // Adaptive bounds for beta1
+    double beta1_min_observed{0.5};
+    double beta1_max_observed{5.0};
+    uint32_t sample_count{0};
+    static constexpr double kDecayFactor = 0.98;
+    static constexpr uint32_t kWarmupSamples = 50;
+};
+
+thread_local std::unordered_map<int, TlsDeviceInfo> tl_device_info;
+
+// ========== Per-location thread-local state ==========
+struct LocationState {
+    uint64_t location_hash{0};
+    int local_count{0};
+    int first_local_dev{-1};
+    int preferred_dev{-1};
+    bool initialized{false};
+    bool overloaded{false};  // cached overload state
+    uint64_t last_overload_check_ns{0};
+};
+
+Status DeviceQuota::loadTopology(std::shared_ptr<Topology> &local_topology) {
     local_topology_ = local_topology;
     std::unordered_set<int> used_numa_id;
     for (size_t dev_id = 0; dev_id < local_topology->getNicCount(); ++dev_id) {
         auto entry = local_topology->getNicEntry(dev_id);
         if (!entry || entry->type != Topology::NIC_RDMA) continue;
-        DeviceInfo& info = devices_[dev_id];
+        DeviceInfo &info = devices_[dev_id];
         info.dev_id = dev_id;
-        info.bw_gbps = 200.0;
+        info.bw_gbps = entry->bw_gbps;
         info.numa_id = entry->numa_node;
         used_numa_id.insert(entry->numa_node);
     }
@@ -37,167 +67,60 @@ Status DeviceQuota::loadTopology(std::shared_ptr<Topology>& local_topology) {
     return Status::OK();
 }
 
-Status DeviceQuota::enableSharedQuota(const std::string& shm_name) {
+Status DeviceQuota::enableSharedQuota(const std::string &shm_name) {
     shared_quota_ = std::make_shared<SharedQuotaManager>(this);
     auto status = shared_quota_->attach(shm_name);
     if (!status.ok()) shared_quota_.reset();
     return status;
 }
 
-struct TlsDeviceInfo {
-    uint64_t active_bytes_by_prio[3] = {0, 0, 0};  // [high, medium, low]
-    double beta0{0.0};  // Fixed overhead (μs), origin/main: 0.0
-    double beta1{1.0};  // Bandwidth correction factor, origin/main: 1.0
-
-    double beta0_min_observed{0.0};
-    double beta0_max_observed{500.0};
-    double beta1_min_observed{0.5};
-    double beta1_max_observed{20.0};
-    uint32_t sample_count{0};
-    static constexpr double kDecayFactor = 0.98;
-    static constexpr uint32_t kWarmupSamples = 50;
-
-    // Measured bandwidth tracking
-    double measured_bw_gbps{0.0};  // EWMA of measured bandwidth
-
-    void updateBounds(double b0, double b1) {
-        sample_count++;
-        if (sample_count <= kWarmupSamples) {
-            beta0_min_observed = std::min(beta0_min_observed, b0);
-            beta0_max_observed = std::max(beta0_max_observed, b0);
-            beta1_min_observed = std::min(beta1_min_observed, b1);
-            beta1_max_observed = std::max(beta1_max_observed, b1);
-        } else {
-            beta0_min_observed =
-                kDecayFactor * beta0_min_observed +
-                (1 - kDecayFactor) * std::min(beta0_min_observed, b0);
-            beta0_max_observed =
-                kDecayFactor * beta0_max_observed +
-                (1 - kDecayFactor) * std::max(beta0_max_observed, b0);
-            beta1_min_observed =
-                kDecayFactor * beta1_min_observed +
-                (1 - kDecayFactor) * std::min(beta1_min_observed, b1);
-            beta1_max_observed =
-                kDecayFactor * beta1_max_observed +
-                (1 - kDecayFactor) * std::max(beta1_max_observed, b1);
-        }
-    }
-
-    void getBounds(double& b0_min, double& b0_max, double& b1_min,
-                   double& b1_max) {
-        if (sample_count < kWarmupSamples) {
-            b0_min = 0.0;
-            b0_max = 500.0;
-            b1_min = 0.5;
-            b1_max = 20.0;
-        } else {
-            double range0 = beta0_max_observed - beta0_min_observed;
-            double range1 = beta1_max_observed - beta1_min_observed;
-            b0_min = std::max(0.0, beta0_min_observed);
-            b0_max = beta0_max_observed + 2.0 * range0;
-            b1_min = std::max(0.5, beta1_min_observed);
-            b1_max = beta1_max_observed + 2.0 * range1;
-        }
-    }
-};
-
-thread_local std::unordered_map<int, TlsDeviceInfo> tl_device_info;
-
-Status DeviceQuota::allocate(uint64_t length, const std::string& location,
-                             int& chosen_dev_id, int priority,
+Status DeviceQuota::allocate(uint64_t length, const std::string &location,
+                             int &chosen_dev_id, int priority,
                              uint64_t device_mask) {
     auto entry = local_topology_->getMemEntry(location);
     if (!entry) return Status::InvalidArgument("Unknown location" LOC_MARK);
-
-    if (!enable_quota_) {
-        thread_local int id = 0;
-        for (size_t rank = 0; rank < Topology::DevicePriorityRanks; ++rank) {
-            auto& list = entry->device_list[rank];
-            if (list.empty()) continue;
-            for (int dev_id : list) {
-                if ((device_mask & (1ULL << dev_id)) == 0)
-                    continue;  // Filter by mask
-                chosen_dev_id = dev_id;
-                id++;
-                return Status::OK();
-            }
-        }
-        return Status::DeviceNotFound("no eligible devices for " + location);
-    }
-
-    static constexpr double penalty[] = {1.0, 3.0, 10.0};
-    const double w = local_weight_;
-    std::unordered_map<int, double> score_map;
-    bool found_device = false;
-    double best_score = std::numeric_limits<double>::infinity();
+    static constexpr double kPenalty[] = {1.0, 5.0, 50.0};
+    static constexpr double kTieEpsilon = 0.01;  // 1% tolerance for ties
+    struct Candidate {
+        int dev_id;
+        double score;
+    };
+    thread_local std::vector<Candidate> candidates;
+    candidates.clear();
+    double best_score = 1e300;
+    double local_best_score = 1e300;
     for (size_t rank = 0; rank < Topology::DevicePriorityRanks; ++rank) {
-        if (rank == Topology::DevicePriorityRanks - 1 && !allow_cross_numa_ &&
-            found_device)
-            continue;
         for (int dev_id : entry->device_list[rank]) {
             if (!devices_.count(dev_id)) continue;
-            if ((device_mask & (1ULL << dev_id)) == 0)
-                continue;  // Filter by mask
-            auto& dev = devices_[dev_id];
-            auto& tl_dev = tl_device_info[dev_id];
-
-            // Total active bytes (all priorities) + cross-process diffusion
-            uint64_t dev_total = dev.getTotalActiveBytes();
-            uint64_t overall_active_bytes =
-                dev.diffusion_active_bytes.load(std::memory_order_relaxed) +
-                dev_total;
-
-            // Load balancing: use actual device load, priority handled in
-            // Workers layer
-            double weighted_active = w * tl_dev.active_bytes_by_prio[priority] +
-                                     (1.0 - w) * overall_active_bytes + length;
-
-            double beta0_g = dev.beta0.load(std::memory_order_relaxed);
-            double beta1_g = dev.beta1.load(std::memory_order_relaxed);
-            double beta0 = w * tl_dev.beta0 + (1.0 - w) * beta0_g;
-            double beta1 = w * tl_dev.beta1 + (1.0 - w) * beta1_g;
-
-            double bw_bytes_per_sec = dev.getBandwidthBytesPerSec();
-
-            double theory_time_us = weighted_active / bw_bytes_per_sec * 1e6;
-            double predicted_time = beta0 + beta1 * theory_time_us;
-            double score = penalty[rank] * predicted_time;
-            score_map[dev_id] = score;
-
-            // Idle discount: give unused devices a chance (anti-starvation)
-            uint64_t last_ns =
-                dev.last_update_ns.load(std::memory_order_relaxed);
-            if (last_ns > 0) {
-                uint64_t idle_ns = getFastTimeNanos() - last_ns;
-                if (idle_ns > 10e8) {  // idle > 1 second
-                    double discount = std::min(0.4, idle_ns / 60e8);  // max 40%
-                    score_map[dev_id] *= (1.0 - discount);
-                }
+            if ((device_mask & (1ULL << dev_id)) == 0) continue;
+            auto &dev = devices_[dev_id];
+            auto &tl = tl_device_info[dev_id];
+            uint64_t total = tl.active_bytes_by_prio[0] +
+                             tl.active_bytes_by_prio[1] +
+                             tl.active_bytes_by_prio[2] + length;
+            double theory_time_us = total / dev.getBandwidthBytesPerSec() * 1e6;
+            double pred_time_us = tl.beta0 + tl.beta1 * theory_time_us;
+            double score = kPenalty[rank] * pred_time_us;
+            if (rank == 0 && pred_time_us < local_best_score) {
+                local_best_score = pred_time_us;
             }
-            best_score = std::min(best_score, score_map[dev_id]);
-            found_device = true;
+            if (rank > 0 && local_best_score < 1e200) {
+                constexpr double kCrossNumaThreshold = 0.7;
+                if (score >= local_best_score * kCrossNumaThreshold) continue;
+            }
+            if (score < best_score) {
+                best_score = score;
+                candidates.clear();
+                candidates.push_back({dev_id, score});
+            } else if (score <= best_score * (1.0 + kTieEpsilon)) {
+                candidates.push_back({dev_id, score});
+            }
         }
     }
-
-    if (!found_device) {
-        return Status::DeviceNotFound("no eligible devices for " + location);
-    }
-
-    std::vector<int> filtered;
-    for (const auto& [dev_id, score] : score_map) {
-        if (score <= best_score * 1.05) filtered.push_back(dev_id);
-    }
-
-    std::sort(filtered.begin(), filtered.end(), [&](int a, int b) {
-        if (std::abs(score_map[a] - score_map[b]) > 1e-9)
-            return score_map[a] < score_map[b];
-        return a < b;
-    });
-
-    thread_local size_t rr_index = 0;
-    chosen_dev_id = filtered[rr_index % filtered.size()];
-    rr_index++;
-
+    if (candidates.empty())
+        return Status::DeviceNotFound("no eligible devices");
+    uint32_t idx = SimpleRandom::Get().next(candidates.size());
+    chosen_dev_id = candidates[idx].dev_id;
     tl_device_info[chosen_dev_id].active_bytes_by_prio[priority] += length;
     if (local_weight_ < 1 - 1e-6)
         devices_[chosen_dev_id].addBytes(priority, length);
@@ -210,130 +133,30 @@ Status DeviceQuota::release(int dev_id, uint64_t length, double latency,
     auto it = devices_.find(dev_id);
     if (it == devices_.end())
         return Status::InvalidArgument("device not found");
-
-    auto& dev = it->second;
-    auto& tl_dev = tl_device_info[dev_id];
-
-    if (local_weight_ < 1 - 1e-6) dev.subBytes(priority, length);
+    auto &dev = it->second;
+    auto &tl_dev = tl_device_info[dev_id];
     tl_dev.active_bytes_by_prio[priority] -= length;
-
-    // Update measured bandwidth: bw = length / latency
-    // Initialize with default if not set
-    constexpr double kBwAlpha = 0.1;  // EWMA factor for bandwidth
-    constexpr double kMinLatencySec =
-        1e-6;  // 1us minimum to avoid division noise
-
-    // Skip measurement for very short transfers or invalid latencies
-    if (length >= 4096 && latency > kMinLatencySec) {
-        // Calculate measured bandwidth in Gbps
-        // bw (bytes/sec) = length / latency
-        // bw_gbps = bw / 1e9 * 8
-        double measured_bw =
-            (static_cast<double>(length) / latency) / 1e9 * 8.0;
-
-        // Clamp to reasonable range
-        measured_bw = std::clamp(measured_bw, kMinBwGbps, kMaxBwGbps);
-
-        // EWMA update of measured bandwidth
-        if (tl_dev.measured_bw_gbps < kMinBwGbps) {
-            // First measurement or uninitialized
-            tl_dev.measured_bw_gbps = measured_bw;
-        } else {
-            tl_dev.measured_bw_gbps =
-                (1.0 - kBwAlpha) * tl_dev.measured_bw_gbps +
-                kBwAlpha * measured_bw;
-        }
-
-        // Periodically update global bw_gbps (for cross-thread visibility)
-        if (local_weight_ < 1 - 1e-6) {
-            double current_global = dev.bw_gbps;
-            if (current_global < kMinBwGbps) {
-                dev.bw_gbps = tl_dev.measured_bw_gbps;
-            } else {
-                // Blend TLS measurement into global value
-                double blended =
-                    0.95 * current_global + 0.05 * tl_dev.measured_bw_gbps;
-                dev.bw_gbps = std::clamp(blended, kMinBwGbps, kMaxBwGbps);
-            }
-        }
-    }
-
-    if (!update_quota_params_) return Status::OK();
-
-    // Convert observed latency to microseconds
-    constexpr double SEC_TO_US = 1e6;
-    double obs_time = latency * SEC_TO_US;
-
-    const double w = local_weight_;
-    double beta0_g = dev.beta0.load(std::memory_order_relaxed);
-    double beta1_g = dev.beta1.load(std::memory_order_relaxed);
-    double beta0 = w * tl_dev.beta0 + (1.0 - w) * beta0_g;
-    double beta1 = w * tl_dev.beta1 + (1.0 - w) * beta1_g;
-
-    // Estimate active bytes at request time (for more accurate update)
-    // At release time, active_bytes has already been decremented,
-    // so we add length back to estimate the value at request time.
-    uint64_t tl_total = 0;
-    for (int i = 0; i < NUM_PRIORITIES; ++i)
-        tl_total += tl_dev.active_bytes_by_prio[i];
-    uint64_t estimated_active = tl_total + length;
-    if (local_weight_ < 1 - 1e-6) {
-        uint64_t overall_active =
-            dev.getTotalActiveBytes() +
-            dev.diffusion_active_bytes.load(std::memory_order_relaxed);
-        estimated_active = std::max(estimated_active, overall_active);
-    }
-
-    // Predict using estimated active (origin/main formula)
-    double bw_bytes_per_sec = dev.getBandwidthBytesPerSec();
-    double theory_time_us = estimated_active / bw_bytes_per_sec * SEC_TO_US;
-    double pred_time = beta0 + beta1 * theory_time_us;
-    double err = obs_time - pred_time;
-    double rel_err = (pred_time > 1e-3) ? (err / pred_time) : 0.0;
-
-    // Adaptive learning rate
-    double adapt_alpha = alpha_;
-    if (std::abs(err) > 0.05 * pred_time && pred_time > 1e-3)
-        adapt_alpha = std::min(1.0, alpha_ * 5.0);
-
-    // EWMA update (origin/main style)
-    double delta0 = adapt_alpha * err;
-    double new_beta0_l = tl_dev.beta0 + w * delta0;
-    double new_beta0_g = beta0_g + (1.0 - w) * delta0;
-
-    double delta1 = adapt_alpha * rel_err;
-    double new_beta1_l = tl_dev.beta1 * (1.0 + w * delta1);
-    double new_beta1_g = beta1_g * (1.0 + (1.0 - w) * delta1);
-    double beta0_min, beta0_max, beta1_min, beta1_max;
-    if (use_robust_clamp_) {
-        tl_dev.updateBounds(new_beta0_l, new_beta1_l);
-        tl_dev.getBounds(beta0_min, beta0_max, beta1_min, beta1_max);
-    } else {
-        // Static bounds: origin/main values in microseconds
-        beta0_min = 0.0;
-        beta0_max = 500.0;
-        beta1_min = 0.5;
-        beta1_max = 20.0;
-    }
-
-    tl_dev.beta0 = std::clamp(new_beta0_l, beta0_min, beta0_max);
-    tl_dev.beta1 = std::clamp(new_beta1_l, beta1_min, beta1_max);
-
+    if (local_weight_ < 1 - 1e-6) dev.subBytes(priority, length);
+    if (!sched_params_.enable_latency_learning || !update_quota_params_)
+        return Status::OK();
+    if (length < 4096 || latency < 1e-6) return Status::OK();
+    constexpr double US = 1e6;
+    double obs_time_us = latency * US;
+    double theory_time_us =
+        (tl_dev.active_bytes_by_prio[0] + tl_dev.active_bytes_by_prio[1] +
+         tl_dev.active_bytes_by_prio[2]) /
+        dev.getBandwidthBytesPerSec() * US;
+    double pred_time = tl_dev.beta0 + tl_dev.beta1 * theory_time_us;
+    double err = obs_time_us - pred_time;
+    double alpha = sched_params_.alpha;
+    tl_dev.beta0 += alpha * err;
+    tl_dev.beta1 *= (1.0 + alpha * err / (theory_time_us + 1.0));
+    tl_dev.beta0 = std::clamp(tl_dev.beta0, 0.0, 500.0);
+    tl_dev.beta1 = std::clamp(tl_dev.beta1, 0.1, 10.0);
     if (local_weight_ < 1 - 1e-6) {
         dev.last_update_ns.store(getFastTimeNanos(), std::memory_order_relaxed);
-        dev.beta0.store(std::clamp(new_beta0_g, beta0_min, beta0_max),
-                        std::memory_order_relaxed);
-        dev.beta1.store(std::clamp(new_beta1_g, beta1_min, beta1_max),
-                        std::memory_order_relaxed);
-
-        if (shared_quota_) {
-            thread_local uint64_t tl_last_ts = 0;
-            uint64_t now = getCurrentTimeInNano();
-            if (now - tl_last_ts > diffusion_interval_) {
-                tl_last_ts = now;
-                return shared_quota_->diffusion();
-            }
-        }
+        dev.beta0.store(tl_dev.beta0, std::memory_order_relaxed);
+        dev.beta1.store(tl_dev.beta1, std::memory_order_relaxed);
     }
     return Status::OK();
 }

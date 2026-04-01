@@ -371,6 +371,33 @@ static bool isIbDeviceAvailable(struct ibv_device* device) {
     return has_active_port;
 }
 
+static double getLinkSpeedGbps(struct ibv_context* context, uint8_t port_num) {
+    struct ibv_port_attr port_attr;
+    if (ibv_query_port(context, port_num, &port_attr) != 0) return 200.0;
+
+    // Convert IBV active_speed enum to total link bandwidth in Gbps
+    switch (port_attr.active_speed) {
+        case 1:
+            return 10.0;  // SDR: 2.5 Gbps/lane * 4 = 10 Gbps
+        case 2:
+            return 20.0;  // DDR: 5 Gbps/lane * 4 = 20 Gbps
+        case 4:
+            return 40.0;  // QDR: 10 Gbps/lane * 4 = 40 Gbps
+        case 8:
+            return 40.0;  // FDR10: 10.3125 Gbps/lane * 4 = ~40 Gbps
+        case 16:
+            return 56.0;  // FDR: 14.0625 Gbps/lane * 4 = 56 Gbps
+        case 32:
+            return 100.0;  // EDR: 25.78125 Gbps/lane * 4 = 100 Gbps
+        case 64:
+            return 200.0;  // HDR: 25 Gbps/lane * 8 = 200 Gbps
+        case 128:
+            return 400.0;  // NDR: 50 Gbps/lane * 8 = 400 Gbps
+        default:
+            return 200.0;
+    }
+}
+
 static std::vector<Topology::NicEntry> listInfiniBandDevices() {
     int num_devices = 0;
     std::vector<Topology::NicEntry> devices;
@@ -393,11 +420,29 @@ static std::vector<Topology::NicEntry> listInfiniBandDevices() {
         snprintf(path, sizeof(path), "%s/numa_node", resolved_path);
         std::ifstream(path) >> numa_node;
 
+        // Query link speed
+        double bw_gbps = 200.0;  // Default HDR
+        struct ibv_context* context = ibv_open_device(device_list[i]);
+        if (context) {
+            struct ibv_device_attr device_attr;
+            if (ibv_query_device(context, &device_attr) == 0) {
+                for (uint8_t port = 1; port <= device_attr.phys_port_cnt;
+                     ++port) {
+                    if (checkIbDevicePort(context, device_name.c_str(), port)) {
+                        bw_gbps = getLinkSpeedGbps(context, port);
+                        break;
+                    }
+                }
+            }
+            ibv_close_device(context);
+        }
+
         devices.push_back(
             Topology::NicEntry{.name = std::move(device_name),
                                .pci_bus_id = std::move(pci_bus_id),
                                .type = Topology::NIC_RDMA,
-                               .numa_node = numa_node});
+                               .numa_node = numa_node,
+                               .bw_gbps = bw_gbps});
     }
     ibv_free_device_list(device_list);
     return devices;

@@ -152,7 +152,8 @@ class RdmaContext {
     // Dedicated CQ for notification QPs (one per device)
     RdmaCQ *notify_cq_ = nullptr;
 
-    int active_speed_ = -1;  // IBV_SPEED enum value from ibv_port_attr.active_speed
+    int active_speed_ =
+        -1;  // IBV_SPEED enum value from ibv_port_attr.active_speed
 
     const IbvSymbols &verbs_;
 };

@@ -51,18 +51,6 @@ Workers::Workers(RdmaTransport* transport)
     device_quota_->setEnableQuota(enable_quota);
     auto robust_clamping = conf->get("transports/rdma/robust_clamping", true);
     device_quota_->setRobustClamping(robust_clamping);
-
-    // Detect and update device bandwidth from actual port speed
-    auto device_speeds = transport_->getDeviceSpeeds();
-    for (const auto& [device_name, ibv_speed] : device_speeds) {
-        int dev_id = transport_->local_topology_->getNicId(device_name);
-        if (dev_id >= 0) {
-            device_quota_->updateDeviceBandwidth(dev_id, ibv_speed);
-            double gbps = DeviceQuota::speedToGbps(ibv_speed);
-            LOG(INFO) << "  [DeviceQuota] Device " << device_name
-                    << " (dev_id=" << dev_id << "): " << gbps << " Gbps";
-        }
-    }
 }
 
 Workers::~Workers() {
