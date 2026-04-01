@@ -100,6 +100,9 @@ class RdmaContext {
 
     int gidIndex() const { return gid_index_; }
 
+    // Get port active speed (IBV_SPEED enum value)
+    int activeSpeed() const { return active_speed_; }
+
     ibv_context *nativeContext() const { return native_context_; }
 
     ibv_pd *nativePD() const { return native_pd_; }
@@ -148,6 +151,8 @@ class RdmaContext {
 
     // Dedicated CQ for notification QPs (one per device)
     RdmaCQ *notify_cq_ = nullptr;
+
+    int active_speed_ = -1;  // IBV_SPEED enum value from ibv_port_attr.active_speed
 
     const IbvSymbols &verbs_;
 };

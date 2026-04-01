@@ -593,6 +593,23 @@ void RdmaTransport::notifyWorkerThread() {
         usleep(notify_poll_interval_us_);
     }
 }
+
+int RdmaTransport::getDeviceSpeed(const std::string& device_name) const {
+    auto it = context_name_lookup_.find(device_name);
+    if (it != context_name_lookup_.end() && it->second >= 0 &&
+        static_cast<size_t>(it->second) < context_set_.size()) {
+        return context_set_[it->second]->activeSpeed();
+    }
+    return -1;
+}
+
+std::vector<std::pair<std::string, int>> RdmaTransport::getDeviceSpeeds() const {
+    std::vector<std::pair<std::string, int>> result;
+    for (const auto& ctx : context_set_) {
+        result.push_back({ctx->name(), ctx->activeSpeed()});
+    }
+    return result;
+}
 }  // namespace tent
 }  // namespace mooncake
 

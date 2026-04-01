@@ -113,6 +113,12 @@ class RdmaTransport : public Transport {
 
    public:
     Status setupLocalSegment();
+    // Get device port speed for bandwidth detection
+    int getDeviceSpeed(const std::string& device_name) const;
+
+    // Get all device names and their speeds
+    std::vector<std::pair<std::string, int>> getDeviceSpeeds() const;
+
 
    private:
     bool installed_;

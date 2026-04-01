@@ -140,7 +140,7 @@ static inline void initFastTimer() { detail::calibrateTscFrequency(); }
 // Convert TSC cycles to nanoseconds (fast path, ~5 cycles)
 static inline uint64_t tscToNanos(uint64_t tsc_cycles) {
     double tsc_mhz = detail::g_tsc_mhz;
-    return static_cast<uint64_t>(tsc_cycles / tsc_mhz);
+    return static_cast<uint64_t>(tsc_cycles * 1000.0 / tsc_mhz);
 }
 
 // Get current time in nanoseconds using RDTSCP (faster than clock_gettime)

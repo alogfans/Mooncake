@@ -393,6 +393,9 @@ int RdmaContext::enable() {
         return -1;
     }
 
+    // Store the active speed for bandwidth detection
+    active_speed_ = port_attr.active_speed;
+
     if (port_attr.state != IBV_PORT_ACTIVE) {
         status_ = DEVICE_PAUSED;
     } else {

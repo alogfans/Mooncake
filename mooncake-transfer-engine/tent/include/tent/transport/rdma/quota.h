@@ -170,6 +170,30 @@ class DeviceQuota {
     void setEnableQuota(bool enable) { enable_quota_ = enable; }
     bool getEnableQuota() const { return enable_quota_; }
 
+    // Update device bandwidth from IBV port speed (bandwidth passthrough)
+    void updateDeviceBandwidth(int dev_id, int ibv_speed) {
+        auto it = devices_.find(dev_id);
+        if (it != devices_.end()) {
+            it->second.bw_gbps = speedToGbps(ibv_speed);
+        }
+    }
+
+    // Convert IBV_SPEED enum to Gbps
+    static double speedToGbps(int speed) {
+        switch (speed) {
+            case 1:   return 10.0;    // SDR: 2.5 Gbps/lane * 4
+            case 2:   return 30.0;    // DDR: 5 Gbps/lane * 4
+            case 4:   return 40.0;    // QDR: 10 Gbps/lane * 4
+            case 8:   return 41.25;   // FDR10: 10.3125 Gbps/lane * 4
+            case 16:  return 56.0;    // FDR: 14.0625 Gbps/lane * 4
+            case 32:  return 100.0;   // EDR: 25 Gbps/lane * 4
+            case 64:  return 200.0;   // HDR: 50 Gbps/lane * 4
+            case 128: return 400.0;   // NDR: 100 Gbps/lane * 4
+            case 256: return 800.0;   // XDR: 200 Gbps/lane * 4
+            default:  return 200.0;   // Default to HDR
+        }
+    }
+
    private:
     std::shared_ptr<Topology> local_topology_;
     std::unordered_map<int, DeviceInfo> devices_;
