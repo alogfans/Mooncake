@@ -16,64 +16,40 @@
 #include "tent/transport/rdma/shared_quota.h"
 #include "tent/common/utils/random.h"
 
-#include <assert.h>
-#include <limits>
-#include <unordered_set>
-#include <thread>
+#include <algorithm>
 #include <iostream>
 #include <iomanip>
 
 namespace mooncake {
 namespace tent {
 
-// ========== NUMA node cache helper ==========
-static int getNumaNodeForLocation(const std::string& location,
-                                   std::shared_ptr<Topology>& topology,
-                                   std::unordered_map<std::string, int>& cache,
-                                   std::mutex& cache_lock) {
-    // Check cache first
-    {
-        std::lock_guard<std::mutex> lock(cache_lock);
-        auto it = cache.find(location);
-        if (it != cache.end()) return it->second;
+thread_local uint64_t tl_rr_counter = 0;
+
+static std::vector<int> collectEligibleDevices(
+    const Topology::MemEntry* entry,
+    const std::unordered_map<int, DeviceQuota::DeviceInfo>& devices,
+    uint64_t device_mask) {
+    std::vector<int> result;
+    for (size_t rank = 0; rank < Topology::DevicePriorityRanks; ++rank) {
+        for (int dev_id : entry->device_list[rank]) {
+            if (!devices.count(dev_id)) continue;
+            if ((device_mask & (1ULL << dev_id)) == 0) continue;
+            result.push_back(dev_id);
+        }
     }
-
-    // Lookup from topology
-    int numa_node = -1;
-    auto entry = topology->getMemEntry(location);
-    if (entry) numa_node = entry->numa_node;
-
-    // Update cache
-    {
-        std::lock_guard<std::mutex> lock(cache_lock);
-        cache[location] = numa_node;
-    }
-
-    return numa_node;
+    return result;
 }
 
-// ========== Per-location thread-local state ==========
-struct LocationState {
-    uint64_t location_hash{0};
-    int local_count{0};
-    int first_local_dev{-1};
-    int preferred_dev{-1};
-    bool initialized{false};
-    bool overloaded{false};  // cached overload state
-    uint64_t last_overload_check_ns{0};
-};
-
-Status DeviceQuota::loadTopology(std::shared_ptr<Topology> &local_topology) {
+Status DeviceQuota::loadTopology(std::shared_ptr<Topology>& local_topology) {
     local_topology_ = local_topology;
     std::unordered_set<int> used_numa_id;
     for (size_t dev_id = 0; dev_id < local_topology->getNicCount(); ++dev_id) {
         auto entry = local_topology->getNicEntry(dev_id);
         if (!entry || entry->type != Topology::NIC_RDMA) continue;
-        DeviceInfo &info = devices_[dev_id];
+        DeviceInfo& info = devices_[dev_id];
         info.dev_id = dev_id;
         info.bw_gbps = entry->bw_gbps;
         info.numa_id = entry->numa_node;
-        // Initialize EWMA bandwidth with theoretical value
         info.ewma_bandwidth_bps.store(info.getTheoreticalBandwidth(),
                                       std::memory_order_relaxed);
         used_numa_id.insert(entry->numa_node);
@@ -82,258 +58,110 @@ Status DeviceQuota::loadTopology(std::shared_ptr<Topology> &local_topology) {
     return Status::OK();
 }
 
-Status DeviceQuota::enableSharedQuota(const std::string &shm_name) {
+Status DeviceQuota::enableSharedQuota(const std::string& shm_name) {
     shared_quota_ = std::make_shared<SharedQuotaManager>(this);
     auto status = shared_quota_->attach(shm_name);
     if (!status.ok()) shared_quota_.reset();
     return status;
 }
 
-// Thread-local round-robin counter for enable_quota=false mode
-thread_local uint64_t tl_allocate_count = 0;
-
-Status DeviceQuota::allocate(uint64_t length, const std::string &location,
-                             int &chosen_dev_id, int priority,
+Status DeviceQuota::allocate(uint64_t total_length, uint32_t num_slices,
+                             const std::string& location,
+                             std::vector<int>& slice_dev_ids, int priority,
                              uint64_t device_mask) {
-    auto entry = local_topology_->getMemEntry(location);
-    if (!entry) return Status::InvalidArgument("Unknown location" LOC_MARK);
-
-    // When quota is disabled, use simple round-robin
-    if (!enable_quota_) {
-        std::vector<int> eligible_devices;
-        for (size_t rank = 0; rank < Topology::DevicePriorityRanks; ++rank) {
-            for (int dev_id : entry->device_list[rank]) {
-                if (!devices_.count(dev_id)) continue;
-                if ((device_mask & (1ULL << dev_id)) == 0) continue;
-                eligible_devices.push_back(dev_id);
-            }
-        }
-        if (eligible_devices.empty())
-            return Status::DeviceNotFound("no eligible devices");
-
-        chosen_dev_id = eligible_devices[tl_allocate_count % eligible_devices.size()];
-        tl_allocate_count++;
-        devices_[chosen_dev_id].total_bytes.fetch_add(length, std::memory_order_relaxed);
-        return Status::OK();
-    }
-
-    // ========== EWMA-based NUMA-aware scheduling ==========
-
-    struct Candidate {
-        int dev_id;
-        double pred_time_us;
-        bool is_cross_numa;
-    };
-
-    std::vector<Candidate> local_candidates;   // rank 0 devices (local NUMA)
-
-    // First pass: evaluate local NUMA devices (rank 0) ONLY
-    for (int dev_id : entry->device_list[0]) {
-        if (!devices_.count(dev_id)) continue;
-        if ((device_mask & (1ULL << dev_id)) == 0) continue;
-
-        auto &dev = devices_[dev_id];
-        uint64_t inflight = dev.getInflightBytes();
-        double bw_bps = dev.getEwmaBandwidth();
-
-        // Predict completion time: (inflight + length) / bandwidth
-        double pred_time_us = (inflight + length) / bw_bps * 1e6;
-
-        local_candidates.push_back({dev_id, pred_time_us, false});
-    }
-
-    // If we have local candidates, prefer them
-    if (!local_candidates.empty()) {
-        // Find best with 10% tolerance
-        static constexpr double kTieEpsilon = 0.10;
-        double best_score = local_candidates[0].pred_time_us;
-        for (const auto& cand : local_candidates) {
-            if (cand.pred_time_us < best_score) {
-                best_score = cand.pred_time_us;
-            }
-        }
-
-        std::vector<int> best_candidates;
-        for (const auto& cand : local_candidates) {
-            if (cand.pred_time_us <= best_score * (1.0 + kTieEpsilon)) {
-                best_candidates.push_back(cand.dev_id);
-            }
-        }
-
-        uint32_t idx = SimpleRandom::Get().next(best_candidates.size());
-        chosen_dev_id = best_candidates[idx];
-
-        devices_[chosen_dev_id].addInflight(length);
-        devices_[chosen_dev_id].total_bytes.fetch_add(length, std::memory_order_relaxed);
-        total_local_bytes_.fetch_add(length, std::memory_order_relaxed);
-
-        return Status::OK();
-    }
-
-    // ========== Fallback: consider cross-NUMA only if completely idle ==========
-
-    // Check cross-NUMA usage ratio
-    uint64_t local_bytes = total_local_bytes_.load(std::memory_order_relaxed);
-    uint64_t cross_bytes = total_cross_numa_bytes_.load(std::memory_order_relaxed);
-    uint64_t total_bytes_tracked = local_bytes + cross_bytes;
-
-    bool can_use_cross_numa = false;
-    if (sched_params_.cross_numa_max_ratio <= 0) {
-        // Cross-NUMA disabled
-        can_use_cross_numa = false;
-    } else if (total_bytes_tracked == 0) {
-        // No stats yet, allow small amount
-        can_use_cross_numa = true;
-    } else {
-        double current_ratio = (double)cross_bytes / total_bytes_tracked;
-        can_use_cross_numa = (current_ratio < sched_params_.cross_numa_max_ratio);
-    }
-
-    std::vector<Candidate> cross_numa_candidates;
-
-    if (can_use_cross_numa) {
-        // Check rank 1/2 devices, but only if they are IDLE
-        for (size_t rank = 1; rank < Topology::DevicePriorityRanks; ++rank) {
-            for (int dev_id : entry->device_list[rank]) {
-                if (!devices_.count(dev_id)) continue;
-                if ((device_mask & (1ULL << dev_id)) == 0) continue;
-
-                auto &dev = devices_[dev_id];
-
-                // ONLY use if completely idle
-                if (dev.getInflightBytes() > 0) continue;
-
-                double bw_bps = dev.getEwmaBandwidth();
-                double effective_bw = bw_bps * sched_params_.cross_numa_penalty;
-                double pred_time_us = length / effective_bw * 1e6;
-
-                cross_numa_candidates.push_back({dev_id, pred_time_us, true});
-            }
-        }
-    }
-
-    // Combine: prefer local, then idle cross-NUMA
-    std::vector<Candidate> all_candidates;
-    all_candidates.insert(all_candidates.end(), local_candidates.begin(), local_candidates.end());
-    all_candidates.insert(all_candidates.end(), cross_numa_candidates.begin(), cross_numa_candidates.end());
-
-    if (all_candidates.empty())
-        return Status::DeviceNotFound("no eligible devices");
-
-    // Select best
-    static constexpr double kTieEpsilon = 0.10;
-    double best_score = all_candidates[0].pred_time_us;
-    for (const auto& cand : all_candidates) {
-        if (cand.pred_time_us < best_score) {
-            best_score = cand.pred_time_us;
-        }
-    }
-
-    std::vector<Candidate> best_candidates;
-    for (const auto& cand : all_candidates) {
-        if (cand.pred_time_us <= best_score * (1.0 + kTieEpsilon)) {
-            best_candidates.push_back(cand);
-        }
-    }
-
-    uint32_t idx = SimpleRandom::Get().next(best_candidates.size());
-    chosen_dev_id = best_candidates[idx].dev_id;
-
-    devices_[chosen_dev_id].addInflight(length);
-    devices_[chosen_dev_id].total_bytes.fetch_add(length, std::memory_order_relaxed);
-
-    // Track cross-NUMA usage
-    bool is_cross_numa = best_candidates[idx].is_cross_numa;
-    if (is_cross_numa) {
-        total_cross_numa_bytes_.fetch_add(length, std::memory_order_relaxed);
-    } else {
-        total_local_bytes_.fetch_add(length, std::memory_order_relaxed);
-    }
-
-    return Status::OK();
-}
-
-Status DeviceQuota::allocateBatch(uint64_t total_length, uint32_t num_slices,
-                                  const std::string &location,
-                                  std::vector<int>& slice_dev_ids,
-                                  int priority,
-                                  uint64_t device_mask) {
     slice_dev_ids.clear();
-    slice_dev_ids.reserve(num_slices);
-
     auto entry = local_topology_->getMemEntry(location);
-    if (!entry) return Status::InvalidArgument("Unknown location" LOC_MARK);
+    if (!entry) return Status::InvalidArgument("Unknown location");
 
     uint64_t slice_bytes = (total_length + num_slices - 1) / num_slices;
 
-    // Collect all eligible devices from rank 0 (local NUMA only)
-    struct DeviceScore {
+    struct Candidate {
         int dev_id;
-        double bandwidth_bps;
+        double bw_bps;
+        uint64_t inflight;
+        double score;
+        bool is_cross_numa;
     };
-    std::vector<DeviceScore> devices_scores;
+    std::vector<Candidate> candidates;
 
-    for (int dev_id : entry->device_list[0]) {
-        if (!devices_.count(dev_id)) continue;
-        if ((device_mask & (1ULL << dev_id)) == 0) continue;
+    bool found_rank0 = false;
+    for (size_t rank = 0; rank < Topology::DevicePriorityRanks; ++rank) {
+        for (int dev_id : entry->device_list[rank]) {
+            if (!devices_.count(dev_id) || !(device_mask & (1ULL << dev_id)))
+                continue;
 
-        auto &dev = devices_[dev_id];
-        double bw_bps = dev.getEwmaBandwidth();
-        devices_scores.push_back({dev_id, bw_bps});
+            auto& dev = devices_[dev_id];
+            double effective_bw = dev.getEwmaBandwidth();
+            bool is_cross = (rank > 0);
+            if (is_cross) effective_bw *= sched_params_.cross_numa_penalty;
+
+            uint64_t current_inflight = dev.getInflightBytes();
+            double score = effective_bw / (current_inflight + slice_bytes);
+
+            candidates.push_back(
+                {dev_id, effective_bw, current_inflight, score, is_cross});
+            if (rank == 0) found_rank0 = true;
+        }
+        if (found_rank0 && sched_params_.cross_numa_max_ratio <= 0) break;
     }
 
-    if (devices_scores.empty())
+    if (candidates.empty())
         return Status::DeviceNotFound("no eligible devices");
 
-    // When quota is disabled, use simple round-robin
-    if (!enable_quota_) {
+    bool use_multi_path = (num_slices >= sched_params_.batch_threshold) &&
+                          (candidates.size() > 1);
+    if (!use_multi_path) {
+        double max_score = 0;
+        for (auto& c : candidates) max_score = std::max(max_score, c.score);
+        std::vector<size_t> best_indices;
+        for (size_t i = 0; i < candidates.size(); ++i) {
+            if (candidates[i].score >= max_score * 0.9)
+                best_indices.push_back(i);
+        }
+        size_t idx =
+            best_indices[SimpleRandom::Get().next(best_indices.size())];
+        const auto& target = candidates[idx];
+        for (uint32_t i = 0; i < num_slices; ++i)
+            slice_dev_ids.push_back(target.dev_id);
+        updateStats(target.dev_id, total_length, target.is_cross_numa);
+    } else {
+        std::vector<double> cumulative_scores;
+        double total_score = 0;
+        for (auto& c : candidates) {
+            total_score += c.score;
+            cumulative_scores.push_back(total_score);
+        }
+        thread_local uint64_t tl_batch_offset = 0;
+        double offset = (tl_batch_offset++ * slice_bytes) / total_score;
         for (uint32_t i = 0; i < num_slices; ++i) {
-            int dev_id = devices_scores[tl_allocate_count % devices_scores.size()].dev_id;
-            slice_dev_ids.push_back(dev_id);
-            tl_allocate_count++;
-            devices_[dev_id].total_bytes.fetch_add(slice_bytes, std::memory_order_relaxed);
+            double pos =
+                fmod(offset + i * (total_score / num_slices), total_score);
+            auto it = std::lower_bound(cumulative_scores.begin(),
+                                       cumulative_scores.end(), pos);
+            size_t idx = std::distance(cumulative_scores.begin(), it);
+            if (idx >= candidates.size()) idx = candidates.size() - 1;
+
+            slice_dev_ids.push_back(candidates[idx].dev_id);
+            updateStats(candidates[idx].dev_id, slice_bytes,
+                        candidates[idx].is_cross_numa);
         }
-        return Status::OK();
     }
-
-    // ========== Weighted round-robin based on bandwidth ==========
-    // Calculate cumulative scores
-    std::vector<double> cumulative_scores;
-    double total_score = 0;
-    for (const auto& ds : devices_scores) {
-        total_score += ds.bandwidth_bps;
-        cumulative_scores.push_back(total_score);
-    }
-
-    // Use a per-thread counter to ensure different threads distribute differently
-    thread_local uint64_t tl_batch_count = 0;
-    double offset = (tl_batch_count++ * slice_bytes) / total_score;
-
-    for (uint32_t i = 0; i < num_slices; ++i) {
-        double pos = fmod(offset + i * (total_score / num_slices), total_score);
-
-        // Find device for this position
-        int chosen_dev_id = devices_scores[0].dev_id;
-        for (size_t j = 0; j < cumulative_scores.size(); ++j) {
-            if (pos < cumulative_scores[j]) {
-                chosen_dev_id = devices_scores[j].dev_id;
-                break;
-            }
-        }
-
-        slice_dev_ids.push_back(chosen_dev_id);
-
-        // Update inflight for this slice
-        devices_[chosen_dev_id].addInflight(slice_bytes);
-        devices_[chosen_dev_id].total_bytes.fetch_add(slice_bytes, std::memory_order_relaxed);
-        total_local_bytes_.fetch_add(slice_bytes, std::memory_order_relaxed);
-    }
-
     return Status::OK();
 }
 
-// Print per-second traffic statistics
-static void printTrafficStats(std::unordered_map<int, DeviceQuota::DeviceInfo>& devices) {
+void DeviceQuota::updateStats(int dev_id, uint64_t bytes, bool is_cross) {
+    auto& dev = devices_[dev_id];
+    dev.addInflight(bytes);
+    dev.total_bytes.fetch_add(bytes, std::memory_order_relaxed);
+    if (is_cross) {
+        total_cross_numa_bytes_.fetch_add(bytes, std::memory_order_relaxed);
+    } else {
+        total_local_bytes_.fetch_add(bytes, std::memory_order_relaxed);
+    }
+}
+
+static void printTrafficStats(
+    std::unordered_map<int, DeviceQuota::DeviceInfo>& devices) {
     static std::atomic<uint64_t> last_print_time_ns{0};
 
     uint64_t now = getCurrentTimeInNano();
@@ -347,14 +175,17 @@ static void printTrafficStats(std::unordered_map<int, DeviceQuota::DeviceInfo>& 
     // Print every 1 second (only one thread will succeed)
     if (now - expected_last >= 1000000000ULL) {
         // Try to claim the print slot
-        if (last_print_time_ns.compare_exchange_strong(expected_last, now,
-                std::memory_order_relaxed, std::memory_order_relaxed)) {
+        if (last_print_time_ns.compare_exchange_strong(
+                expected_last, now, std::memory_order_relaxed,
+                std::memory_order_relaxed)) {
             std::ostringstream oss;
             oss << "[RDMA Traffic] ";
             bool first = true;
             for (auto& [dev_id, dev] : devices) {
-                uint64_t total = dev.total_bytes.load(std::memory_order_relaxed);
-                uint64_t last = dev.last_second_bytes.load(std::memory_order_relaxed);
+                uint64_t total =
+                    dev.total_bytes.load(std::memory_order_relaxed);
+                uint64_t last =
+                    dev.last_second_bytes.load(std::memory_order_relaxed);
                 uint64_t delta = total - last;
                 double mbps = delta * 8.0 / 1e6;  // Mb/s
 
@@ -364,8 +195,8 @@ static void printTrafficStats(std::unordered_map<int, DeviceQuota::DeviceInfo>& 
                 if (mbps < 0.01) continue;
 
                 if (!first) oss << " | ";
-                oss << "dev" << dev_id << ": " << std::fixed << std::setprecision(2)
-                    << mbps << " Mb/s";
+                oss << "dev" << dev_id << ": " << std::fixed
+                    << std::setprecision(2) << mbps << " Mb/s";
                 first = false;
             }
 
@@ -388,14 +219,13 @@ Status DeviceQuota::release(int dev_id, uint64_t length, double latency,
     if (it == devices_.end())
         return Status::InvalidArgument("device not found");
 
-    auto &dev = it->second;
+    auto& dev = it->second;
 
     // Release inflight bytes
     dev.subInflight(length);
 
     // Early exit if EWMA learning disabled
-    if (!sched_params_.enable_ewma_learning)
-        return Status::OK();
+    if (!sched_params_.enable_ewma_learning) return Status::OK();
 
     // Filter out small transfers (noise reduction)
     if (length < 4096 || latency < 1e-6) return Status::OK();

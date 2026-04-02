@@ -73,6 +73,12 @@ struct RdmaSlice {
     uint64_t submit_ts = 0;
     int priority = PRIO_HIGH;      // QoS priority
     uint64_t device_mask = ~0ULL;  // Device mask for quota allocation
+
+    // Batch allocation context for unified quota scheduling
+    std::string source_location;         // Source memory location for quota
+    uint32_t num_slices_in_request = 1;  // Total slices in the request
+    uint32_t slice_index_in_request =
+        0;  // Index of this slice within the request
 };
 
 using RdmaSliceStorage = Slab<RdmaSlice>;

@@ -259,7 +259,6 @@ Status RdmaTransport::submitTransferTasks(
 
     // Get quota for device allocation
     auto device_quota = workers_->getDeviceQuota();
-    const uint32_t kBatchThreshold = 4;  // Use batch allocation for >= 4 slices
 
     for (auto& request : request_list) {
         auto opcode = request.opcode;
@@ -296,27 +295,31 @@ Status RdmaTransport::submitTransferTasks(
             1, std::min<uint64_t>(num_slices, max_slice_count));
 
         // Get source location
-        auto source_locations = Platform::getLoader().getLocation(
-            request.source, 1, false);
+        auto source_locations =
+            Platform::getLoader().getLocation(request.source, 1, false);
         std::string source_location = source_locations.empty()
-            ? kWildcardLocation
-            : source_locations[0].location;
+                                          ? kWildcardLocation
+                                          : source_locations[0].location;
 
-        // Device allocation: use quota batch allocation for large requests
+        // ========== Quota makes ALL device decisions ==========
+        // Allocate devices for all slices of this request at once
         std::vector<int> slice_dev_ids;
-        bool use_batch_allocation = (num_slices >= kBatchThreshold);
+        Status alloc_status = device_quota->allocate(
+            request.length,                     // Total request length
+            static_cast<uint32_t>(num_slices),  // Number of slices
+            source_location,                    // Source location
+            slice_dev_ids,           // Output: device IDs for each slice
+            request.priority,        // Priority
+            rdma_batch->device_mask  // Device mask
+        );
 
-        if (use_batch_allocation && device_quota) {
-            // Batch allocation: quota distributes slices across devices
-            auto status = device_quota->allocateBatch(
-                request.length, num_slices, source_location,
-                slice_dev_ids, request.priority, rdma_batch->device_mask);
-            if (!status.ok()) {
-                // Fallback to single device
-                use_batch_allocation = false;
-            }
+        if (!alloc_status.ok()) {
+            LOG(WARNING) << "Device quota allocation failed: "
+                         << alloc_status.message();
+            return alloc_status;
         }
 
+        // Create slices with pre-assigned devices from quota
         uint64_t offset = 0;
         for (uint64_t slice_idx = 0; slice_idx < num_slices; ++slice_idx) {
             uint64_t length =
@@ -333,13 +336,7 @@ Status RdmaTransport::submitTransferTasks(
             slice->word = PENDING;
             slice->next = nullptr;
             slice->enqueue_ts = enqueue_ts;
-
-            // Assign device: use pre-allocated from batch, or leave -1 for quota selection
-            if (use_batch_allocation && slice_idx < slice_dev_ids.size()) {
-                slice->source_dev_id = slice_dev_ids[slice_idx];
-            }
-            // else: source_dev_id remains -1, quota will select optimal device
-
+            slice->source_dev_id = slice_dev_ids[slice_idx];
             task.num_slices++;
             offset += length;
             // Distribute slices across workers (round-robin)

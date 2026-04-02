@@ -39,33 +39,39 @@ static constexpr double kMaxBwGbps = 400.0;
 class SharedQuotaManager;
 
 /**
- * @brief DeviceQuota implements NIC selection based on EWMA latency prediction.
+ * @brief DeviceQuota implements NIC selection with two modes:
  *
- * Inspired by Facebook L5 load balancer, each NIC maintains:
- * 1. Global inflight_bytes (all threads see the same state)
- * 2. EWMA-smoothed effective bandwidth (learned from actual transfer performance)
+ * 1. Baseline mode (enable_quota=false): Simple round-robin
+ *    - Deterministic, no load tracking
+ *    - All devices used equally
  *
- * Selection algorithm:
- * 1. Prefer local NUMA devices (rank 0)
- * 2. Predict completion time: predicted_time = inflight / ewma_bandwidth
- * 3. Only consider cross-NUMA if all local devices are overloaded
+ * 2. Smart mode (enable_quota=true): EWMA-based selection
+ *    - Tracks global inflight bytes per device
+ *    - Learns effective bandwidth via EWMA
+ *    - Selects device with minimal predicted completion time
+ *    - Supports multi-path for large requests
  *
- * The EWMA update:
- *     ewma_bandwidth <- alpha * ewma_bandwidth + (1 - alpha) * observed_bandwidth
+ * Selection formula:
+ *     predicted_time = (inflight + length) / ewma_bandwidth
+ *
+ * EWMA update:
+ *     ewma_bandwidth <- alpha * ewma_bandwidth + (1 - alpha) *
+ * observed_bandwidth
  */
 class DeviceQuota {
    public:
     struct DeviceInfo {
         int dev_id;
-        double bw_gbps;           // Theoretical bandwidth from topology
+        double bw_gbps;  // Theoretical bandwidth from topology
         int numa_id;
         uint64_t padding0[5];
-        std::atomic<uint64_t> inflight_bytes{0};      // Global inflight bytes
+        std::atomic<uint64_t> inflight_bytes{0};  // Global inflight bytes
         uint64_t padding1[7];
-        std::atomic<double> ewma_bandwidth_bps{25e9}; // Learned effective bandwidth
+        std::atomic<double> ewma_bandwidth_bps{
+            25e9};  // Learned effective bandwidth
         uint64_t padding2[7];
-        std::atomic<uint64_t> total_bytes{0};         // Total bytes transferred
-        std::atomic<uint64_t> last_second_bytes{0};   // Bytes in last second
+        std::atomic<uint64_t> total_bytes{0};        // Total bytes transferred
+        std::atomic<uint64_t> last_second_bytes{0};  // Bytes in last second
         uint64_t padding3[4];
 
         // Get current inflight bytes
@@ -120,28 +126,28 @@ class DeviceQuota {
         return shared_quota_;
     }
 
-    Status allocate(uint64_t length, const std::string &location,
-                    int &chosen_dev_id, int priority = 0,
+    // Allocate devices for a request
+    // Returns device IDs for each slice (single device for small requests,
+    // multiple devices for large requests)
+    Status allocate(uint64_t total_length, uint32_t num_slices,
+                    const std::string &location,
+                    std::vector<int> &slice_dev_ids, int priority = 0,
                     uint64_t device_mask = ~0ULL);
 
-    // Batch allocation: assign devices for multiple slices of a single request
-    // Returns a vector of device IDs, one per slice
-    Status allocateBatch(uint64_t total_length, uint32_t num_slices,
-                        const std::string &location,
-                        std::vector<int>& slice_dev_ids,
-                        int priority = 0,
-                        uint64_t device_mask = ~0ULL);
-
+    // Release completed transfer (update EWMA)
     Status release(int dev_id, uint64_t length, double latency,
                    int priority = 0);
 
-    // Update traffic statistics for pre-assigned devices (bypasses quota allocation)
+    // Update traffic statistics for pre-assigned devices (bypasses quota
+    // allocation)
     void updateTrafficStats(int dev_id, uint64_t length) {
         auto it = devices_.find(dev_id);
         if (it != devices_.end()) {
             it->second.total_bytes.fetch_add(length, std::memory_order_relaxed);
         }
     }
+
+    void updateStats(int dev_id, uint64_t bytes, bool is_cross);
 
     // Get inflight bytes for a device (used by shared quota)
     uint64_t getInflightBytes(int dev_id) const {
@@ -150,7 +156,8 @@ class DeviceQuota {
         return it->second.getInflightBytes();
     }
 
-    // Get active bytes by priority (for shared quota compatibility - always 0 now)
+    // Get active bytes by priority (for shared quota compatibility - always 0
+    // now)
     uint64_t getActiveBytesByPriority(int dev_id, int priority) const {
         // Priority tracking removed, just return 0
         (void)dev_id;
@@ -170,19 +177,18 @@ class DeviceQuota {
     void setEnableQuota(bool enable) { enable_quota_ = enable; }
     bool getEnableQuota() const { return enable_quota_; }
 
-    // Scheduling parameters
+    // Scheduling parameters (only used when enable_quota=true)
     struct SchedulingParams {
-        // EWMA learning rate (0.01 = slow adaptation, 0.1 = fast adaptation)
+        // EWMA learning rate (0.01 = slow, 0.1 = fast)
         double ewma_alpha = 0.01;
 
-        // Batch allocation: when num_slices >= this threshold, use weighted multi-path
+        // Batch threshold: use multi-path when num_slices >= this value
         uint32_t batch_threshold = 4;
 
-        // Cross-NUMA max usage ratio (0.0 = never use, 1.0 = use freely)
-        // Default 0.0 means never use cross-NUMA
+        // Cross-NUMA max ratio (0.0 = never use, 1.0 = use freely)
         double cross_numa_max_ratio = 0.0;
 
-        // Cross-NUMA penalty factor (effective bandwidth = bw * penalty)
+        // Cross-NUMA bandwidth penalty (effective_bw = bw * penalty)
         double cross_numa_penalty = 0.7;
 
         // Enable/disable EWMA learning

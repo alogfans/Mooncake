@@ -185,7 +185,8 @@ TEBenchRunner::TEBenchRunner() {
 
     auto device_filter = splitDeviceList(XferBenchConfig::rdma_whitelist);
     if (!device_filter.empty()) {
-        engine_ = std::make_unique<mooncake::TransferEngine>(true, device_filter);
+        engine_ =
+            std::make_unique<mooncake::TransferEngine>(true, device_filter);
     } else {
         engine_ = std::make_unique<mooncake::TransferEngine>(true);
     }

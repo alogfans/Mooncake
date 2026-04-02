@@ -46,9 +46,12 @@ Workers::Workers(RdmaTransport* transport)
     // Configure EWMA scheduling parameters
     DeviceQuota::SchedulingParams params;
     params.ewma_alpha = conf->get("transports/rdma/ewma_alpha", 0.01);
-    params.cross_numa_max_ratio = conf->get("transports/rdma/cross_numa_max_ratio", 0.1);
-    params.cross_numa_penalty = conf->get("transports/rdma/cross_numa_penalty", 0.7);
-    params.enable_ewma_learning = conf->get("transports/rdma/enable_ewma_learning", true);
+    params.cross_numa_max_ratio =
+        conf->get("transports/rdma/cross_numa_max_ratio", 0.1);
+    params.cross_numa_penalty =
+        conf->get("transports/rdma/cross_numa_penalty", 0.7);
+    params.enable_ewma_learning =
+        conf->get("transports/rdma/enable_ewma_learning", true);
     device_quota_->setSchedulingParams(params);
 }
 
@@ -571,87 +574,55 @@ int Workers::getDeviceRank(const RouteHint& hint, int device_id) {
 Status Workers::selectOptimalDevice(RouteHint& source, RouteHint& target,
                                     RdmaSlice* slice) {
     auto& worker = worker_context_[tl_wid];
+
+    // Device should already be assigned by quota
     if (slice->source_dev_id < 0) {
-        CHECK_STATUS(device_quota_->allocate(
-            slice->length, source.buffer->location, slice->source_dev_id,
-            slice->priority, slice->device_mask));
-    } else {
-        // Pre-assigned device: verify it can access the memory region
-        bool device_valid = false;
-        for (size_t rank = 0; rank < Topology::DevicePriorityRanks; ++rank) {
-            const auto& list = source.topo_entry->device_list[rank];
-            if (std::find(list.begin(), list.end(), slice->source_dev_id) != list.end()) {
-                device_valid = true;
-                break;
-            }
-        }
-        // If pre-assigned device cannot access this region, fall back to quota allocation
-        if (!device_valid) {
-            LOG(WARNING) << "Pre-assigned device " << slice->source_dev_id
-                        << " cannot access memory region, falling back to quota allocation";
-            slice->source_dev_id = -1;
-            CHECK_STATUS(device_quota_->allocate(
-                slice->length, source.buffer->location, slice->source_dev_id,
-                slice->priority, slice->device_mask));
-        } else {
-            // Pre-assigned device is valid - update traffic statistics
-            // (allocate() was bypassed, so we need to update stats manually)
-            device_quota_->updateTrafficStats(slice->source_dev_id, slice->length);
-        }
+        return Status::InvalidArgument("Source device not assigned" LOC_MARK);
     }
 
-    if (slice->source_dev_id < 0)
-        return Status::DeviceNotFound(
-            "No device could access the slice memory region" LOC_MARK);
-
+    // Load rail topology and select target device
     auto& rail = worker.rails[target.segment->machine_id];
     if (!rail.ready() || target.topo != rail.remote())
         rail.load(source.topo, target.topo);
-    if (slice->target_dev_id < 0) {
-        int mapped_dev_id = rail.findBestRemoteDevice(
-            slice->source_dev_id, target.topo_entry->numa_node);
-        // Only use rank 0 (local NUMA) devices
-        const auto& list = target.topo_entry->device_list[0];
-        if (!list.empty()) {
-            if (std::find(list.begin(), list.end(), mapped_dev_id) != list.end()) {
-                slice->target_dev_id = mapped_dev_id;
-            } else {
-                slice->target_dev_id = list[SimpleRandom::Get().next(list.size())];
-            }
-        }
-    }
 
-    if (slice->target_dev_id < 0) {
-        // Only use rank 0 (local NUMA) devices
-        const auto& list = target.topo_entry->device_list[0];
-        if (!list.empty()) {
-            slice->target_dev_id = list[SimpleRandom::Get().next(list.size())];
-        }
-    }
-    /*
+    // Select target device (only if not already set by retry logic)
     if (slice->target_dev_id < 0) {
         int mapped_dev_id = rail.findBestRemoteDevice(
             slice->source_dev_id, target.topo_entry->numa_node);
+
+        // Try to use mapped device, fallback to any available device
+        bool found_target = false;
         for (size_t rank = 0; rank < Topology::DevicePriorityRanks; ++rank) {
-            auto &list = target.topo_entry->device_list[rank];
+            const auto& list = target.topo_entry->device_list[rank];
             if (list.empty()) continue;
             auto it = std::find(list.begin(), list.end(), mapped_dev_id);
             if (it != list.end()) {
                 slice->target_dev_id = mapped_dev_id;
+                found_target = true;
                 break;
             }
-            slice->target_dev_id = list[SimpleRandom::Get().next(list.size())];
-            break;
+        }
+
+        // Fallback: pick any device from target
+        if (!found_target) {
+            for (size_t rank = 0; rank < Topology::DevicePriorityRanks;
+                 ++rank) {
+                const auto& list = target.topo_entry->device_list[rank];
+                if (list.empty()) continue;
+                slice->target_dev_id =
+                    list[SimpleRandom::Get().next(list.size())];
+                break;
+            }
         }
     }
-    */
 
     if (slice->target_dev_id < 0)
         return Status::DeviceNotFound(
-            "No device could access the slice memory region" LOC_MARK);
+            "No target device could access the slice memory region" LOC_MARK);
 
+    // Verify rail availability
     if (!rail.available(slice->source_dev_id, slice->target_dev_id)) {
-        LOG(INFO) << "Optimal device pair not available: source_dev_id "
+        LOG(INFO) << "Device pair not available: source_dev_id "
                   << slice->source_dev_id << ", target_dev_id "
                   << slice->target_dev_id;
         return selectFallbackDevice(source, target, slice);
@@ -661,9 +632,11 @@ Status Workers::selectOptimalDevice(RouteHint& source, RouteHint& target,
 }
 
 int Workers::getDeviceByFlatIndex(const RouteHint& hint, size_t flat_idx) {
-    // Only use rank 0 (local NUMA) devices
-    auto& list = hint.topo_entry->device_list[0];
-    if (flat_idx < list.size()) return list[flat_idx];
+    for (size_t rank = 0; rank < Topology::DevicePriorityRanks; ++rank) {
+        auto& list = hint.topo_entry->device_list[rank];
+        if (flat_idx < list.size()) return list[flat_idx];
+        flat_idx -= list.size();
+    }
     return -1;
 }
 
@@ -673,9 +646,13 @@ Status Workers::selectFallbackDevice(RouteHint& source, RouteHint& target,
     bool same_machine =
         (source.segment->machine_id == target.segment->machine_id);
 
-    // Only use rank 0 (local NUMA) devices
-    size_t src_total = source.topo_entry->device_list[0].size();
-    size_t dst_total = target.topo_entry->device_list[0].size();
+    size_t src_total = 0;
+    for (size_t srank = 0; srank < Topology::DevicePriorityRanks; ++srank)
+        src_total += source.topo_entry->device_list[srank].size();
+
+    size_t dst_total = 0;
+    for (size_t trank = 0; trank < Topology::DevicePriorityRanks; ++trank)
+        dst_total += target.topo_entry->device_list[trank].size();
 
     size_t total_combos = src_total * dst_total;
     if ((size_t)slice->retry_count >= total_combos)

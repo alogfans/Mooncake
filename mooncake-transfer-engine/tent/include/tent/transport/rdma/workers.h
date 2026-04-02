@@ -58,7 +58,7 @@ class Workers {
 
     double getCrossNumaBandwidthRatio() const;
 
-    DeviceQuota* getDeviceQuota() const { return device_quota_.get(); }
+    DeviceQuota *getDeviceQuota() const { return device_quota_.get(); }
 
    private:
     using Task = std::function<void()>;
