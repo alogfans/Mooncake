@@ -100,11 +100,58 @@ void Topology::print() const {
     }
 }
 
+void Topology::printMapping() const {
+    LOG(INFO) << "========== Topology Mapping ==========";
+
+    // Group by NUMA node
+    std::map<int, std::vector<const NicEntry*>> nics_by_numa;
+    for (const auto& nic : nic_list_) {
+        nics_by_numa[nic.numa_node].push_back(&nic);
+    }
+
+    // Print NIC → NUMA mapping
+    LOG(INFO) << "NICs by NUMA Node:";
+    for (const auto& [numa_node, nics] : nics_by_numa) {
+        std::stringstream ss;
+        ss << "  NUMA " << numa_node << ": ";
+        for (const auto& nic : nics) {
+            ss << nic->name << "(" << nic->bw_gbps << "G) ";
+        }
+        LOG(INFO) << ss.str();
+    }
+
+    // Print Memory → NIC mapping with tier info
+    LOG(INFO) << "Memory → NIC Mapping:";
+    for (const auto& mem : mem_list_) {
+        std::stringstream ss;
+        ss << "  " << mem.name << " (NUMA " << mem.numa_node << "):";
+
+        // Print NICs by tier/rank
+        for (size_t rank = 0; rank < DevicePriorityRanks; ++rank) {
+            if (mem.device_list[rank].empty()) continue;
+
+            const char* tier_name[] = {"Tier0(Best)", "Tier1(Good)", "Tier2(Cross)"};
+            ss << "\n    " << tier_name[rank] << ": ";
+
+            for (int nic_id : mem.device_list[rank]) {
+                if (nic_id >= 0 && nic_id < (int)nic_list_.size()) {
+                    ss << nic_list_[nic_id].name << " ";
+                }
+            }
+        }
+        LOG(INFO) << ss.str();
+    }
+
+    LOG(INFO) << "====================================";
+}
+
 Status Topology::discover(const std::vector<Platform*>& platforms) {
     clear();
     for (auto& entry : platforms) {
         CHECK_STATUS(entry->probe(nic_list_, mem_list_));
     }
+    // Print mapping after discovery
+    printMapping();
     return Status::OK();
 }
 

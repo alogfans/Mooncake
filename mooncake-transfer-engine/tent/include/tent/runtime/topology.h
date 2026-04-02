@@ -73,6 +73,8 @@ class Topology {
 
     void print() const;
 
+    void printMapping() const;  // Print detailed CPU/GPU/NIC mapping
+
     size_t getNicCount(NicType type = NIC_UNKNOWN) const;
 
     size_t getMemCount(MemType type = MEM_UNKNOWN) const;

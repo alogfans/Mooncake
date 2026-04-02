@@ -12,102 +12,77 @@ file(GLOB BACKEND_SOURCES "*.cpp")
 # Find available platforms
 set(PLATFORMS_FOUND "")
 
-# CUDA
-if (CUDAToolkit_FOUND)
-    list(APPEND PLATFORMS_FOUND "cuda")
-    add_library(tent_platform_cuda SHARED ${BACKEND_SOURCES})
-    target_compile_definitions(tent_platform_cuda PRIVATE USE_CUDA TENT_BUILD_PLUGIN)
-    target_include_directories(tent_platform_cuda PUBLIC
-        ${CUDAToolkit_INCLUDE_DIRS}
+# Common function to build a platform plugin
+# Usage: add_platform_plugin(<name> <compile_flag> <lib_name> [include_dirs])
+function(add_platform_plugin NAME COMPILE_FLAG LIB_NAME)
+    list(APPEND PLATFORMS_FOUND "${NAME}")
+    add_library(tent_platform_${NAME} SHARED ${BACKEND_SOURCES})
+
+    # Set compile definitions (PUBLIC for global visibility)
+    target_compile_definitions(tent_platform_${NAME} PUBLIC
+        ${COMPILE_FLAG}
+        TENT_BUILD_PLUGIN
+        HAS_DEVICE_SUPPORT
+    )
+
+    # Set include directories
+    target_include_directories(tent_platform_${NAME} PUBLIC
         ${TENT_PLATFORM_INCLUDE_DIR}
+        ${ARGN}  # Optional additional include dirs
     )
-    target_link_libraries(tent_platform_cuda PUBLIC
-        CUDA::cudart
-        CUDA::cuda_driver
-        numa
-    )
-    set_target_properties(tent_platform_cuda PROPERTIES
-        OUTPUT_NAME "tent_platform_cuda"
+
+    # Set output properties
+    set_target_properties(tent_platform_${NAME} PROPERTIES
+        OUTPUT_NAME "${LIB_NAME}"
         LIBRARY_OUTPUT_DIRECTORY "${PLATFORM_PLUGIN_OUTPUT_DIR}"
     )
-    install(TARGETS tent_platform_cuda LIBRARY DESTINATION lib/tent/platform)
-    message(STATUS "  Platform plugin: CUDA")
+
+    # Install target
+    install(TARGETS tent_platform_${NAME} LIBRARY DESTINATION lib/tent/platform)
+
+    message(STATUS "  Platform plugin: ${NAME}")
+endfunction()
+
+# ============================================================================
+# GPU Platform Plugins
+# ============================================================================
+
+# CUDA
+if (CUDAToolkit_FOUND)
+    add_platform_plugin(cuda USE_CUDA tent_platform_cuda ${CUDAToolkit_INCLUDE_DIRS})
+    target_link_libraries(tent_platform_cuda PUBLIC CUDA::cudart CUDA::cuda_driver numa)
 endif()
 
 # MUSA (Moore Threads)
 if (USE_MUSA)
-    list(APPEND PLATFORMS_FOUND "musa")
-    add_library(tent_platform_musa SHARED ${BACKEND_SOURCES})
-    target_compile_definitions(tent_platform_musa PRIVATE USE_MUSA TENT_BUILD_PLUGIN)
-    target_include_directories(tent_platform_musa PUBLIC
-        ${TENT_PLATFORM_INCLUDE_DIR}
-    )
+    add_platform_plugin(musa USE_MUSA tent_platform_musa)
     target_link_libraries(tent_platform_musa PUBLIC musa musart numa)
-    set_target_properties(tent_platform_musa PROPERTIES
-        OUTPUT_NAME "tent_platform_musa"
-        LIBRARY_OUTPUT_DIRECTORY "${PLATFORM_PLUGIN_OUTPUT_DIR}"
-    )
-    install(TARGETS tent_platform_musa LIBRARY DESTINATION lib/tent/platform)
-    message(STATUS "  Platform plugin: MUSA")
 endif()
 
 # HIP (AMD)
 if (USE_HIP)
-    list(APPEND PLATFORMS_FOUND "hip")
-    add_library(tent_platform_hip SHARED ${BACKEND_SOURCES})
-    target_compile_definitions(tent_platform_hip PRIVATE USE_HIP TENT_BUILD_PLUGIN)
-    target_include_directories(tent_platform_hip PUBLIC
-        ${TENT_PLATFORM_INCLUDE_DIR}
-    )
+    add_platform_plugin(hip USE_HIP tent_platform_hip)
     target_link_libraries(tent_platform_hip PUBLIC amdhip64 numa)
-    set_target_properties(tent_platform_hip PROPERTIES
-        OUTPUT_NAME "tent_platform_hip"
-        LIBRARY_OUTPUT_DIRECTORY "${PLATFORM_PLUGIN_OUTPUT_DIR}"
-    )
-    install(TARGETS tent_platform_hip LIBRARY DESTINATION lib/tent/platform)
-    message(STATUS "  Platform plugin: HIP")
 endif()
 
 # MACA (Iluvatar)
 if (USE_MACA)
-    list(APPEND PLATFORMS_FOUND "maca")
-    add_library(tent_platform_maca SHARED ${BACKEND_SOURCES})
-    target_compile_definitions(tent_platform_maca PRIVATE USE_MACA TENT_BUILD_PLUGIN)
-    target_include_directories(tent_platform_maca PUBLIC
-        ${TENT_PLATFORM_INCLUDE_DIR}
-    )
+    add_platform_plugin(maca USE_MACA tent_platform_maca)
     target_link_libraries(tent_platform_maca PUBLIC mcr numa)
-    set_target_properties(tent_platform_maca PROPERTIES
-        OUTPUT_NAME "tent_platform_maca"
-        LIBRARY_OUTPUT_DIRECTORY "${PLATFORM_PLUGIN_OUTPUT_DIR}"
-    )
-    install(TARGETS tent_platform_maca LIBRARY DESTINATION lib/tent/platform)
-    message(STATUS "  Platform plugin: MACA")
 endif()
 
 # Ascend (Huawei)
 if (USE_ASCEND OR USE_ASCEND_DIRECT)
-    list(APPEND PLATFORMS_FOUND "ascend")
-    add_library(tent_platform_ascend SHARED ${BACKEND_SOURCES})
-    target_compile_definitions(tent_platform_ascend PRIVATE USE_ASCEND TENT_BUILD_PLUGIN)
-    target_include_directories(tent_platform_ascend PUBLIC
-        ${TENT_PLATFORM_INCLUDE_DIR}
-    )
+    add_platform_plugin(ascend USE_ASCEND tent_platform_ascend)
     target_link_libraries(tent_platform_ascend PUBLIC ascendcl numa)
-    set_target_properties(tent_platform_ascend PROPERTIES
-        OUTPUT_NAME "tent_platform_ascend"
-        LIBRARY_OUTPUT_DIRECTORY "${PLATFORM_PLUGIN_OUTPUT_DIR}"
-    )
-    install(TARGETS tent_platform_ascend LIBRARY DESTINATION lib/tent/platform)
-    message(STATUS "  Platform plugin: Ascend")
 endif()
 
-# CPU fallback (always available)
+# ============================================================================
+# CPU Fallback (always available)
+# ============================================================================
 add_library(tent_platform_cpu SHARED ${BACKEND_SOURCES})
-target_compile_definitions(tent_platform_cpu PRIVATE TENT_BUILD_PLUGIN)
-target_include_directories(tent_platform_cpu PUBLIC
-    ${TENT_PLATFORM_INCLUDE_DIR}
-)
+target_compile_definitions(tent_platform_cpu PUBLIC TENT_BUILD_PLUGIN)
+target_include_directories(tent_platform_cpu PUBLIC ${TENT_PLATFORM_INCLUDE_DIR})
 target_link_libraries(tent_platform_cpu PUBLIC numa)
 set_target_properties(tent_platform_cpu PROPERTIES
     OUTPUT_NAME "tent_platform_cpu"

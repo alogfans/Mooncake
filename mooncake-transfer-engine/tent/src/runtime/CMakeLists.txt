@@ -29,6 +29,10 @@ endif()
 
 add_library(tent_platform STATIC ${PLATFORM_SOURCES})
 
+# Add platform include directory (needed for backend.cpp in BUILTIN mode)
+target_include_directories(tent_platform PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../../include)
+
+# Metastore support
 if (TARGET metastore_redis)
   add_definitions(-DUSE_REDIS)
   target_link_libraries(tent_platform PUBLIC metastore_redis)
@@ -46,16 +50,49 @@ endif()
 
 target_link_libraries(tent_platform PUBLIC numa tent_common)
 
-# Define build mode for platform.cpp
+# ============================================================================
+# Build mode configuration
+# ============================================================================
+
 if(TENT_USE_PLUGINS)
-    target_compile_definitions(tent_platform PRIVATE TENT_PLUGIN_TRANSPORTS)
+    target_compile_definitions(tent_platform PUBLIC TENT_PLUGIN_TRANSPORTS)
     message(STATUS "Platform: PLUGIN mode (dlopen loading)")
 else()
-    target_compile_definitions(tent_platform PRIVATE TENT_BUILTIN_TRANSPORTS)
+    target_compile_definitions(tent_platform PUBLIC TENT_BUILTIN_TRANSPORTS)
     message(STATUS "Platform: BUILTIN mode (static linking)")
+
+    # BUILTIN mode: statically link backend.cpp with appropriate platform support
+    # Only one platform can be active in BUILTIN mode
+    if(CUDAToolkit_FOUND OR USE_CUDA)
+        target_compile_definitions(tent_platform PUBLIC USE_CUDA HAS_DEVICE_SUPPORT)
+        target_include_directories(tent_platform PUBLIC ${CUDAToolkit_INCLUDE_DIRS})
+        target_link_libraries(tent_platform PUBLIC CUDA::cudart CUDA::cuda_driver)
+        message(STATUS "  BUILTIN platform backend: CUDA")
+    elseif(USE_HIP)
+        target_compile_definitions(tent_platform PUBLIC USE_HIP HAS_DEVICE_SUPPORT)
+        target_link_libraries(tent_platform PUBLIC amdhip64)
+        message(STATUS "  BUILTIN platform backend: HIP")
+    elseif(USE_MUSA)
+        target_compile_definitions(tent_platform PUBLIC USE_MUSA HAS_DEVICE_SUPPORT)
+        target_link_libraries(tent_platform PUBLIC musa musart)
+        message(STATUS "  BUILTIN platform backend: MUSA")
+    elseif(USE_MACA)
+        target_compile_definitions(tent_platform PUBLIC USE_MACA HAS_DEVICE_SUPPORT)
+        target_link_libraries(tent_platform PUBLIC mcr)
+        message(STATUS "  BUILTIN platform backend: MACA")
+    elseif(USE_ASCEND OR USE_ASCEND_DIRECT)
+        target_compile_definitions(tent_platform PUBLIC USE_ASCEND HAS_DEVICE_SUPPORT)
+        target_link_libraries(tent_platform PUBLIC ascendcl)
+        message(STATUS "  BUILTIN platform backend: Ascend")
+    else()
+        message(STATUS "  BUILTIN platform backend: CPU only (no GPU support)")
+    endif()
 endif()
 
-# Rest of runtime (depends on transports)
+# ============================================================================
+# Runtime library implementation
+# ============================================================================
+
 add_library(tent_runtime_impl STATIC
     control_plane.cpp
     memory_prober.cpp
@@ -68,10 +105,10 @@ add_library(tent_runtime_impl STATIC
 
 # Define build mode for transport_loader.cpp
 if(TENT_USE_PLUGINS)
-    target_compile_definitions(tent_runtime_impl PRIVATE TENT_PLUGIN_TRANSPORTS)
+    target_compile_definitions(tent_runtime_impl PUBLIC TENT_PLUGIN_TRANSPORTS)
     message(STATUS "Transport loader: PLUGIN mode (dlopen loading)")
 else()
-    target_compile_definitions(tent_runtime_impl PRIVATE TENT_BUILTIN_TRANSPORTS)
+    target_compile_definitions(tent_runtime_impl PUBLIC TENT_BUILTIN_TRANSPORTS)
     message(STATUS "Transport loader: BUILTIN mode (static linking)")
 endif()
 
