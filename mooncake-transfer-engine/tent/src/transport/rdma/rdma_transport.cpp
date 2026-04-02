@@ -20,6 +20,7 @@
 #include <sys/time.h>
 
 #include <cassert>
+#include <cmath>
 #include <cstddef>
 #include <future>
 #include <set>
@@ -248,16 +249,18 @@ Status RdmaTransport::submitTransferTasks(
 
     const size_t default_block_size = params_->workers.block_size;
     const int num_workers = params_->workers.num_workers;
-    const int num_devices = (size_t)local_topology_->getNicCount();
     std::vector<RdmaSliceList> slice_lists(num_workers);
     std::vector<RdmaSlice*> slice_tails(num_workers, nullptr);
     auto enqueue_ts = getCurrentTimeInNano();
 
     static std::atomic<int> g_caller_threads(0);
     thread_local int tl_caller_id = g_caller_threads.fetch_add(1);
-    bool enable_spray =
-        g_caller_threads.load(std::memory_order_relaxed) <= num_workers;
     int submit_slices = 0;
+
+    // Get quota for device allocation
+    auto device_quota = workers_->getDeviceQuota();
+    const uint32_t kBatchThreshold = 4;  // Use batch allocation for >= 4 slices
+
     for (auto& request : request_list) {
         auto opcode = request.opcode;
         auto type = Platform::getLoader().getMemoryType(request.source);
@@ -271,6 +274,7 @@ Status RdmaTransport::submitTransferTasks(
         task.status_word = PENDING;
         task.transferred_bytes = 0;
 
+        // Calculate number of slices
         const double merge_ratio = 0.25;
         uint64_t base_block = default_block_size;
         uint64_t num_slices = (request.length + base_block - 1) / base_block;
@@ -291,6 +295,28 @@ Status RdmaTransport::submitTransferTasks(
         num_slices = std::max<uint64_t>(
             1, std::min<uint64_t>(num_slices, max_slice_count));
 
+        // Get source location
+        auto source_locations = Platform::getLoader().getLocation(
+            request.source, 1, false);
+        std::string source_location = source_locations.empty()
+            ? kWildcardLocation
+            : source_locations[0].location;
+
+        // Device allocation: use quota batch allocation for large requests
+        std::vector<int> slice_dev_ids;
+        bool use_batch_allocation = (num_slices >= kBatchThreshold);
+
+        if (use_batch_allocation && device_quota) {
+            // Batch allocation: quota distributes slices across devices
+            auto status = device_quota->allocateBatch(
+                request.length, num_slices, source_location,
+                slice_dev_ids, request.priority, rdma_batch->device_mask);
+            if (!status.ok()) {
+                // Fallback to single device
+                use_batch_allocation = false;
+            }
+        }
+
         uint64_t offset = 0;
         for (uint64_t slice_idx = 0; slice_idx < num_slices; ++slice_idx) {
             uint64_t length =
@@ -307,12 +333,17 @@ Status RdmaTransport::submitTransferTasks(
             slice->word = PENDING;
             slice->next = nullptr;
             slice->enqueue_ts = enqueue_ts;
+
+            // Assign device: use pre-allocated from batch, or leave -1 for quota selection
+            if (use_batch_allocation && slice_idx < slice_dev_ids.size()) {
+                slice->source_dev_id = slice_dev_ids[slice_idx];
+            }
+            // else: source_dev_id remains -1, quota will select optimal device
+
             task.num_slices++;
             offset += length;
-            int part_id =
-                ((enable_spray ? submit_slices : static_cast<int>(slice_idx)) /
-                 num_devices) %
-                num_workers;
+            // Distribute slices across workers (round-robin)
+            int part_id = slice_idx % num_workers;
             auto& list = slice_lists[part_id];
             auto& tail = slice_tails[part_id];
             list.num_slices++;

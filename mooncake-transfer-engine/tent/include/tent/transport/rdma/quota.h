@@ -39,73 +39,64 @@ static constexpr double kMaxBwGbps = 400.0;
 class SharedQuotaManager;
 
 /**
- * @brief DeviceQuota implements NIC selection based on adaptive feedback.
+ * @brief DeviceQuota implements NIC selection based on EWMA latency prediction.
  *
- * Each NIC maintains a smoothed estimate of its average service time,
- * updated after each request completes. The allocator predicts the total
- * completion time of each NIC as:
+ * Inspired by Facebook L5 load balancer, each NIC maintains:
+ * 1. Global inflight_bytes (all threads see the same state)
+ * 2. EWMA-smoothed effective bandwidth (learned from actual transfer performance)
  *
- *     predicted_time = (active_bytes / bandwidth) + avg_service_time
+ * Selection algorithm:
+ * 1. Prefer local NUMA devices (rank 0)
+ * 2. Predict completion time: predicted_time = inflight / ewma_bandwidth
+ * 3. Only consider cross-NUMA if all local devices are overloaded
  *
- * and selects the NIC with the smallest predicted_time.
- *
- * The estimator is updated using exponential smoothing:
- *
- *     avg_service_time <- (1 - alpha) * avg_service_time + alpha *
- * observed_time
+ * The EWMA update:
+ *     ewma_bandwidth <- alpha * ewma_bandwidth + (1 - alpha) * observed_bandwidth
  */
 class DeviceQuota {
    public:
     struct DeviceInfo {
         int dev_id;
-        double bw_gbps;
+        double bw_gbps;           // Theoretical bandwidth from topology
         int numa_id;
         uint64_t padding0[5];
-        std::atomic<uint64_t> active_bytes_by_prio[3];  // [high, medium, low]
-        uint64_t padding1[5];
-        std::atomic<uint64_t> diffusion_active_bytes{0};
+        std::atomic<uint64_t> inflight_bytes{0};      // Global inflight bytes
+        uint64_t padding1[7];
+        std::atomic<double> ewma_bandwidth_bps{25e9}; // Learned effective bandwidth
         uint64_t padding2[7];
-        std::atomic<double> beta0{
-            0.0};  // Fixed overhead (microseconds), origin/main: 0.0
-        uint64_t padding3[7];
-        std::atomic<double> beta1{
-            1.0};  // Bandwidth correction factor, origin/main: 1.0
-        uint64_t padding4[7];
-        std::atomic<uint64_t> last_update_ns{
-            0};  // Last update time (RDTSCP-based)
-        uint64_t padding5[7];
+        std::atomic<uint64_t> total_bytes{0};         // Total bytes transferred
+        std::atomic<uint64_t> last_second_bytes{0};   // Bytes in last second
+        uint64_t padding3[4];
 
-        // Get total active bytes across all priorities
-        uint64_t getTotalActiveBytes() const {
-            uint64_t sum = 0;
-            for (int i = 0; i < NUM_PRIORITIES; ++i)
-                sum += active_bytes_by_prio[i].load(std::memory_order_relaxed);
-            return sum;
+        // Get current inflight bytes
+        uint64_t getInflightBytes() const {
+            return inflight_bytes.load(std::memory_order_relaxed);
         }
 
-        // Get active bytes for specific priority
-        uint64_t getActiveBytes(int priority) const {
-            if (priority < 0 || priority >= NUM_PRIORITIES) return 0;
-            return active_bytes_by_prio[priority].load(
-                std::memory_order_relaxed);
+        // Add to inflight
+        void addInflight(uint64_t bytes) {
+            inflight_bytes.fetch_add(bytes, std::memory_order_relaxed);
         }
 
-        // Add bytes to specific priority bucket
-        void addBytes(int priority, uint64_t bytes) {
-            if (priority >= 0 && priority < NUM_PRIORITIES)
-                active_bytes_by_prio[priority].fetch_add(
-                    bytes, std::memory_order_relaxed);
+        // Subtract from inflight
+        void subInflight(uint64_t bytes) {
+            inflight_bytes.fetch_sub(bytes, std::memory_order_relaxed);
         }
 
-        // Subtract bytes from specific priority bucket
-        void subBytes(int priority, uint64_t bytes) {
-            if (priority >= 0 && priority < NUM_PRIORITIES)
-                active_bytes_by_prio[priority].fetch_sub(
-                    bytes, std::memory_order_relaxed);
+        // Get current EWMA bandwidth
+        double getEwmaBandwidth() const {
+            return ewma_bandwidth_bps.load(std::memory_order_relaxed);
         }
 
-        // Calculate bandwidth in bytes/sec (with fallback to default)
-        double getBandwidthBytesPerSec() const {
+        // Update EWMA bandwidth
+        void updateEwmaBandwidth(double observed_bps, double alpha) {
+            double current = ewma_bandwidth_bps.load(std::memory_order_relaxed);
+            double new_bw = alpha * current + (1.0 - alpha) * observed_bps;
+            ewma_bandwidth_bps.store(new_bw, std::memory_order_relaxed);
+        }
+
+        // Calculate theoretical bandwidth in bytes/sec
+        double getTheoreticalBandwidth() const {
             if (bw_gbps >= kMinBwGbps && bw_gbps <= kMaxBwGbps)
                 return bw_gbps * 1e9 / 8.0;
             return kDefaultBwGbps * 1e9 / 8.0;  // 25e9
@@ -133,54 +124,69 @@ class DeviceQuota {
                     int &chosen_dev_id, int priority = 0,
                     uint64_t device_mask = ~0ULL);
 
+    // Batch allocation: assign devices for multiple slices of a single request
+    // Returns a vector of device IDs, one per slice
+    Status allocateBatch(uint64_t total_length, uint32_t num_slices,
+                        const std::string &location,
+                        std::vector<int>& slice_dev_ids,
+                        int priority = 0,
+                        uint64_t device_mask = ~0ULL);
+
     Status release(int dev_id, uint64_t length, double latency,
                    int priority = 0);
 
+    // Update traffic statistics for pre-assigned devices (bypasses quota allocation)
+    void updateTrafficStats(int dev_id, uint64_t length) {
+        auto it = devices_.find(dev_id);
+        if (it != devices_.end()) {
+            it->second.total_bytes.fetch_add(length, std::memory_order_relaxed);
+        }
+    }
+
+    // Get inflight bytes for a device (used by shared quota)
+    uint64_t getInflightBytes(int dev_id) const {
+        auto it = devices_.find(dev_id);
+        if (it == devices_.end()) return 0;
+        return it->second.getInflightBytes();
+    }
+
+    // Get active bytes by priority (for shared quota compatibility - always 0 now)
+    uint64_t getActiveBytesByPriority(int dev_id, int priority) const {
+        // Priority tracking removed, just return 0
+        (void)dev_id;
+        (void)priority;
+        return 0;
+    }
+
+    // Set diffusion active bytes (for shared quota compatibility)
     void setDiffusionActiveBytes(int dev_id, uint64_t value) {
-        devices_[dev_id].diffusion_active_bytes.store(
-            value, std::memory_order_relaxed);
-    }
-
-    // Get total active bytes across all priorities
-    uint64_t getActiveBytes(int dev_id) {
-        return devices_[dev_id].getTotalActiveBytes();
-    }
-
-    // Get active bytes for specific priority
-    uint64_t getActiveBytesByPriority(int dev_id, int priority) {
-        return devices_[dev_id].getActiveBytes(priority);
-    }
-
-    void setLearningRate(double alpha) { alpha_ = std::clamp(alpha, 0.0, 1.0); }
-
-    void setLocalWeight(double local_weight) {
-        local_weight_ = std::clamp(local_weight, 0.0, 1.0);
-    }
-
-    void setDiffusionInterval(uint64_t msec) {
-        diffusion_interval_ = msec * 1000000ull;
+        // No longer used, kept for API compatibility
+        (void)dev_id;
+        (void)value;
     }
 
     void setCrossNumaAccess(bool enable = true) { allow_cross_numa_ = enable; }
-
-    void setRobustClamping(bool enable) { use_robust_clamp_ = enable; }
-
-    bool getRobustClamping() const { return use_robust_clamp_; }
 
     void setEnableQuota(bool enable) { enable_quota_ = enable; }
     bool getEnableQuota() const { return enable_quota_; }
 
     // Scheduling parameters
     struct SchedulingParams {
-        double preferred_dev_discount = 0.7;  // Preference discount factor
-        double local_overload_threshold_mb =
-            10.0;  // MB threshold for local overload
-        double cross_numa_penalty_base = 10.0;  // Base penalty for cross-NUMA
-        double beta1_min = 0.5;
-        double beta1_max = 5.0;
-        double alpha = 0.01;  // Learning rate
-        bool enable_cross_numa_fallback = true;
-        bool enable_latency_learning = true;
+        // EWMA learning rate (0.01 = slow adaptation, 0.1 = fast adaptation)
+        double ewma_alpha = 0.01;
+
+        // Batch allocation: when num_slices >= this threshold, use weighted multi-path
+        uint32_t batch_threshold = 4;
+
+        // Cross-NUMA max usage ratio (0.0 = never use, 1.0 = use freely)
+        // Default 0.0 means never use cross-NUMA
+        double cross_numa_max_ratio = 0.0;
+
+        // Cross-NUMA penalty factor (effective bandwidth = bw * penalty)
+        double cross_numa_penalty = 0.7;
+
+        // Enable/disable EWMA learning
+        bool enable_ewma_learning = true;
     };
 
     void setSchedulingParams(const SchedulingParams &params) {
@@ -196,16 +202,17 @@ class DeviceQuota {
     std::unordered_map<int, DeviceInfo> devices_;
     mutable std::shared_mutex rwlock_;
     bool allow_cross_numa_ = false;
-    double alpha_ = 0.01;
-    double local_weight_ = 0.9;
-    uint64_t diffusion_interval_ = 10 * 1000000ull;
-    bool use_robust_clamp_ = true;  // Use adaptive bounds instead of static
-    uint32_t sample_window_size_ =
-        100;  // Number of samples for percentile calculation
     std::shared_ptr<SharedQuotaManager> shared_quota_;
     bool enable_quota_ = true;
-    bool update_quota_params_ = true;
     SchedulingParams sched_params_;
+
+    // Track source NUMA node for each location
+    std::unordered_map<std::string, int> location_numa_cache_;
+    mutable std::mutex numa_cache_lock_;
+
+    // Cross-NUMA usage tracking (for ratio control)
+    std::atomic<uint64_t> total_local_bytes_{0};
+    std::atomic<uint64_t> total_cross_numa_bytes_{0};
 };
 
 }  // namespace tent
