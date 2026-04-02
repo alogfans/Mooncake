@@ -37,19 +37,12 @@ Workers::Workers(RdmaTransport* transport)
         conf->get("transports/rdma/shared_quota_shm_path", "");
     if (!shared_quota_shm_path.empty())
         device_quota_->enableSharedQuota(shared_quota_shm_path);
-    auto cross_numa_access =
-        conf->get("transports/rdma/cross_numa_access", false);
-    device_quota_->setCrossNumaAccess(cross_numa_access);
     auto enable_quota = conf->get("transports/rdma/enable_quota", true);
     device_quota_->setEnableQuota(enable_quota);
 
     // Configure EWMA scheduling parameters
     DeviceQuota::SchedulingParams params;
     params.ewma_alpha = conf->get("transports/rdma/ewma_alpha", 0.01);
-    params.cross_numa_max_ratio =
-        conf->get("transports/rdma/cross_numa_max_ratio", 0.1);
-    params.cross_numa_penalty =
-        conf->get("transports/rdma/cross_numa_penalty", 0.7);
     params.enable_ewma_learning =
         conf->get("transports/rdma/enable_ewma_learning", true);
     device_quota_->setSchedulingParams(params);

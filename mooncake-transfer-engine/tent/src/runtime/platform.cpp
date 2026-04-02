@@ -23,6 +23,7 @@
 #include "tent/runtime/platform.h"
 #include "tent/common/status.h"
 #include "tent/common/utils/prefault.h"
+#include "tent/common/utils/os.h"
 
 #include <numa.h>
 #include <glog/logging.h>
@@ -42,6 +43,58 @@
 
 namespace mooncake {
 namespace tent {
+
+// ============================================================================
+// Location cache for hot path optimization
+// ============================================================================
+
+// Simple thread-local cache for getLocation results with TTL
+// Key: page-aligned address, Value: location string + timestamp
+struct LocationCacheEntry {
+    uintptr_t page_addr;
+    std::string location;
+    uint64_t timestamp_ns;  // Cache entry timestamp
+};
+
+static constexpr size_t kLocationCacheSize = 64;
+static constexpr uint64_t kCacheTtlNs = 60 * 1000000000ULL;  // 60 seconds TTL
+
+thread_local LocationCacheEntry tl_location_cache[kLocationCacheSize] = {};
+thread_local bool tl_location_cache_initialized = false;
+
+static inline std::string* lookupLocationCache(uintptr_t page_addr) {
+    if (!tl_location_cache_initialized) return nullptr;
+
+    // Simple direct-mapped cache with modulo
+    size_t idx =
+        (page_addr >> 12) % kLocationCacheSize;  // Use page bits for hash
+    if (tl_location_cache[idx].page_addr == page_addr) {
+        // Check if cache entry is still valid (within TTL)
+        uint64_t now = getCurrentTimeInNano();
+        if (now - tl_location_cache[idx].timestamp_ns < kCacheTtlNs) {
+            return &tl_location_cache[idx].location;
+        }
+        // Cache expired, will be refreshed
+    }
+    return nullptr;
+}
+
+static inline void updateLocationCache(uintptr_t page_addr,
+                                       const std::string& location) {
+    if (!tl_location_cache_initialized) {
+        // Initialize cache on first use
+        for (size_t i = 0; i < kLocationCacheSize; ++i) {
+            tl_location_cache[i].page_addr = 0;
+            tl_location_cache[i].timestamp_ns = 0;
+        }
+        tl_location_cache_initialized = true;
+    }
+
+    size_t idx = (page_addr >> 12) % kLocationCacheSize;
+    tl_location_cache[idx].page_addr = page_addr;
+    tl_location_cache[idx].location = location;
+    tl_location_cache[idx].timestamp_ns = getCurrentTimeInNano();
+}
 
 // ============================================================================
 // CPU fallback implementation (platform-independent)
@@ -261,15 +314,34 @@ MemoryType Platform::getMemoryType(void* addr) {
 
 const std::vector<RangeLocation> Platform::getLocation(void* start, size_t len,
                                                        bool skip_prefault) {
-    if (backend_) {
-        return backend_->getLocation(start, len, skip_prefault);
-    }
-
-    // CPU fallback
-    const static size_t kPageSize = 4096;
     std::vector<RangeLocation> entries;
 
+    // Unified cache for both backend and CPU fallback results
+    const static size_t kPageSize = 4096;
     uintptr_t aligned_start = alignPage((uintptr_t)start);
+
+    // Fast path: single page query - check cache first (works for any backend)
+    if (len <= kPageSize) {
+        std::string* cached = lookupLocationCache(aligned_start);
+        if (cached) {
+            entries.push_back({(uint64_t)start, len, *cached});
+            return entries;
+        }
+    }
+
+    // Cache miss: query backend or CPU fallback
+    if (backend_) {
+        entries = backend_->getLocation(start, len, skip_prefault);
+        if (!entries.empty()) {
+            // Cache the backend result for single-page queries
+            if (len <= kPageSize && entries.size() == 1) {
+                updateLocationCache(aligned_start, entries[0].location);
+            }
+            return entries;
+        }
+    }
+
+    // CPU fallback with cache update
     int n =
         (uintptr_t(start) - aligned_start + len + kPageSize - 1) / kPageSize;
     void** pages = (void**)malloc(sizeof(void*) * n);
@@ -297,14 +369,23 @@ const std::vector<RangeLocation> Platform::getLocation(void* start, size_t len,
     for (int i = 1; i < n; i++) {
         if (status[i] != node) {
             new_start_addr = alignPage((uint64_t)start) + i * kPageSize;
-            entries.push_back({start_addr, size_t(new_start_addr - start_addr),
-                               genCpuNodeName(node)});
+            std::string location = genCpuNodeName(node);
+            entries.push_back(
+                {start_addr, size_t(new_start_addr - start_addr), location});
+            // Cache the location for this page range
+            uintptr_t page_start = alignPage(start_addr);
+            updateLocationCache(page_start, location);
             start_addr = new_start_addr;
             node = status[i];
         }
     }
+    std::string final_location = genCpuNodeName(node);
     entries.push_back(
-        {start_addr, (uint64_t)start + len - start_addr, genCpuNodeName(node)});
+        {start_addr, (uint64_t)start + len - start_addr, final_location});
+    // Cache the final location
+    uintptr_t final_page_start = alignPage(start_addr);
+    updateLocationCache(final_page_start, final_location);
+
     ::free(pages);
     ::free(status);
     return entries;

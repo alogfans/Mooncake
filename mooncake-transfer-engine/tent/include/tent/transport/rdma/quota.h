@@ -60,6 +60,14 @@ class SharedQuotaManager;
  */
 class DeviceQuota {
    public:
+    // Candidate device for allocation (used internally and for thread-local
+    // cache)
+    struct Candidate {
+        int dev_id;
+        double score;
+        bool is_cross_numa;
+    };
+
     struct DeviceInfo {
         int dev_id;
         double bw_gbps;  // Theoretical bandwidth from topology
@@ -147,7 +155,7 @@ class DeviceQuota {
         }
     }
 
-    void updateStats(int dev_id, uint64_t bytes, bool is_cross);
+    void updateStats(int dev_id, uint64_t bytes);
 
     // Get inflight bytes for a device (used by shared quota)
     uint64_t getInflightBytes(int dev_id) const {
@@ -172,8 +180,6 @@ class DeviceQuota {
         (void)value;
     }
 
-    void setCrossNumaAccess(bool enable = true) { allow_cross_numa_ = enable; }
-
     void setEnableQuota(bool enable) { enable_quota_ = enable; }
     bool getEnableQuota() const { return enable_quota_; }
 
@@ -184,12 +190,6 @@ class DeviceQuota {
 
         // Batch threshold: use multi-path when num_slices >= this value
         uint32_t batch_threshold = 4;
-
-        // Cross-NUMA max ratio (0.0 = never use, 1.0 = use freely)
-        double cross_numa_max_ratio = 0.0;
-
-        // Cross-NUMA bandwidth penalty (effective_bw = bw * penalty)
-        double cross_numa_penalty = 0.7;
 
         // Enable/disable EWMA learning
         bool enable_ewma_learning = true;
@@ -207,7 +207,6 @@ class DeviceQuota {
     std::shared_ptr<Topology> local_topology_;
     std::unordered_map<int, DeviceInfo> devices_;
     mutable std::shared_mutex rwlock_;
-    bool allow_cross_numa_ = false;
     std::shared_ptr<SharedQuotaManager> shared_quota_;
     bool enable_quota_ = true;
     SchedulingParams sched_params_;
@@ -216,9 +215,24 @@ class DeviceQuota {
     std::unordered_map<std::string, int> location_numa_cache_;
     mutable std::mutex numa_cache_lock_;
 
-    // Cross-NUMA usage tracking (for ratio control)
-    std::atomic<uint64_t> total_local_bytes_{0};
-    std::atomic<uint64_t> total_cross_numa_bytes_{0};
+    // Check if cross-NUMA device's local node is idle
+    bool isCrossNumaNodeIdle(int dev_numa) const;
+
+    // Build candidate devices list for smart scheduling
+    Status buildCandidates(const Topology::MemEntry *entry,
+                           uint64_t slice_bytes, uint64_t device_mask,
+                           std::vector<Candidate> &candidates);
+
+    // Select device for single-path (small requests)
+    void selectSinglePath(const std::vector<Candidate> &candidates,
+                          uint32_t num_slices, uint64_t total_length,
+                          std::vector<int> &slice_dev_ids);
+
+    // Select devices for multi-path (large requests)
+    void selectMultiPath(const std::vector<Candidate> &candidates,
+                         uint32_t num_slices, uint64_t slice_bytes,
+                         std::vector<int> &slice_dev_ids,
+                         bool explore_mode = false);
 };
 
 }  // namespace tent

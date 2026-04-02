@@ -25,24 +25,8 @@ namespace tent {
 
 thread_local uint64_t tl_rr_counter = 0;
 
-static std::vector<int> collectEligibleDevices(
-    const Topology::MemEntry* entry,
-    const std::unordered_map<int, DeviceQuota::DeviceInfo>& devices,
-    uint64_t device_mask) {
-    std::vector<int> result;
-    for (size_t rank = 0; rank < Topology::DevicePriorityRanks; ++rank) {
-        for (int dev_id : entry->device_list[rank]) {
-            if (!devices.count(dev_id)) continue;
-            if ((device_mask & (1ULL << dev_id)) == 0) continue;
-            result.push_back(dev_id);
-        }
-    }
-    return result;
-}
-
 Status DeviceQuota::loadTopology(std::shared_ptr<Topology>& local_topology) {
     local_topology_ = local_topology;
-    std::unordered_set<int> used_numa_id;
     for (size_t dev_id = 0; dev_id < local_topology->getNicCount(); ++dev_id) {
         auto entry = local_topology->getNicEntry(dev_id);
         if (!entry || entry->type != Topology::NIC_RDMA) continue;
@@ -52,9 +36,7 @@ Status DeviceQuota::loadTopology(std::shared_ptr<Topology>& local_topology) {
         info.numa_id = entry->numa_node;
         info.ewma_bandwidth_bps.store(info.getTheoreticalBandwidth(),
                                       std::memory_order_relaxed);
-        used_numa_id.insert(entry->numa_node);
     }
-    if (used_numa_id.size() == 1) allow_cross_numa_ = true;
     return Status::OK();
 }
 
@@ -65,69 +47,177 @@ Status DeviceQuota::enableSharedQuota(const std::string& shm_name) {
     return status;
 }
 
+// Thread-local cache for location entry lookup
+struct QuotaLocationCache {
+    std::string location;
+    const Topology::MemEntry* entry;
+    uint64_t last_update_ns;
+};
+thread_local QuotaLocationCache tl_quota_location_cache{"", nullptr, 0};
+
+// Fixed-size buffers to avoid dynamic allocation
+thread_local std::vector<int> tl_eligible;
+thread_local std::vector<DeviceQuota::Candidate> tl_candidates;
+constexpr uint64_t kLocationCacheTtlNs = 10 * 1000000000ULL;  // 10 seconds
+
 Status DeviceQuota::allocate(uint64_t total_length, uint32_t num_slices,
                              const std::string& location,
                              std::vector<int>& slice_dev_ids, int priority,
                              uint64_t device_mask) {
     slice_dev_ids.clear();
-    auto entry = local_topology_->getMemEntry(location);
-    if (!entry) return Status::InvalidArgument("Unknown location");
+    slice_dev_ids.reserve(num_slices);  // Pre-allocate to avoid reallocation
+
+    // Fast path: cached location entry lookup
+    const Topology::MemEntry* entry = nullptr;
+    uint64_t now = getCurrentTimeInNano();
+    if (tl_quota_location_cache.entry &&
+        tl_quota_location_cache.location == location &&
+        (now - tl_quota_location_cache.last_update_ns) < kLocationCacheTtlNs) {
+        entry = tl_quota_location_cache.entry;
+    } else {
+        entry = local_topology_->getMemEntry(location);
+        if (!entry) return Status::InvalidArgument("Unknown location");
+        tl_quota_location_cache.location = location;
+        tl_quota_location_cache.entry = entry;
+        tl_quota_location_cache.last_update_ns = now;
+    }
 
     uint64_t slice_bytes = (total_length + num_slices - 1) / num_slices;
 
-    struct Candidate {
-        int dev_id;
-        double bw_bps;
-        uint64_t inflight;
-        double score;
-        bool is_cross_numa;
-    };
-    std::vector<Candidate> candidates;
+    // ========== Baseline mode: simple round-robin ==========
+    if (!enable_quota_) {
+        // Reuse thread-local buffer
+        tl_eligible.clear();
+        for (size_t rank = 0; rank < Topology::DevicePriorityRanks; ++rank) {
+            for (int dev_id : entry->device_list[rank]) {
+                if (!devices_.count(dev_id)) continue;
+                if ((device_mask & (1ULL << dev_id)) == 0) continue;
+                tl_eligible.push_back(dev_id);
+            }
+        }
+        if (tl_eligible.empty())
+            return Status::DeviceNotFound("no eligible devices");
 
-    bool found_rank0 = false;
+        for (uint32_t i = 0; i < num_slices; ++i) {
+            int dev_id = tl_eligible[tl_rr_counter % tl_eligible.size()];
+            tl_rr_counter++;
+            slice_dev_ids.push_back(dev_id);
+            devices_[dev_id].total_bytes.fetch_add(slice_bytes,
+                                                   std::memory_order_relaxed);
+        }
+        return Status::OK();
+    }
+
+    // ========== Smart mode: EWMA-based selection ==========
+    // Reuse thread-local buffer
+    tl_candidates.clear();
+    Status status =
+        buildCandidates(entry, slice_bytes, device_mask, tl_candidates);
+    if (!status.ok()) return status;
+
+    // Exploration: 1% of requests use multi-path to discover true device
+    // performance
+    thread_local uint64_t tl_call_count = 0;
+    bool explore_mode =
+        ((++tl_call_count % 100) == 0) && (tl_candidates.size() > 1);
+
+    bool use_multi_path = explore_mode ||  // Force multi-path for exploration
+                          (num_slices >= sched_params_.batch_threshold &&
+                           tl_candidates.size() > 1);
+
+    if (!use_multi_path) {
+        selectSinglePath(tl_candidates, num_slices, total_length,
+                         slice_dev_ids);
+    } else {
+        selectMultiPath(tl_candidates, num_slices, slice_bytes, slice_dev_ids,
+                        explore_mode);
+    }
+    return Status::OK();
+}
+
+// ============================================================================
+// Helper functions
+// ============================================================================
+
+bool DeviceQuota::isCrossNumaNodeIdle(int dev_numa) const {
+    for (const auto& pair : devices_) {
+        if (pair.second.numa_id == dev_numa &&
+            pair.second.getInflightBytes() > 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+Status DeviceQuota::buildCandidates(const Topology::MemEntry* entry,
+                                    uint64_t slice_bytes, uint64_t device_mask,
+                                    std::vector<Candidate>& candidates) {
+    // Rank priority weights: 9:3:1 for rank 0:1:2
+    static constexpr double kRankWeight[Topology::DevicePriorityRanks] = {
+        9.0, 3.0, 1.0};
+    candidates.clear();
     for (size_t rank = 0; rank < Topology::DevicePriorityRanks; ++rank) {
         for (int dev_id : entry->device_list[rank]) {
             if (!devices_.count(dev_id) || !(device_mask & (1ULL << dev_id)))
                 continue;
-
-            auto& dev = devices_[dev_id];
+            const auto& dev = devices_[dev_id];
+            bool is_cross_numa = (rank == 2);
+            // Cross-NUMA devices: only use if their local node is idle
+            if (is_cross_numa && !isCrossNumaNodeIdle(dev.numa_id)) continue;
             double effective_bw = dev.getEwmaBandwidth();
-            bool is_cross = (rank > 0);
-            if (is_cross) effective_bw *= sched_params_.cross_numa_penalty;
-
-            uint64_t current_inflight = dev.getInflightBytes();
-            double score = effective_bw / (current_inflight + slice_bytes);
-
-            candidates.push_back(
-                {dev_id, effective_bw, current_inflight, score, is_cross});
-            if (rank == 0) found_rank0 = true;
+            uint64_t inflight = dev.getInflightBytes();
+            double score =
+                (effective_bw * kRankWeight[rank]) / (inflight + slice_bytes);
+            candidates.push_back({dev_id, score, is_cross_numa});
         }
-        if (found_rank0 && sched_params_.cross_numa_max_ratio <= 0) break;
     }
-
     if (candidates.empty())
         return Status::DeviceNotFound("no eligible devices");
+    return Status::OK();
+}
 
-    bool use_multi_path = (num_slices >= sched_params_.batch_threshold) &&
-                          (candidates.size() > 1);
-    if (!use_multi_path) {
-        double max_score = 0;
-        for (auto& c : candidates) max_score = std::max(max_score, c.score);
-        std::vector<size_t> best_indices;
-        for (size_t i = 0; i < candidates.size(); ++i) {
-            if (candidates[i].score >= max_score * 0.9)
-                best_indices.push_back(i);
+void DeviceQuota::selectSinglePath(const std::vector<Candidate>& candidates,
+                                   uint32_t num_slices, uint64_t total_length,
+                                   std::vector<int>& slice_dev_ids) {
+    // Select best device with 10% tolerance for load balancing
+    double max_score = 0;
+    for (const auto& c : candidates) max_score = std::max(max_score, c.score);
+    std::vector<size_t> best_indices;
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        if (candidates[i].score >= max_score * 0.9) best_indices.push_back(i);
+    }
+    size_t idx = best_indices[SimpleRandom::Get().next(best_indices.size())];
+    const auto& target = candidates[idx];
+    for (uint32_t i = 0; i < num_slices; ++i)
+        slice_dev_ids.push_back(target.dev_id);
+    updateStats(target.dev_id, total_length);
+}
+
+void DeviceQuota::selectMultiPath(const std::vector<Candidate>& candidates,
+                                  uint32_t num_slices, uint64_t slice_bytes,
+                                  std::vector<int>& slice_dev_ids,
+                                  bool explore_mode) {
+    if (explore_mode) {
+        // Exploration mode: randomly distribute slices across all devices
+        // Shuffle candidate indices for random exploration
+        std::vector<size_t> shuffled_idx(candidates.size());
+        for (size_t i = 0; i < candidates.size(); ++i) shuffled_idx[i] = i;
+        for (size_t i = shuffled_idx.size() - 1; i > 0; --i) {
+            size_t j = SimpleRandom::Get().next(i + 1);
+            std::swap(shuffled_idx[i], shuffled_idx[j]);
         }
-        size_t idx =
-            best_indices[SimpleRandom::Get().next(best_indices.size())];
-        const auto& target = candidates[idx];
-        for (uint32_t i = 0; i < num_slices; ++i)
-            slice_dev_ids.push_back(target.dev_id);
-        updateStats(target.dev_id, total_length, target.is_cross_numa);
+
+        // Distribute slices across shuffled devices (round-robin)
+        for (uint32_t i = 0; i < num_slices; ++i) {
+            size_t cand_idx = shuffled_idx[i % candidates.size()];
+            slice_dev_ids.push_back(candidates[cand_idx].dev_id);
+            updateStats(candidates[cand_idx].dev_id, slice_bytes);
+        }
     } else {
+        // Normal mode: bandwidth-weighted distribution
         std::vector<double> cumulative_scores;
         double total_score = 0;
-        for (auto& c : candidates) {
+        for (const auto& c : candidates) {
             total_score += c.score;
             cumulative_scores.push_back(total_score);
         }
@@ -141,23 +231,17 @@ Status DeviceQuota::allocate(uint64_t total_length, uint32_t num_slices,
             size_t idx = std::distance(cumulative_scores.begin(), it);
             if (idx >= candidates.size()) idx = candidates.size() - 1;
 
-            slice_dev_ids.push_back(candidates[idx].dev_id);
-            updateStats(candidates[idx].dev_id, slice_bytes,
-                        candidates[idx].is_cross_numa);
+            const auto& selected = candidates[idx];
+            slice_dev_ids.push_back(selected.dev_id);
+            updateStats(selected.dev_id, slice_bytes);
         }
     }
-    return Status::OK();
 }
 
-void DeviceQuota::updateStats(int dev_id, uint64_t bytes, bool is_cross) {
+void DeviceQuota::updateStats(int dev_id, uint64_t bytes) {
     auto& dev = devices_[dev_id];
     dev.addInflight(bytes);
     dev.total_bytes.fetch_add(bytes, std::memory_order_relaxed);
-    if (is_cross) {
-        total_cross_numa_bytes_.fetch_add(bytes, std::memory_order_relaxed);
-    } else {
-        total_local_bytes_.fetch_add(bytes, std::memory_order_relaxed);
-    }
 }
 
 static void printTrafficStats(

@@ -194,13 +194,6 @@ class PlatformBackend : public IPlatformBackend {
             return locations;
         }
 #endif
-
-        // CPU fallback
-        RangeLocation rl;
-        rl.start = reinterpret_cast<uint64_t>(start);
-        rl.len = len;
-        rl.location = "cpu:0";
-        locations.push_back(rl);
         return locations;
     }
 
