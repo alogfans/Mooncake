@@ -201,15 +201,8 @@ class DeviceQuota {
         // Enable/disable EWMA learning (bandwidth adaptation)
         bool enable_ewma_learning = true;
 
-        // Enable/disable adaptive rank weights (per-location)
-        // true: Learn rank weights based on actual latency (cpu:0, cuda:0 may
-        // differ) false: Use static rank weights (9.0, 3.0, 0.3)
-        bool enable_adaptive_rank_weights = true;
-
-        // Sampling rate for parameter updates (0.01 = 1%, 0.1 = 10%, 1.0 =
-        // 100%) Only this fraction of release() calls will update:
-        //   - EWMA bandwidth
-        //   - Adaptive rank weights
+        // Sampling rate for EWMA updates (0.01 = 1%, 0.1 = 10%, 1.0 = 100%)
+        // Only this fraction of release() calls will update EWMA bandwidth
         // Inflight bytes are ALWAYS released (not sampled)
         double param_update_sample_rate = 0.1;
     };
@@ -222,37 +215,11 @@ class DeviceQuota {
         return sched_params_;
     }
 
-    // Thread-local cache for location weights (public for thread_local access)
-    struct LocationWeightsCache {
-        std::string location;
-        void *weights;  // Opaque pointer to LocationRankWeights
-        uint64_t last_update_ns;
-    };
-
    private:
+    // Static default rank weights (10:2:0.2 for rank 0:1:2)
+    // Reflects PCIe hierarchy: same-NUMA >> cross-socket >> cross-NUMA
     static constexpr double kStaticRankWeight[Topology::DevicePriorityRanks] = {
         10.0, 2.0, 0.2};
-
-    // Per-location adaptive rank weights (low-overhead design)
-    struct LocationRankWeights {
-        // Adaptive weights for each rank (use padding for cache line isolation)
-        alignas(64) double weight[Topology::DevicePriorityRanks];
-
-        // Statistics for weight adjustment (per-rank accumulators)
-        struct RankStats {
-            alignas(64) uint64_t total_bytes{0};
-            uint64_t total_latency_ns{0};
-            uint32_t sample_count{0};
-            uint32_t _pad[4];
-        };
-        RankStats stats[Topology::DevicePriorityRanks];
-
-        LocationRankWeights() {
-            // Initialize with static default weights
-            for (size_t i = 0; i < Topology::DevicePriorityRanks; ++i)
-                weight[i] = kStaticRankWeight[i];
-        }
-    };
 
     std::shared_ptr<Topology> local_topology_;
     std::unordered_map<int, DeviceInfo> devices_;
@@ -260,20 +227,6 @@ class DeviceQuota {
     std::shared_ptr<SharedQuotaManager> shared_quota_;
     bool enable_quota_ = true;
     SchedulingParams sched_params_;
-
-    // Per-location rank weights (key: location name like "cpu:0", "cuda:0")
-    std::unordered_map<std::string, LocationRankWeights> location_weights_;
-    mutable std::shared_mutex location_weights_lock_;
-
-    // Track source NUMA node for each location
-    std::unordered_map<std::string, int> location_numa_cache_;
-    mutable std::mutex numa_cache_lock_;
-
-    // Get or create location weights (fast path with read lock)
-    LocationRankWeights *getLocationWeights(const std::string &location);
-
-    // Adjust weights based on accumulated statistics (called periodically)
-    void adjustLocationWeights(LocationRankWeights *loc_weights);
 
     // Check if cross-NUMA device's local node is idle
     bool isCrossNumaNodeIdle(int dev_numa) const;

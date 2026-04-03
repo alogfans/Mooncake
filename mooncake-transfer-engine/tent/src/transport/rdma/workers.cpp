@@ -377,7 +377,8 @@ void Workers::asyncPollCq() {
                 (slice->submit_ts - slice->enqueue_ts) / 1000.0;
             double inflight_lat = (poll_ts - slice->submit_ts) / 1000.0;
             // Use inflight_lat (pure transfer time) to exclude queue wait time
-            // This reflects actual device/NUMA performance, not scheduling delay
+            // This reflects actual device/NUMA performance, not scheduling
+            // delay
             double transfer_lat_sec = inflight_lat / 1e6;
             if (slice->retry_count == 0) {
                 device_quota_->release(slice->source_dev_id, slice->length,
