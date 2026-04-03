@@ -142,10 +142,8 @@ class DeviceQuota {
                     std::vector<int> &slice_dev_ids, int priority = 0,
                     uint64_t device_mask = ~0ULL);
 
-    // Release completed transfer (update EWMA and adaptive weights)
-    Status release(int dev_id, uint64_t length, double latency,
-                   int priority = 0, const std::string &location = "",
-                   int rank = 0);
+    // Release completed transfer (update EWMA bandwidth)
+    Status release(int dev_id, uint64_t length, double latency);
 
     // Update traffic statistics for pre-assigned devices (bypasses quota
     // allocation)
@@ -192,6 +190,10 @@ class DeviceQuota {
 
     // Scheduling parameters (only used when enable_quota=true)
     struct SchedulingParams {
+        // Rank weights for device selection (rank 0:1:2)
+        // Reflects PCIe hierarchy: same-NUMA >> cross-socket >> cross-NUMA
+        double rank_weights[Topology::DevicePriorityRanks] = {10.0, 2.0, 0.2};
+
         // EWMA learning rate (0.01 = slow, 0.1 = fast)
         double ewma_alpha = 0.01;
 
@@ -216,11 +218,6 @@ class DeviceQuota {
     }
 
    private:
-    // Static default rank weights (10:2:0.2 for rank 0:1:2)
-    // Reflects PCIe hierarchy: same-NUMA >> cross-socket >> cross-NUMA
-    static constexpr double kStaticRankWeight[Topology::DevicePriorityRanks] = {
-        10.0, 2.0, 0.2};
-
     std::shared_ptr<Topology> local_topology_;
     std::unordered_map<int, DeviceInfo> devices_;
     mutable std::shared_mutex rwlock_;
@@ -234,7 +231,6 @@ class DeviceQuota {
     // Build candidate devices list for smart scheduling
     Status buildCandidates(const Topology::MemEntry *entry,
                            uint64_t slice_bytes, uint64_t device_mask,
-                           const std::string &location,
                            std::vector<Candidate> &candidates);
 
     // Select device for single-path (small requests)

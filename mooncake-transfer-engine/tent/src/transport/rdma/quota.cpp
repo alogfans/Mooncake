@@ -69,7 +69,7 @@ Status DeviceQuota::allocate(uint64_t total_length, uint32_t num_slices,
 
     // Fast path: cached location entry lookup
     const Topology::MemEntry* entry = nullptr;
-    uint64_t now = getCurrentTimeInNano();
+    uint64_t now = getFastTimeNanos();
     if (tl_quota_location_cache.entry &&
         tl_quota_location_cache.location == location &&
         (now - tl_quota_location_cache.last_update_ns) < kLocationCacheTtlNs) {
@@ -110,8 +110,8 @@ Status DeviceQuota::allocate(uint64_t total_length, uint32_t num_slices,
     // ========== Smart mode: EWMA-based selection ==========
     // Reuse thread-local buffer
     tl_candidates.clear();
-    Status status = buildCandidates(entry, slice_bytes, device_mask, location,
-                                    tl_candidates);
+    Status status =
+        buildCandidates(entry, slice_bytes, device_mask, tl_candidates);
     if (!status.ok()) return status;
 
     // Exploration: 1% of requests use multi-path to discover true device
@@ -141,7 +141,6 @@ Status DeviceQuota::allocate(uint64_t total_length, uint32_t num_slices,
 int DeviceQuota::getDeviceRank(const std::string& location, int dev_id) const {
     auto entry = local_topology_->getMemEntry(location);
     if (!entry) return 0;  // Default to rank0
-
     for (size_t rank = 0; rank < Topology::DevicePriorityRanks; ++rank) {
         for (int id : entry->device_list[rank]) {
             if (id == dev_id) return static_cast<int>(rank);
@@ -166,12 +165,7 @@ bool DeviceQuota::isCrossNumaNodeIdle(int dev_numa) const {
 
 Status DeviceQuota::buildCandidates(const Topology::MemEntry* entry,
                                     uint64_t slice_bytes, uint64_t device_mask,
-                                    const std::string& location,
                                     std::vector<Candidate>& candidates) {
-    // Use static rank weights (10:2:0.2 for rank 0:1:2)
-    // Reflects PCIe hierarchy: same-NUMA >> cross-socket >> cross-NUMA
-    (void)location;  // Location not needed for static weights
-
     candidates.clear();
     for (size_t rank = 0; rank < Topology::DevicePriorityRanks; ++rank) {
         for (int dev_id : entry->device_list[rank]) {
@@ -184,7 +178,7 @@ Status DeviceQuota::buildCandidates(const Topology::MemEntry* entry,
             double effective_bw = dev.getEwmaBandwidth();
             uint64_t inflight = dev.getInflightBytes();
             // Score = (effective_bandwidth * rank_weight) / pending_bytes
-            double score = (effective_bw * kStaticRankWeight[rank]) /
+            double score = (effective_bw * sched_params_.rank_weights[rank]) /
                            (inflight + slice_bytes);
             candidates.push_back({dev_id, score, is_cross_numa});
         }
@@ -309,24 +303,15 @@ void DeviceQuota::printTrafficStats() {
     }
 }
 
-Status DeviceQuota::release(int dev_id, uint64_t length, double latency,
-                            int priority, const std::string& location,
-                            int rank) {
-    // Print traffic stats periodically
+Status DeviceQuota::release(int dev_id, uint64_t length, double latency) {
     printTrafficStats();
-
     if (!enable_quota_) return Status::OK();
-
     auto it = devices_.find(dev_id);
     if (it == devices_.end())
         return Status::InvalidArgument("device not found");
 
     auto& dev = it->second;
-
-    // ========== MUST EXECUTE: Release inflight bytes ==========
     dev.subInflight(length);
-
-    // EWMA bandwidth learning (optional)
     if (sched_params_.enable_ewma_learning) {
         thread_local uint64_t tl_sample_counter = 0;
         double sample_rate = sched_params_.param_update_sample_rate;
@@ -353,12 +338,6 @@ Status DeviceQuota::release(int dev_id, uint64_t length, double latency,
         }
     }
 
-    // Unused parameters (kept for API compatibility)
-    (void)priority;
-    (void)location;
-    (void)rank;
-
-    // ========== MUST EXECUTE: Periodic diffusion for shared quota ==========
     if (shared_quota_) {
         thread_local uint64_t tl_last_ts = 0;
         uint64_t now = getCurrentTimeInNano();

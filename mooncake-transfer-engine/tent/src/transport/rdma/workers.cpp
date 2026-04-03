@@ -45,6 +45,23 @@ Workers::Workers(RdmaTransport* transport)
     params.ewma_alpha = conf->get("transports/rdma/ewma_alpha", 0.01);
     params.enable_ewma_learning =
         conf->get("transports/rdma/enable_ewma_learning", true);
+
+    // Configure rank weights from config (format: "w0,w1,w2")
+    std::string weights_str =
+        conf->get("transports/rdma/rank_weights", std::string("10.0,2.0,0.2"));
+    if (!weights_str.empty()) {
+        size_t pos = 0;
+        for (size_t i = 0;
+             i < Topology::DevicePriorityRanks && pos < weights_str.length();
+             ++i) {
+            size_t end = weights_str.find(',', pos);
+            if (end == std::string::npos) end = weights_str.length();
+            std::string val = weights_str.substr(pos, end - pos);
+            params.rank_weights[i] = std::stod(val);
+            pos = end + 1;
+        }
+    }
+
     device_quota_->setSchedulingParams(params);
 }
 
@@ -382,9 +399,7 @@ void Workers::asyncPollCq() {
             double transfer_lat_sec = inflight_lat / 1e6;
             if (slice->retry_count == 0) {
                 device_quota_->release(slice->source_dev_id, slice->length,
-                                       transfer_lat_sec, slice->priority,
-                                       slice->source_location,
-                                       slice->device_rank);
+                                       transfer_lat_sec);
             }
             if (slice->word != PENDING) continue;
             if (wc[i].status != IBV_WC_SUCCESS) {

@@ -70,16 +70,6 @@ static inline int bindToSocket(int socket_id) {
     return 0;
 }
 
-static inline int64_t getCurrentTimeInNano() {
-    const int64_t kNanosPerSecond = 1000 * 1000 * 1000;
-    struct timespec ts;
-    if (clock_gettime(CLOCK_REALTIME, &ts)) {
-        PLOG(ERROR) << "getCurrentTimeInNano: clock_gettime failed";
-        return -1;
-    }
-    return (int64_t{ts.tv_sec} * kNanosPerSecond + int64_t{ts.tv_nsec});
-}
-
 // Fast timestamp counter using RDTSCP instruction
 // Returns CPU cycles since boot, useful for measuring intervals
 // Only ~10-20 CPU cycles overhead vs ~50-100ns for clock_gettime
@@ -146,6 +136,11 @@ static inline uint64_t tscToNanos(uint64_t tsc_cycles) {
 // Get current time in nanoseconds using RDTSCP (faster than clock_gettime)
 // For interval measurement only, not absolute time
 static inline uint64_t getFastTimeNanos() { return tscToNanos(rdtscp()); }
+
+// Legacy interface - now uses fast TSC-based timing
+static inline int64_t getCurrentTimeInNano() {
+    return static_cast<int64_t>(getFastTimeNanos());
+}
 
 static inline std::string getCurrentDateTime() {
     auto now = std::chrono::system_clock::now();
