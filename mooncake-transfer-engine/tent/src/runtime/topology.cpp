@@ -130,7 +130,8 @@ void Topology::printMapping() const {
         for (size_t rank = 0; rank < DevicePriorityRanks; ++rank) {
             if (mem.device_list[rank].empty()) continue;
 
-            const char* tier_name[] = {"Tier0(Best)", "Tier1(Good)", "Tier2(Cross)"};
+            const char* tier_name[] = {"Tier0(Best)", "Tier1(Good)",
+                                       "Tier2(Cross)"};
             ss << "\n    " << tier_name[rank] << ": ";
 
             for (int nic_id : mem.device_list[rank]) {

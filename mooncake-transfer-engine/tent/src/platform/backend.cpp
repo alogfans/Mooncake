@@ -255,7 +255,8 @@ class PlatformBackend : public IPlatformBackend {
     static std::string getGpuPciBusId(int device) {
 #if defined(HAS_DEVICE_SUPPORT)
         char pci_bus_id[20];
-        auto err = cudaDeviceGetPCIBusId(pci_bus_id, sizeof(pci_bus_id), device);
+        auto err =
+            cudaDeviceGetPCIBusId(pci_bus_id, sizeof(pci_bus_id), device);
         if (err == CUDA_SUCCESS) {
             // Convert to lowercase for consistency
             for (char* ch = pci_bus_id; *ch; ++ch) *ch = tolower(*ch);
@@ -267,7 +268,8 @@ class PlatformBackend : public IPlatformBackend {
 
     // Get NUMA node from PCI device sysfs
     static int getNumaNodeFromPciDevice(const std::string& pci_bdf) {
-        std::string sysfs_path = "/sys/bus/pci/devices/" + pci_bdf + "/numa_node";
+        std::string sysfs_path =
+            "/sys/bus/pci/devices/" + pci_bdf + "/numa_node";
         std::ifstream numa_file(sysfs_path);
         if (!numa_file.is_open()) return -1;
         int numa_node = -1;
@@ -277,8 +279,10 @@ class PlatformBackend : public IPlatformBackend {
     }
 
     // Calculate PCIe distance between two devices
-    // Returns 0 if same PCIe switch/root complex, higher values for further away
-    static int getPciDistance(const std::string& bus1, const std::string& bus2) {
+    // Returns 0 if same PCIe switch/root complex, higher values for further
+    // away
+    static int getPciDistance(const std::string& bus1,
+                              const std::string& bus2) {
         char buf[PATH_MAX];
         char path1[PATH_MAX];
         char path2[PATH_MAX];
@@ -308,8 +312,7 @@ class PlatformBackend : public IPlatformBackend {
     // device_list[1]: Same NUMA but not in device_list[0]
     // device_list[2]: Cross-NUMA devices
     void buildGpuNicMappings(Topology::MemEntry& entry,
-                             const std::string& gpu_pci_id,
-                             int gpu_numa_node,
+                             const std::string& gpu_pci_id, int gpu_numa_node,
                              const std::vector<Topology::NicEntry>& nic_list) {
         if (gpu_pci_id.empty() || nic_list.empty()) return;
 

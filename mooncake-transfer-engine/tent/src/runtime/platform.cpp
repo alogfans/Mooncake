@@ -263,12 +263,12 @@ Status Platform::probe(std::vector<Topology::NicEntry>& nic_list,
     filterInfiniBandDevices(detected_nic, config_);
     for (auto& entry : detected_nic) nic_list.push_back(entry);
 #endif
+    insertFallbackMemEntry((int)nic_list.size(), mem_list);
+    discoverCpuTopology(nic_list, mem_list);
     if (backend_) {
         auto ret = backend_->probe(nic_list, mem_list);
         if (!ret.ok()) return ret;
     }
-    insertFallbackMemEntry((int)nic_list.size(), mem_list);
-    discoverCpuTopology(nic_list, mem_list);
     return Status::OK();
 }
 

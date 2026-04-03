@@ -271,7 +271,8 @@ Status RdmaTransport::submitTransferTasks(
         size_t max_slice_count = 64;
         if (type == MTYPE_CUDA || opcode == Request::WRITE)
             max_slice_count = 32;
-        // Allocate task independently from Slab for separate lifecycle management
+        // Allocate task independently from Slab for separate lifecycle
+        // management
         auto* task = RdmaTaskStorage::Get().allocate();
         if (!task)
             return Status::InternalError("Failed to allocate task" LOC_MARK);

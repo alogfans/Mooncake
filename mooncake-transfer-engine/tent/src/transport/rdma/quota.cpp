@@ -87,25 +87,24 @@ Status DeviceQuota::allocate(uint64_t total_length, uint32_t num_slices,
     // ========== Baseline mode: simple round-robin ==========
     if (!enable_quota_) {
         // Reuse thread-local buffer
-        tl_eligible.clear();
         for (size_t rank = 0; rank < Topology::DevicePriorityRanks; ++rank) {
+            tl_eligible.clear();
             for (int dev_id : entry->device_list[rank]) {
                 if (!devices_.count(dev_id)) continue;
                 if ((device_mask & (1ULL << dev_id)) == 0) continue;
                 tl_eligible.push_back(dev_id);
             }
+            if (tl_eligible.empty()) break;
+            for (uint32_t i = 0; i < num_slices; ++i) {
+                int dev_id = tl_eligible[tl_rr_counter % tl_eligible.size()];
+                tl_rr_counter++;
+                slice_dev_ids.push_back(dev_id);
+                devices_[dev_id].total_bytes.fetch_add(
+                    slice_bytes, std::memory_order_relaxed);
+            }
+            return Status::OK();
         }
-        if (tl_eligible.empty())
-            return Status::DeviceNotFound("no eligible devices");
-
-        for (uint32_t i = 0; i < num_slices; ++i) {
-            int dev_id = tl_eligible[tl_rr_counter % tl_eligible.size()];
-            tl_rr_counter++;
-            slice_dev_ids.push_back(dev_id);
-            devices_[dev_id].total_bytes.fetch_add(slice_bytes,
-                                                   std::memory_order_relaxed);
-        }
-        return Status::OK();
+        return Status::DeviceNotFound("no eligible devices");
     }
 
     // ========== Smart mode: EWMA-based selection ==========
