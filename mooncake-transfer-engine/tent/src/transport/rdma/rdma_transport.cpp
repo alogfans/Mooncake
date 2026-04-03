@@ -352,6 +352,10 @@ Status RdmaTransport::submitTransferTasks(
             slice->next = nullptr;
             slice->enqueue_ts = enqueue_ts;
             slice->source_dev_id = slice_dev_ids[slice_idx];
+            slice->source_location = source_location;
+            // Query device rank for adaptive weight learning
+            slice->device_rank = device_quota->getDeviceRank(
+                source_location, slice_dev_ids[slice_idx]);
             task->num_slices++;
             task->ref();  // Each slice holds a reference to the task
             offset += length;

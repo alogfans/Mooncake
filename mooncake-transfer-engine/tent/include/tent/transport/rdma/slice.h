@@ -71,7 +71,8 @@ struct RdmaSlice {
     std::string source_location;         // Source memory location for quota
     uint32_t num_slices_in_request = 1;  // Total slices in the request
     uint32_t slice_index_in_request =
-        0;  // Index of this slice within the request
+        0;                // Index of this slice within the request
+    int device_rank = 0;  // Rank (0/1/2) of selected device
 };
 
 using RdmaSliceStorage = Slab<RdmaSlice>;

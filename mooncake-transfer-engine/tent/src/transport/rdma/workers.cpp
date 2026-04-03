@@ -379,7 +379,9 @@ void Workers::asyncPollCq() {
             double overall_lat_sec = (poll_ts - slice->enqueue_ts) / 1e9;
             if (slice->retry_count == 0) {
                 device_quota_->release(slice->source_dev_id, slice->length,
-                                       overall_lat_sec, slice->priority);
+                                       overall_lat_sec, slice->priority,
+                                       slice->source_location,
+                                       slice->device_rank);
             }
             if (slice->word != PENDING) continue;
             if (wc[i].status != IBV_WC_SUCCESS) {

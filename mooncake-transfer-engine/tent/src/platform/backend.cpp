@@ -200,12 +200,10 @@ class PlatformBackend : public IPlatformBackend {
         auto ret = cudaPointerGetAttributes(&attr, start);
 
         if (ret == CUDA_SUCCESS && attr.type == cudaMemoryTypeDevice) {
-            int device = 0;
-            cudaGetDevice(&device);
             RangeLocation rl;
             rl.start = reinterpret_cast<uint64_t>(start);
             rl.len = len;
-            rl.location = getGpuPrefix() + std::to_string(device);
+            rl.location = getGpuPrefix() + std::to_string(attr.device);
             locations.push_back(rl);
             return locations;
         }

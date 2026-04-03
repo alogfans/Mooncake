@@ -58,7 +58,14 @@ thread_local QuotaLocationCache tl_quota_location_cache{"", nullptr, 0};
 // Fixed-size buffers to avoid dynamic allocation
 thread_local std::vector<int> tl_eligible;
 thread_local std::vector<DeviceQuota::Candidate> tl_candidates;
+thread_local DeviceQuota::LocationWeightsCache tl_weights_cache{"", nullptr, 0};
 constexpr uint64_t kLocationCacheTtlNs = 10 * 1000000000ULL;  // 10 seconds
+
+// Constants for adaptive weight adjustment
+constexpr uint32_t kWeightAdjustInterval = 1000;  // Adjust every N samples
+constexpr double kWeightLearningRate = 0.1;  // EWMA alpha for weight updates
+constexpr double kMinWeight = 0.1;           // Minimum weight
+constexpr double kMaxWeight = 15.0;          // Maximum weight
 
 Status DeviceQuota::allocate(uint64_t total_length, uint32_t num_slices,
                              const std::string& location,
@@ -110,8 +117,8 @@ Status DeviceQuota::allocate(uint64_t total_length, uint32_t num_slices,
     // ========== Smart mode: EWMA-based selection ==========
     // Reuse thread-local buffer
     tl_candidates.clear();
-    Status status =
-        buildCandidates(entry, slice_bytes, device_mask, tl_candidates);
+    Status status = buildCandidates(entry, slice_bytes, device_mask, location,
+                                    tl_candidates);
     if (!status.ok()) return status;
 
     // Exploration: 1% of requests use multi-path to discover true device
@@ -135,6 +142,22 @@ Status DeviceQuota::allocate(uint64_t total_length, uint32_t num_slices,
 }
 
 // ============================================================================
+// Helper: get device rank for a location
+// ============================================================================
+
+int DeviceQuota::getDeviceRank(const std::string& location, int dev_id) const {
+    auto entry = local_topology_->getMemEntry(location);
+    if (!entry) return 0;  // Default to rank0
+
+    for (size_t rank = 0; rank < Topology::DevicePriorityRanks; ++rank) {
+        for (int id : entry->device_list[rank]) {
+            if (id == dev_id) return static_cast<int>(rank);
+        }
+    }
+    return 0;  // Default to rank0 if not found
+}
+
+// ============================================================================
 // Helper functions
 // ============================================================================
 
@@ -150,10 +173,21 @@ bool DeviceQuota::isCrossNumaNodeIdle(int dev_numa) const {
 
 Status DeviceQuota::buildCandidates(const Topology::MemEntry* entry,
                                     uint64_t slice_bytes, uint64_t device_mask,
+                                    const std::string& location,
                                     std::vector<Candidate>& candidates) {
-    // Rank priority weights: 9:3:1 for rank 0:1:2
-    static constexpr double kRankWeight[Topology::DevicePriorityRanks] = {
-        9.0, 3.0, 1.0};
+    // Select rank weights: static or adaptive
+    const double* rank_weight;
+    if (sched_params_.enable_adaptive_rank_weights) {
+        // Use per-location adaptive weights (with thread-local caching)
+        LocationRankWeights* loc_weights = getLocationWeights(location);
+        rank_weight = loc_weights->weight;
+    } else {
+        // Use static weights (9:3:0.3 for rank 0:1:2)
+        static constexpr double
+            kStaticRankWeight[Topology::DevicePriorityRanks] = {9.0, 3.0, 0.3};
+        rank_weight = kStaticRankWeight;
+    }
+
     candidates.clear();
     for (size_t rank = 0; rank < Topology::DevicePriorityRanks; ++rank) {
         for (int dev_id : entry->device_list[rank]) {
@@ -165,8 +199,9 @@ Status DeviceQuota::buildCandidates(const Topology::MemEntry* entry,
             if (is_cross_numa && !isCrossNumaNodeIdle(dev.numa_id)) continue;
             double effective_bw = dev.getEwmaBandwidth();
             uint64_t inflight = dev.getInflightBytes();
+            // Score = (effective_bandwidth * rank_weight) / pending_bytes
             double score =
-                (effective_bw * kRankWeight[rank]) / (inflight + slice_bytes);
+                (effective_bw * rank_weight[rank]) / (inflight + slice_bytes);
             candidates.push_back({dev_id, score, is_cross_numa});
         }
     }
@@ -243,8 +278,7 @@ void DeviceQuota::updateStats(int dev_id, uint64_t bytes) {
     dev.total_bytes.fetch_add(bytes, std::memory_order_relaxed);
 }
 
-static void printTrafficStats(
-    std::unordered_map<int, DeviceQuota::DeviceInfo>& devices) {
+void DeviceQuota::printTrafficStats() {
     static std::atomic<uint64_t> last_print_time_ns{0};
 
     uint64_t now = getCurrentTimeInNano();
@@ -264,7 +298,7 @@ static void printTrafficStats(
             std::ostringstream oss;
             oss << "[RDMA Traffic] ";
             bool first = true;
-            for (auto& [dev_id, dev] : devices) {
+            for (auto& [dev_id, dev] : devices_) {
                 uint64_t total =
                     dev.total_bytes.load(std::memory_order_relaxed);
                 uint64_t last =
@@ -287,14 +321,31 @@ static void printTrafficStats(
             if (!first) {
                 LOG(INFO) << oss.str();
             }
+
+            // Print adaptive rank weights if enabled and non-empty
+            if (sched_params_.enable_adaptive_rank_weights &&
+                !location_weights_.empty()) {
+                std::ostringstream woss;
+                woss << "[Rank Weights] ";
+                bool wfirst = true;
+                for (const auto& [loc, weights] : location_weights_) {
+                    if (!wfirst) woss << " | ";
+                    woss << loc << ": [" << std::fixed << std::setprecision(2)
+                         << weights.weight[0] << ", " << weights.weight[1]
+                         << ", " << weights.weight[2] << "]";
+                    wfirst = false;
+                }
+                LOG(INFO) << woss.str();
+            }
         }
     }
 }
 
 Status DeviceQuota::release(int dev_id, uint64_t length, double latency,
-                            int priority) {
-    // Print traffic stats periodically
-    printTrafficStats(devices_);
+                            int priority, const std::string& location,
+                            int rank) {
+    // Print traffic stats periodically (including weights)
+    printTrafficStats();
 
     if (!enable_quota_) return Status::OK();
 
@@ -304,31 +355,62 @@ Status DeviceQuota::release(int dev_id, uint64_t length, double latency,
 
     auto& dev = it->second;
 
-    // Release inflight bytes
+    // ========== MUST EXECUTE: Release inflight bytes ==========
     dev.subInflight(length);
 
-    // Early exit if EWMA learning disabled
-    if (!sched_params_.enable_ewma_learning) return Status::OK();
+    bool learning_enabled = sched_params_.enable_ewma_learning ||
+                            sched_params_.enable_adaptive_rank_weights;
+    if (learning_enabled) {
+        thread_local uint64_t tl_sample_counter = 0;
+        double sample_rate = sched_params_.param_update_sample_rate;
+        bool should_update =
+            (sample_rate >= 1.0) ||
+            (static_cast<double>(++tl_sample_counter * sample_rate) >=
+             static_cast<double>(tl_sample_counter));
 
-    // Filter out small transfers (noise reduction)
-    if (length < 4096 || latency < 1e-6) return Status::OK();
+        if (should_update) {
+            if (length >= 4096 && latency >= 1e-6) {
+                if (sched_params_.enable_ewma_learning) {
+                    double observed_bps = length / latency;
+                    double alpha = sched_params_.ewma_alpha;
+                    double current_ewma = dev.getEwmaBandwidth();
+                    double new_ewma =
+                        alpha * current_ewma + (1.0 - alpha) * observed_bps;
 
-    // Calculate observed bandwidth
-    double observed_bps = length / latency;
+                    // Clamp to reasonable bounds (10% to 300% of theoretical)
+                    double min_bw = dev.getTheoreticalBandwidth() * 0.1;
+                    double max_bw = dev.getTheoreticalBandwidth() * 3.0;
+                    new_ewma = std::clamp(new_ewma, min_bw, max_bw);
 
-    // Update EWMA bandwidth: new = alpha * old + (1 - alpha) * observed
-    double alpha = sched_params_.ewma_alpha;
-    double current_ewma = dev.getEwmaBandwidth();
-    double new_ewma = alpha * current_ewma + (1.0 - alpha) * observed_bps;
+                    dev.ewma_bandwidth_bps.store(new_ewma,
+                                                 std::memory_order_relaxed);
+                }
 
-    // Clamp to reasonable bounds (10% to 300% of theoretical)
-    double min_bw = dev.getTheoreticalBandwidth() * 0.1;
-    double max_bw = dev.getTheoreticalBandwidth() * 3.0;
-    new_ewma = std::clamp(new_ewma, min_bw, max_bw);
+                // --- Adaptive rank weight update ---
+                if (sched_params_.enable_adaptive_rank_weights &&
+                    !location.empty() && rank >= 0 &&
+                    rank < (int)Topology::DevicePriorityRanks) {
+                    LocationRankWeights* loc_weights =
+                        getLocationWeights(location);
 
-    dev.ewma_bandwidth_bps.store(new_ewma, std::memory_order_relaxed);
+                    // Update statistics for this rank
+                    auto& stats = loc_weights->stats[rank];
+                    __sync_fetch_and_add(&stats.total_bytes, length);
+                    __sync_fetch_and_add(&stats.total_latency_ns,
+                                         static_cast<uint64_t>(latency * 1e9));
+                    uint32_t count =
+                        __sync_fetch_and_add(&stats.sample_count, 1) + 1;
 
-    // Periodic diffusion for shared quota (if enabled)
+                    // Periodically adjust weights (every N samples per rank)
+                    if (count % kWeightAdjustInterval == 0) {
+                        adjustLocationWeights(loc_weights);
+                    }
+                }
+            }
+        }
+    }
+
+    // ========== MUST EXECUTE: Periodic diffusion for shared quota ==========
     if (shared_quota_) {
         thread_local uint64_t tl_last_ts = 0;
         uint64_t now = getCurrentTimeInNano();
@@ -340,6 +422,105 @@ Status DeviceQuota::release(int dev_id, uint64_t length, double latency,
     }
 
     return Status::OK();
+}
+
+// ============================================================================
+// Adaptive weight management
+// ============================================================================
+
+DeviceQuota::LocationRankWeights* DeviceQuota::getLocationWeights(
+    const std::string& location) {
+    // Fast path: thread-local cache hit
+    uint64_t now = getCurrentTimeInNano();
+    if (tl_weights_cache.weights && tl_weights_cache.location == location &&
+        (now - tl_weights_cache.last_update_ns) < kLocationCacheTtlNs) {
+        return static_cast<LocationRankWeights*>(tl_weights_cache.weights);
+    }
+
+    // Slow path: lookup or create
+    {
+        std::shared_lock<std::shared_mutex> read_lock(location_weights_lock_);
+        auto it = location_weights_.find(location);
+        if (it != location_weights_.end()) {
+            tl_weights_cache.location = location;
+            tl_weights_cache.weights = &it->second;
+            tl_weights_cache.last_update_ns = now;
+            return &it->second;
+        }
+    }
+
+    // Create new entry (write lock)
+    {
+        std::unique_lock<std::shared_mutex> write_lock(location_weights_lock_);
+        // Double-check after acquiring write lock
+        auto it = location_weights_.find(location);
+        if (it == location_weights_.end()) {
+            auto result =
+                location_weights_.emplace(location, LocationRankWeights());
+            tl_weights_cache.location = location;
+            tl_weights_cache.weights = &result.first->second;
+            tl_weights_cache.last_update_ns = now;
+            return &result.first->second;
+        }
+        tl_weights_cache.location = location;
+        tl_weights_cache.weights = &it->second;
+        tl_weights_cache.last_update_ns = now;
+        return &it->second;
+    }
+}
+
+void DeviceQuota::adjustLocationWeights(LocationRankWeights* loc_weights) {
+    // Calculate normalized latency for each rank (ns per GB)
+    double norm_latency[Topology::DevicePriorityRanks] = {0};
+    bool has_valid_data[Topology::DevicePriorityRanks] = {false};
+
+    for (size_t r = 0; r < Topology::DevicePriorityRanks; ++r) {
+        // Read stats atomically
+        uint64_t total_bytes =
+            __sync_fetch_and_add(&loc_weights->stats[r].total_bytes, 0);
+        uint64_t total_ns =
+            __sync_fetch_and_add(&loc_weights->stats[r].total_latency_ns, 0);
+
+        if (total_bytes >= 1024 * 1024) {  // At least 1MB of data
+            // Normalize: latency per GB (to make values comparable)
+            double gb =
+                static_cast<double>(total_bytes) / (1024.0 * 1024.0 * 1024.0);
+            norm_latency[r] = static_cast<double>(total_ns) / gb;
+            has_valid_data[r] = true;
+        }
+    }
+
+    // Use rank0 as baseline if available
+    if (has_valid_data[0]) {
+        double baseline = norm_latency[0];
+        double w0 = loc_weights->weight[0];
+
+        for (size_t r = 1; r < Topology::DevicePriorityRanks; ++r) {
+            if (!has_valid_data[r]) continue;
+
+            // Calculate target weight based on latency ratio
+            // If rank1 is 2x slower than rank0, its weight should be w0/2
+            double ratio =
+                baseline / norm_latency[r];  // < 1.0 if rank r is slower
+            double target_weight = w0 * ratio;
+
+            // EWMA update: smooth transition
+            double current = loc_weights->weight[r];
+            double new_weight = kWeightLearningRate * target_weight +
+                                (1.0 - kWeightLearningRate) * current;
+            new_weight = std::clamp(new_weight, kMinWeight, kMaxWeight);
+
+            loc_weights->weight[r] = new_weight;
+
+            // Reset statistics after adjustment
+            loc_weights->stats[r].total_bytes = 0;
+            loc_weights->stats[r].total_latency_ns = 0;
+        }
+
+        // Also reset rank0 stats
+        loc_weights->stats[0].total_bytes = 0;
+        loc_weights->stats[0].total_latency_ns = 0;
+    }
 }
 
 }  // namespace tent
