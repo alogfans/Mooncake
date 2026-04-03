@@ -62,10 +62,17 @@ thread_local DeviceQuota::LocationWeightsCache tl_weights_cache{"", nullptr, 0};
 constexpr uint64_t kLocationCacheTtlNs = 10 * 1000000000ULL;  // 10 seconds
 
 // Constants for adaptive weight adjustment
-constexpr uint32_t kWeightAdjustInterval = 1000;  // Adjust every N samples
-constexpr double kWeightLearningRate = 0.1;  // EWMA alpha for weight updates
+constexpr uint32_t kWeightAdjustInterval = 10000;  // Adjust every N samples
+constexpr double kWeightLearningRate = 0.01;  // Very conservative (was 0.1)
 constexpr double kMinWeight = 0.1;           // Minimum weight
 constexpr double kMaxWeight = 15.0;          // Maximum weight
+constexpr uint64_t kMinDataBytes = 200 * 1024 * 1024ULL;  // Min 200MB for stable stats
+constexpr double kMaxAdjustRatio = 0.2;      // Max 20% change per adjustment
+
+// NUMA-based minimum weight ratios to preserve affinity hierarchy
+// rank0 should always be significantly preferred due to same-NUMA latency
+constexpr double kMinRank0ToRank1Ratio = 2.0;  // rank0 >= 2x rank1
+constexpr double kMinRank1ToRank2Ratio = 2.0;  // rank1 >= 2x rank2
 
 Status DeviceQuota::allocate(uint64_t total_length, uint32_t num_slices,
                              const std::string& location,
@@ -182,9 +189,7 @@ Status DeviceQuota::buildCandidates(const Topology::MemEntry* entry,
         LocationRankWeights* loc_weights = getLocationWeights(location);
         rank_weight = loc_weights->weight;
     } else {
-        // Use static weights (9:3:0.3 for rank 0:1:2)
-        static constexpr double
-            kStaticRankWeight[Topology::DevicePriorityRanks] = {9.0, 3.0, 0.3};
+        // Use static default weights (9:3:0.3 for rank 0:1:2)
         rank_weight = kStaticRankWeight;
     }
 
@@ -365,8 +370,7 @@ Status DeviceQuota::release(int dev_id, uint64_t length, double latency,
         double sample_rate = sched_params_.param_update_sample_rate;
         bool should_update =
             (sample_rate >= 1.0) ||
-            (static_cast<double>(++tl_sample_counter * sample_rate) >=
-             static_cast<double>(tl_sample_counter));
+            ((++tl_sample_counter % static_cast<uint64_t>(1.0 / sample_rate)) == 0);
 
         if (should_update) {
             if (length >= 4096 && latency >= 1e-6) {
@@ -472,54 +476,93 @@ DeviceQuota::LocationRankWeights* DeviceQuota::getLocationWeights(
 void DeviceQuota::adjustLocationWeights(LocationRankWeights* loc_weights) {
     // Calculate normalized latency for each rank (ns per GB)
     double norm_latency[Topology::DevicePriorityRanks] = {0};
+    uint64_t total_bytes_arr[Topology::DevicePriorityRanks] = {0};
     bool has_valid_data[Topology::DevicePriorityRanks] = {false};
 
     for (size_t r = 0; r < Topology::DevicePriorityRanks; ++r) {
         // Read stats atomically
-        uint64_t total_bytes =
+        total_bytes_arr[r] =
             __sync_fetch_and_add(&loc_weights->stats[r].total_bytes, 0);
         uint64_t total_ns =
             __sync_fetch_and_add(&loc_weights->stats[r].total_latency_ns, 0);
 
-        if (total_bytes >= 1024 * 1024) {  // At least 1MB of data
+        // Require sufficient data for stable statistics
+        if (total_bytes_arr[r] >= kMinDataBytes) {
             // Normalize: latency per GB (to make values comparable)
             double gb =
-                static_cast<double>(total_bytes) / (1024.0 * 1024.0 * 1024.0);
+                static_cast<double>(total_bytes_arr[r]) / (1024.0 * 1024.0 * 1024.0);
             norm_latency[r] = static_cast<double>(total_ns) / gb;
             has_valid_data[r] = true;
         }
     }
 
-    // Use rank0 as baseline if available
-    if (has_valid_data[0]) {
-        double baseline = norm_latency[0];
-        double w0 = loc_weights->weight[0];
+    // Require rank0 to have valid data (it's the baseline)
+    // Allow partial adjustment if rank1/2 have insufficient data
+    if (!has_valid_data[0]) {
+        return;  // No baseline, skip adjustment
+    }
 
-        for (size_t r = 1; r < Topology::DevicePriorityRanks; ++r) {
-            if (!has_valid_data[r]) continue;
+    // Key insight from NUMA perspective:
+    // rank0 (same-NUMA) should ALWAYS be preferred significantly
+    // Even if rank1/2 appear faster due to being temporarily idle,
+    // their cross-NUMA penalty will manifest under load.
+    // Therefore, we only adjust weights to reflect LONG-TERM trends,
+    // not transient idle-state performance.
 
-            // Calculate target weight based on latency ratio
-            // If rank1 is 2x slower than rank0, its weight should be w0/2
-            double ratio =
-                baseline / norm_latency[r];  // < 1.0 if rank r is slower
-            double target_weight = w0 * ratio;
+    double w0_current = loc_weights->weight[0];
+    double w1_current = loc_weights->weight[1];
+    double w2_current = loc_weights->weight[2];
 
-            // EWMA update: smooth transition
-            double current = loc_weights->weight[r];
-            double new_weight = kWeightLearningRate * target_weight +
-                                (1.0 - kWeightLearningRate) * current;
-            new_weight = std::clamp(new_weight, kMinWeight, kMaxWeight);
+    // Calculate latency ratios relative to rank0
+    // ratio > 1.0 means this rank is slower than rank0 (expected for NUMA)
+    // ratio < 1.0 would be suspicious (rank1/2 faster than rank0?)
+    double latency_ratio_1 = has_valid_data[1] ?
+        (norm_latency[1] / norm_latency[0]) : 3.0;  // Default: 3x slower
+    double latency_ratio_2 = has_valid_data[2] ?
+        (norm_latency[2] / norm_latency[0]) : 10.0;  // Default: 10x slower
 
-            loc_weights->weight[r] = new_weight;
+    // Sanity check: if rank1/2 appear faster than rank0, it's likely due to
+    // them being idle. Don't reward this - maintain NUMA hierarchy.
+    if (latency_ratio_1 < 1.2) latency_ratio_1 = 1.2;  // At least 1.2x slower
+    if (latency_ratio_2 < 2.0) latency_ratio_2 = 2.0;  // At least 2x slower
 
-            // Reset statistics after adjustment
-            loc_weights->stats[r].total_bytes = 0;
-            loc_weights->stats[r].total_latency_ns = 0;
-        }
+    // Calculate target weights based on observed latency penalties
+    // Higher latency penalty -> lower target weight
+    double w0_target = w0_current;  // Keep rank0 stable as anchor
+    double w1_target = w0_target / latency_ratio_1;
+    double w2_target = w0_target / latency_ratio_2;
 
-        // Also reset rank0 stats
-        loc_weights->stats[0].total_bytes = 0;
-        loc_weights->stats[0].total_latency_ns = 0;
+    // Apply EWMA update with conservative rate
+    double w0_new = w0_current;  // Keep rank0 unchanged (it's the anchor)
+    double w1_new = kWeightLearningRate * w1_target +
+                    (1.0 - kWeightLearningRate) * w1_current;
+    double w2_new = kWeightLearningRate * w2_target +
+                    (1.0 - kWeightLearningRate) * w2_current;
+
+    // Limit adjustment magnitude (prevent large swings)
+    w1_new = std::clamp(w1_new, w1_current * (1.0 - kMaxAdjustRatio),
+                        w1_current * (1.0 + kMaxAdjustRatio));
+    w2_new = std::clamp(w2_new, w2_current * (1.0 - kMaxAdjustRatio),
+                        w2_current * (1.0 + kMaxAdjustRatio));
+
+    // Enforce NUMA hierarchy: rank0 >> rank1 >> rank2
+    // This is critical - cross-NUMA should never be preferred
+    if (w1_new > w0_new / kMinRank0ToRank1Ratio) {
+        w1_new = w0_new / kMinRank0ToRank1Ratio;
+    }
+    if (w2_new > w1_new / kMinRank1ToRank2Ratio) {
+        w2_new = w1_new / kMinRank1ToRank2Ratio;
+    }
+
+    // Final bounds check
+    loc_weights->weight[0] = std::clamp(w0_new, kMinWeight, kMaxWeight);
+    loc_weights->weight[1] = std::clamp(w1_new, kMinWeight, kMaxWeight);
+    loc_weights->weight[2] = std::clamp(w2_new, kMinWeight, kMaxWeight);
+
+    // Reset statistics after successful adjustment
+    for (size_t r = 0; r < Topology::DevicePriorityRanks; ++r) {
+        loc_weights->stats[r].total_bytes = 0;
+        loc_weights->stats[r].total_latency_ns = 0;
     }
 }
 

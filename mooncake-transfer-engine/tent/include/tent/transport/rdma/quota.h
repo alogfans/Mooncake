@@ -230,6 +230,9 @@ class DeviceQuota {
     };
 
    private:
+    static constexpr double kStaticRankWeight[Topology::DevicePriorityRanks] = {
+        10.0, 2.0, 0.2};
+
     // Per-location adaptive rank weights (low-overhead design)
     struct LocationRankWeights {
         // Adaptive weights for each rank (use padding for cache line isolation)
@@ -245,10 +248,9 @@ class DeviceQuota {
         RankStats stats[Topology::DevicePriorityRanks];
 
         LocationRankWeights() {
-            // Initialize with default weights
-            weight[0] = 9.0;
-            weight[1] = 3.0;
-            weight[2] = 0.3;
+            // Initialize with static default weights
+            for (size_t i = 0; i < Topology::DevicePriorityRanks; ++i)
+                weight[i] = kStaticRankWeight[i];
         }
     };
 
