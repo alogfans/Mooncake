@@ -392,7 +392,11 @@ const std::vector<RangeLocation> Platform::getLocation(void* start, size_t len,
 
 const std::string Platform::type() const {
     if (backend_) {
-        return backend_->getPrefix();
+        auto prefix = backend_->getPrefix();
+        // Remove trailing ':' if present
+        if (!prefix.empty() && prefix.back() == ':')
+            return prefix.substr(0, prefix.length() - 1);
+        return prefix;
     }
     return "cpu";
 }
