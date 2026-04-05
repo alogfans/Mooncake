@@ -366,6 +366,7 @@ Status ProxyManager::transferEventLoop(StagingTask& task,
                                       remote_futures[id]);
                     chunk.prev_state = chunk.state;
                     chunk.state = StageState::INFLIGHT_REMOTE;
+                    event_queue.push(id);
                 } else if (request.opcode == Request::READ && local_staging) {
                     chunk.batch = submitLocalStage(request, chunk.local_buf,
                                                    chunk.length, chunk.offset);
@@ -443,9 +444,8 @@ Status ProxyManager::transferEventLoop(StagingTask& task,
                             remote_locked.erase(chunk.remote_buf);
                         }
                     }
-                } else {
-                    event_queue.push(id);
                 }
+                event_queue.push(id);
                 break;
             }
         }
