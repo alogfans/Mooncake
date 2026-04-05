@@ -14,6 +14,7 @@
 
 #include "tent/transport/rdma/rdma_transport.h"
 #include "tent/transport/rdma/ibv_loader.h"
+#include "tent/transport/rdma/quota.h"
 
 #include <glog/logging.h>
 #include <sys/mman.h>
@@ -239,10 +240,6 @@ Status RdmaTransport::freeSubBatch(SubBatchRef& batch) {
     return Status::OK();
 }
 
-static inline uint64_t roundup(uint64_t a, uint64_t b) {
-    return (a % b == 0) ? a : (a / b + 1) * b;
-}
-
 Status RdmaTransport::submitTransferTasks(
     SubBatchRef batch, const std::vector<Request>& request_list) {
     auto rdma_batch = dynamic_cast<RdmaSubBatch*>(batch);
@@ -303,8 +300,9 @@ Status RdmaTransport::submitTransferTasks(
             }
         }
 
-        uint64_t block_size = roundup(
-            (request.length + num_slices - 1) / num_slices, default_block_size);
+        // Calculate block_size using shared helper (must match quota.cpp)
+        uint64_t block_size = DeviceQuota::calculateBlockSize(
+            request.length, static_cast<uint32_t>(num_slices), default_block_size);
 
         num_slices = std::max<uint64_t>(
             1, std::min<uint64_t>(num_slices, max_slice_count));
@@ -337,8 +335,8 @@ Status RdmaTransport::submitTransferTasks(
         // Create slices with pre-assigned devices from quota
         uint64_t offset = 0;
         for (uint64_t slice_idx = 0; slice_idx < num_slices; ++slice_idx) {
-            uint64_t length =
-                std::min<uint64_t>(request.length - offset, block_size);
+            // Use shared helper for slice length (must match quota.cpp)
+            uint64_t length = DeviceQuota::getSliceLength(request.length, offset, block_size);
             auto slice = RdmaSliceStorage::Get().allocate();
             slice->source_addr = (char*)request.source + offset;
             slice->target_addr = request.target_offset + offset;

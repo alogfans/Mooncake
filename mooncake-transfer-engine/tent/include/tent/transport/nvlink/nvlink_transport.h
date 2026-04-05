@@ -86,6 +86,18 @@ class NVLinkTransport : public Transport {
 
     Status setPeerAccess();
 
+    void updateStats(int device_id, uint64_t bytes);
+    void printTrafficStats();
+
+    // Traffic statistics
+    struct TrafficStats {
+        std::atomic<uint64_t> total_bytes{0};
+        std::atomic<uint64_t> last_second_bytes{0};
+    };
+    std::unordered_map<int, TrafficStats> device_stats_;
+    std::atomic<uint64_t> last_print_time_ns_{0};
+    std::mutex stats_mutex_;
+
    private:
     bool installed_;
     std::string local_segment_name_;

@@ -40,6 +40,9 @@ Workers::Workers(RdmaTransport* transport)
     auto enable_quota = conf->get("transports/rdma/enable_quota", true);
     device_quota_->setEnableQuota(enable_quota);
 
+    // Set slice calculation parameters (must match rdma_transport.cpp)
+    device_quota_->setSliceParams(transport_->params_->workers.block_size);
+
     // Configure EWMA scheduling parameters
     DeviceQuota::SchedulingParams params;
     params.ewma_alpha = conf->get("transports/rdma/ewma_alpha", 0.01);

@@ -24,12 +24,14 @@
 #include <cstdint>
 #include <iomanip>
 #include <memory>
+#include <sstream>
 
 #include "tent/common/status.h"
 #include "tent/runtime/slab.h"
 #include "tent/runtime/control_plane.h"
 #include "tent/common/utils/random.h"
 #include "tent/common/utils/string_builder.h"
+#include "tent/common/utils/os.h"
 
 namespace mooncake {
 namespace tent {
@@ -178,7 +180,12 @@ void NVLinkTransport::startTransfer(NVLinkTask* task, NVLinkSubBatch* batch) {
         } else {
             task->transferred_bytes = task->request.length;
             task->status_word = TransferStatusEnum::COMPLETED;
+            // Update statistics
+            int device_id = 0;
+            cudaGetDevice(&device_id);
+            updateStats(device_id, task->request.length);
         }
+        printTrafficStats();
         return;
     }
 
@@ -201,6 +208,11 @@ Status NVLinkTransport::getTransferStatus(SubBatchRef batch, int task_id,
             cudaStreamSynchronize(shm_batch->stream);
             task.transferred_bytes = task.request.length;
             task.status_word = TransferStatusEnum::COMPLETED;
+            // Update statistics
+            int device_id = 0;
+            cudaGetDevice(&device_id);
+            updateStats(device_id, task.request.length);
+            printTrafficStats();
         } else if (err != cudaErrorNotReady) {
             task.status_word = TransferStatusEnum::FAILED;
         }
@@ -328,6 +340,57 @@ Status NVLinkTransport::setPeerAccess() {
     cudaSetDevice(cuda_dev);
     return Status::OK();
 }
+
+void NVLinkTransport::updateStats(int device_id, uint64_t bytes) {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    device_stats_[device_id].total_bytes.fetch_add(bytes, std::memory_order_relaxed);
+}
+
+void NVLinkTransport::printTrafficStats() {
+    uint64_t now = getCurrentTimeInNano();
+    uint64_t expected_last = last_print_time_ns_.load(std::memory_order_relaxed);
+
+    if (expected_last == 0) {
+        last_print_time_ns_.store(now, std::memory_order_relaxed);
+        return;
+    }
+
+    // Print every 1 second (only one thread will succeed)
+    if (now - expected_last >= 1000000000ULL) {
+        // Try to claim the print slot
+        if (last_print_time_ns_.compare_exchange_strong(
+                expected_last, now, std::memory_order_relaxed,
+                std::memory_order_relaxed)) {
+            std::ostringstream oss;
+            oss << "[NVLink Traffic] ";
+            bool first = true;
+
+            std::lock_guard<std::mutex> lock(stats_mutex_);
+            for (auto& [dev_id, stats] : device_stats_) {
+                uint64_t total = stats.total_bytes.load(std::memory_order_relaxed);
+                uint64_t last = stats.last_second_bytes.load(std::memory_order_relaxed);
+                uint64_t delta = total - last;
+                double mbps = delta * 8.0 / 1e6;  // Mb/s
+
+                stats.last_second_bytes.store(total, std::memory_order_relaxed);
+
+                // Skip devices with zero traffic
+                if (mbps < 0.01) continue;
+
+                if (!first) oss << " | ";
+                oss << "dev" << dev_id << ": " << std::fixed
+                    << std::setprecision(2) << mbps << " Mb/s";
+                first = false;
+            }
+
+            // Only print if there's actual traffic
+            if (!first) {
+                LOG(INFO) << oss.str();
+            }
+        }
+    }
+}
+
 }  // namespace tent
 }  // namespace mooncake
 

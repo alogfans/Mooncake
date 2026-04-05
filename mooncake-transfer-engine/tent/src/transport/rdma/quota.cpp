@@ -82,6 +82,32 @@ Status DeviceQuota::allocate(uint64_t total_length, uint32_t num_slices,
         tl_quota_location_cache.last_update_ns = now;
     }
 
+    // Calculate block_size using same logic as rdma_transport.cpp
+    const double merge_ratio = 0.25;
+    uint64_t base_block = default_block_size_;
+    uint64_t calc_num_slices = (total_length + base_block - 1) / base_block;
+    calc_num_slices = std::max<uint64_t>(
+        1, std::min<uint64_t>(calc_num_slices, max_slice_count_));
+
+    if (calc_num_slices > 1) {
+        uint64_t tail = total_length % base_block;
+        if (tail > 0 &&
+            tail < static_cast<uint64_t>(base_block * merge_ratio)) {
+            calc_num_slices = std::max<uint64_t>(1, calc_num_slices - 1);
+        }
+    }
+
+    // Align to default_block_size
+    auto roundup = [](uint64_t a, uint64_t b) -> uint64_t {
+        return (a % b == 0) ? a : (a / b + 1) * b;
+    };
+    uint64_t block_size = roundup(
+        (total_length + calc_num_slices - 1) / calc_num_slices,
+        default_block_size_);
+
+    calc_num_slices = std::max<uint64_t>(
+        1, std::min<uint64_t>(calc_num_slices, max_slice_count_));
+
     uint64_t slice_bytes = (total_length + num_slices - 1) / num_slices;
 
     // ========== Baseline mode: simple round-robin ==========
@@ -128,8 +154,8 @@ Status DeviceQuota::allocate(uint64_t total_length, uint32_t num_slices,
         selectSinglePath(tl_candidates, num_slices, total_length,
                          slice_dev_ids);
     } else {
-        selectMultiPath(tl_candidates, num_slices, slice_bytes, slice_dev_ids,
-                        explore_mode);
+        selectMultiPath(tl_candidates, num_slices, total_length,
+                        slice_dev_ids, explore_mode);
     }
     return Status::OK();
 }
@@ -178,11 +204,15 @@ Status DeviceQuota::buildCandidates(const Topology::MemEntry* entry,
             double effective_bw = dev.getEwmaBandwidth();
             uint64_t inflight = dev.getInflightBytes();
             // Score = (effective_bandwidth * rank_weight) / pending_bytes
-            double score = (effective_bw * sched_params_.rank_weights[rank]) /
-                           (inflight + slice_bytes);
+            double raw_score = (effective_bw * sched_params_.rank_weights[rank]) /
+                               (inflight + slice_bytes);
+            // Set minimum score to 0.01 to avoid zero scores
+            double score = std::max(raw_score, 0.01);
+
             candidates.push_back({dev_id, score, is_cross_numa});
         }
     }
+
     if (candidates.empty())
         return Status::DeviceNotFound("no eligible devices");
     return Status::OK();
@@ -191,24 +221,38 @@ Status DeviceQuota::buildCandidates(const Topology::MemEntry* entry,
 void DeviceQuota::selectSinglePath(const std::vector<Candidate>& candidates,
                                    uint32_t num_slices, uint64_t total_length,
                                    std::vector<int>& slice_dev_ids) {
-    // Select best device with 10% tolerance for load balancing
+    // Select best devices with 10% tolerance for load balancing
     double max_score = 0;
     for (const auto& c : candidates) max_score = std::max(max_score, c.score);
     std::vector<size_t> best_indices;
     for (size_t i = 0; i < candidates.size(); ++i) {
         if (candidates[i].score >= max_score * 0.9) best_indices.push_back(i);
     }
-    size_t idx = best_indices[SimpleRandom::Get().next(best_indices.size())];
-    const auto& target = candidates[idx];
-    for (uint32_t i = 0; i < num_slices; ++i)
-        slice_dev_ids.push_back(target.dev_id);
-    updateStats(target.dev_id, total_length);
+
+    // Calculate block_size using shared helper (must match rdma_transport.cpp)
+    uint64_t block_size = calculateBlockSize(total_length, num_slices, default_block_size_);
+
+    // Distribute slices with actual lengths
+    uint64_t offset = 0;
+    for (uint32_t i = 0; i < num_slices; ++i) {
+        size_t idx = best_indices[tl_rr_counter++ % best_indices.size()];
+        slice_dev_ids.push_back(candidates[idx].dev_id);
+        uint64_t actual_slice_bytes = getSliceLength(total_length, offset, block_size);
+        offset += actual_slice_bytes;
+        updateStats(candidates[idx].dev_id, actual_slice_bytes);
+    }
 }
 
 void DeviceQuota::selectMultiPath(const std::vector<Candidate>& candidates,
-                                  uint32_t num_slices, uint64_t slice_bytes,
+                                  uint32_t num_slices, uint64_t total_length,
                                   std::vector<int>& slice_dev_ids,
                                   bool explore_mode) {
+    // Calculate block_size using shared helper (must match rdma_transport.cpp)
+    uint64_t block_size = calculateBlockSize(total_length, num_slices, default_block_size_);
+
+    // Distribute slices with actual lengths
+    uint64_t offset = 0;
+
     if (explore_mode) {
         // Exploration mode: randomly distribute slices across all devices
         // Shuffle candidate indices for random exploration
@@ -223,7 +267,9 @@ void DeviceQuota::selectMultiPath(const std::vector<Candidate>& candidates,
         for (uint32_t i = 0; i < num_slices; ++i) {
             size_t cand_idx = shuffled_idx[i % candidates.size()];
             slice_dev_ids.push_back(candidates[cand_idx].dev_id);
-            updateStats(candidates[cand_idx].dev_id, slice_bytes);
+            uint64_t actual_slice_bytes = getSliceLength(total_length, offset, block_size);
+            offset += actual_slice_bytes;
+            updateStats(candidates[cand_idx].dev_id, actual_slice_bytes);
         }
     } else {
         // Normal mode: bandwidth-weighted distribution
@@ -234,10 +280,11 @@ void DeviceQuota::selectMultiPath(const std::vector<Candidate>& candidates,
             cumulative_scores.push_back(total_score);
         }
         thread_local uint64_t tl_batch_offset = 0;
-        double offset = (tl_batch_offset++ * slice_bytes) / total_score;
+        uint64_t slice_bytes = (total_length + num_slices - 1) / num_slices;
+        double weight_offset = (tl_batch_offset++ * slice_bytes) / total_score;
         for (uint32_t i = 0; i < num_slices; ++i) {
             double pos =
-                fmod(offset + i * (total_score / num_slices), total_score);
+                fmod(weight_offset + i * (total_score / num_slices), total_score);
             auto it = std::lower_bound(cumulative_scores.begin(),
                                        cumulative_scores.end(), pos);
             size_t idx = std::distance(cumulative_scores.begin(), it);
@@ -245,7 +292,9 @@ void DeviceQuota::selectMultiPath(const std::vector<Candidate>& candidates,
 
             const auto& selected = candidates[idx];
             slice_dev_ids.push_back(selected.dev_id);
-            updateStats(selected.dev_id, slice_bytes);
+            uint64_t actual_slice_bytes = getSliceLength(total_length, offset, block_size);
+            offset += actual_slice_bytes;
+            updateStats(selected.dev_id, actual_slice_bytes);
         }
     }
 }
