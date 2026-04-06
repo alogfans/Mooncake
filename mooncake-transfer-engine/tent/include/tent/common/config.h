@@ -106,6 +106,10 @@ class Config {
    private:
     json config_data_;
     mutable std::mutex mutex_;
+
+    // Helper to merge two JSON objects (deep merge)
+    // Existing values in base have higher priority (won't be overwritten)
+    static json merge(const json& base, const json& update);
 };
 
 struct ConfigHelper {

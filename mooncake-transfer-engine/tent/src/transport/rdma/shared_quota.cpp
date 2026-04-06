@@ -324,6 +324,15 @@ uint64_t SharedQuotaManager::getLowPrioLoad(int dev_id) const {
     return hdr_->devices[dev_id].low_prio_bytes;
 }
 
+void SharedQuotaManager::updateTimesliceInt(int dev_idx, uint64_t next_prio, uint64_t now) {
+    if (!hdr_) return;
+    auto& ts = hdr_->devices[dev_idx].timeslice;
+
+    ts.current_prio.store(next_prio, std::memory_order_relaxed);
+    ts.slice_end_ns.store(now + TIMESLICE_BASE_NS * QUOTA_WEIGHT[next_prio],
+                          std::memory_order_relaxed);
+}
+
 void SharedQuotaManager::updateTimeslice(int dev_idx) {
     if (!hdr_) return;
     uint64_t now = getCurrentTimeInNano();
@@ -340,27 +349,10 @@ void SharedQuotaManager::updateTimeslice(int dev_idx) {
 
     // Check if current timeslice has ended
     if (now >= current_end) {
-        // Advance to next priority with pending work
-        uint64_t next_prio = PRIO_HIGH;
-        // Simple round-robin through priorities, skipping empty ones
-        for (int p = 1; p < NUM_PRIORITIES; ++p) {
-            int prio = (ts.current_prio.load(std::memory_order_relaxed) + p) %
-                       NUM_PRIORITIES;
-            if (hdr_->devices[dev_idx].high_prio_bytes > 0 &&
-                prio == PRIO_HIGH) {
-                next_prio = prio;
-                break;
-            }
-            if (hdr_->devices[dev_idx].medium_prio_bytes > 0 &&
-                prio == PRIO_MEDIUM) {
-                next_prio = prio;
-                break;
-            }
-            if (hdr_->devices[dev_idx].low_prio_bytes > 0 && prio == PRIO_LOW) {
-                next_prio = prio;
-                break;
-            }
-        }
+        // Simple round-robin through all priorities (0 -> 1 -> 2 -> 0 ...)
+        // This ensures fair bandwidth allocation regardless of current load
+        uint64_t current = ts.current_prio.load(std::memory_order_relaxed);
+        uint64_t next_prio = (current + 1) % NUM_PRIORITIES;
         ts.current_prio.store(next_prio, std::memory_order_relaxed);
         ts.slice_end_ns.store(now + TIMESLICE_BASE_NS * QUOTA_WEIGHT[next_prio],
                               std::memory_order_relaxed);
@@ -377,11 +369,19 @@ bool SharedQuotaManager::canSend(int dev_id, int priority) const {
     uint64_t now = getCurrentTimeInNano();
 
     // Check if we're still in current timeslice
-    if (now < ts.slice_end_ns.load(std::memory_order_relaxed))
+    if (now < ts.slice_end_ns.load(std::memory_order_relaxed)) {
+        // Still in timeslice - only allow matching priority
         return (int)current_prio == priority;
+    }
 
-    // Timeslice ended, try to advance (non-blocking check)
-    return false;  // Caller should call updateTimeslice
+    // Timeslice ended - advance to next priority
+    // (const_cast is safe here as we're just updating timeslice state)
+    uint64_t next_prio = (current_prio + 1) % NUM_PRIORITIES;
+    const_cast<SharedQuotaManager*>(this)->updateTimesliceInt(dev_id, next_prio, now);
+
+    // Check again with updated timeslice
+    current_prio = ts.current_prio.load(std::memory_order_relaxed);
+    return (int)current_prio == priority;
 }
 
 }  // namespace tent

@@ -33,24 +33,17 @@ Workers::Workers(RdmaTransport* transport)
     device_quota_ = std::make_unique<DeviceQuota>();
     device_quota_->loadTopology(transport_->local_topology_);
     auto& conf = transport_->conf_;
+
     auto shared_quota_shm_path =
         conf->get("transports/rdma/shared_quota_shm_path", "");
     if (!shared_quota_shm_path.empty()) {
         auto status = device_quota_->enableSharedQuota(shared_quota_shm_path);
-        if (status.ok()) {
-            LOG(INFO) << "Shared quota enabled: " << shared_quota_shm_path;
-        } else {
+        if (!status.ok()) {
             LOG(WARNING) << "Failed to enable shared quota: " << status.ToString();
         }
-    } else {
-        LOG(INFO) << "Shared quota disabled (single-machine mode)";
     }
     auto enable_quota = conf->get("transports/rdma/enable_quota", true);
     device_quota_->setEnableQuota(enable_quota);
-    LOG(INFO) << "Priority weights: HIGH=" << kPriorityWeight[0]
-              << " MEDIUM=" << kPriorityWeight[1]
-              << " LOW=" << kPriorityWeight[2]
-              << " (total=" << kTotalWeight << ")";
 
     // Set slice calculation parameters (must match rdma_transport.cpp)
     device_quota_->setSliceParams(transport_->params_->workers.block_size);
@@ -272,12 +265,17 @@ void Workers::asyncPostSend() {
 
     if (shared_quota) {
         // Multi-process mode: use shared timeslice state
+        static int schedule_log_count = 0;
         int timeslice_prio = PRIO_HIGH;  // default
         if (!worker.requests.empty()) {
             int dev_id = worker.requests.begin()->first.local_device_id;
             for (int prio = 0; prio < kNumPriorityLevels; ++prio) {
                 if (shared_quota->canSend(dev_id, prio)) {
                     timeslice_prio = prio;
+                    if ((++schedule_log_count % 1000) == 0) {
+                        const char* prio_names[] = {"HIGH", "MEDIUM", "LOW"};
+                        LOG(INFO) << "QoS: Selected priority=" << prio_names[timeslice_prio];
+                    }
                     break;
                 }
             }

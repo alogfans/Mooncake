@@ -20,10 +20,38 @@
 
 namespace mooncake {
 namespace tent {
+
+// Deep merge two JSON objects - existing values in 'base' have higher priority
+// (won't be overwritten by values from 'update')
+json Config::merge(const json& base, const json& update) {
+    json result = base.is_null() ? json::object() : base;
+
+    if (update.is_object()) {
+        for (auto& [key, value] : update.items()) {
+            if (!result.contains(key)) {
+                // Key doesn't exist in base, add from update
+                result[key] = value;
+            } else if (value.is_object() && result[key].is_object()) {
+                // Both are objects, merge recursively
+                result[key] = merge(result[key], value);
+            }
+            // If key exists and is not an object (or not both objects),
+            // keep the existing value from base (higher priority)
+        }
+    } else if (result.is_null()) {
+        // base is null but update is not an object, use update
+        result = update;
+    }
+
+    return result;
+}
+
 Status Config::load(const std::string& content) {
     std::lock_guard<std::mutex> lock(mutex_);
     try {
-        config_data_ = json::parse(content);
+        json new_config = json::parse(content);
+        // Merge with existing config instead of replacing
+        config_data_ = merge(config_data_, new_config);
         return Status::OK();
     } catch (const std::exception& e) {
         return Status::InvalidArgument(std::string("Invalid JSON: ") +

@@ -42,9 +42,9 @@ static constexpr uint64_t SHM_MAGIC = 0x2025082772805202ULL;
 static constexpr int SHM_VERSION = 4;  // bumped for QoS token bucket
 
 // Time-sliced quota constants
-static constexpr uint64_t TIMESLICE_BASE_NS = 1000000ull;  // 1ms base unit
-static constexpr uint64_t QUOTA_WEIGHT[] = {9, 3, 1};      // High:Medium:Low
-static constexpr uint64_t QUOTA_TOTAL = 13;                // 9 + 3 + 1
+static constexpr uint64_t TIMESLICE_BASE_NS = 10000000ull;  // 10ms base unit (10x longer)
+static constexpr uint64_t QUOTA_WEIGHT[] = {9, 3, 1};       // High:Medium:Low
+static constexpr uint64_t QUOTA_TOTAL = 13;                 // 9 + 3 + 1
 
 // Per-device time slice state
 struct TimeSliceState {
@@ -99,6 +99,7 @@ class SharedQuotaManager {
     bool canSend(int dev_id, int priority) const;
 
    private:
+    void updateTimesliceInt(int dev_idx, uint64_t next_prio, uint64_t now);  // Internal helper
     void updateTimeslice(int dev_idx);  // Advance to next timeslice if needed
     Status attachProcess();
     Status detachProcess();
