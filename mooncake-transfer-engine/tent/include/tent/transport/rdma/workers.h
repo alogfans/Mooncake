@@ -201,14 +201,20 @@ class Workers {
 
         std::unordered_map<std::string, RailMonitor> rails;
         PerfMetricSummary perf;
-        uint64_t padding[14];
+        uint64_t padding[15];
     };
 
     WorkerContext *worker_context_;
     uint64_t slice_timeout_ns_;
+    int timeslice_us_ =
+        100;  // Time slice duration in microseconds (configurable)
 
     std::unique_ptr<DeviceQuota> device_quota_;
     bool always_tier1_ = false;
+
+    // Get current priority slot based on rdtscp timestamp
+    // Returns: 0 (HIGH only), 1 (MEDIUM+HIGH), 2 (ALL)
+    inline int getCurrentPrioritySlot() const;
 };
 }  // namespace tent
 }  // namespace mooncake

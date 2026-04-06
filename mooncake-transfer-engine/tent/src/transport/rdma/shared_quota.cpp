@@ -173,9 +173,9 @@ void SharedQuotaManager::backgroundThreadLoop() {
     const uint64_t SLEEP_INTERVAL_US = 1000;  // 1ms
 
     while (background_running_.load(std::memory_order_relaxed)) {
-        // Advance slot every 10ms, protected by mutex
+        // Advance slot based on configured timeslice duration
         uint64_t now = getCurrentTimeInNano();
-        int slot = static_cast<int>((now / (TIMESLICE_UNIT_MS * 1000000ull)) %
+        int slot = static_cast<int>((now / (timeslice_unit_ms_ * 1000000ull)) %
                                     NUM_SLOTS);
 
         pthread_mutex_lock(&hdr_->global_mutex);

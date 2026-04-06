@@ -78,6 +78,7 @@ struct XferBenchConfig {
     static std::string priority;  // "high", "medium", "low"
     static bool enable_shared_quota;
     static std::string shared_quota_shm_path;
+    static int timeslice_unit_ms;  // Time slice duration in ms
 };
 
 struct XferMetricStats {

@@ -40,20 +40,18 @@ static constexpr uint64_t SHM_MAGIC = 0x2025082772805203ULL;
 static constexpr int SHM_VERSION = 9;
 
 // Time slice configuration
-// Slot 0 (0-10ms):   HIGH only
-// Slot 1 (10-20ms):  MEDIUM + HIGH
-// Slot 2 (20-30ms):  ALL (LOW + MEDIUM + HIGH)
-// Then repeat: 30ms cycle
-static constexpr int TIMESLICE_UNIT_MS = 2;  // 10ms per slot
-static constexpr int NUM_SLOTS = 3;          // 3 slots per cycle
-static constexpr int CYCLE_DURATION_MS = TIMESLICE_UNIT_MS * NUM_SLOTS;  // 30ms
+// Slot 0:            HIGH only
+// Slot 1:            MEDIUM + HIGH
+// Slot 2:            ALL (LOW + MEDIUM + HIGH)
+// Then repeat
+static constexpr int NUM_SLOTS = 3;  // 3 slots per cycle
 
 struct SharedHeader {
     uint64_t magic;
     int32_t version;
 
     // Current slot index (0, 1, 2)
-    // Advances every 10ms
+    // Advances every 2ms
     std::atomic<int> current_slot;
 
     pthread_mutex_t global_mutex;
@@ -70,6 +68,10 @@ class SharedQuotaManager {
 
     // Check if current process can send
     bool canSend();
+
+    // Set time slice duration in milliseconds (must be > 0)
+    void setTimesliceUnitMs(int ms) { timeslice_unit_ms_ = ms; }
+    int getTimesliceUnitMs() const { return timeslice_unit_ms_; }
 
    private:
     void startBackgroundThread();
@@ -88,6 +90,7 @@ class SharedQuotaManager {
     size_t size_;
     bool created_;
     DeviceQuota* local_quota_;
+    int timeslice_unit_ms_ = 2;  // Default: 2ms per slot
 
     // Background thread
     std::thread background_thread_;

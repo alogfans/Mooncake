@@ -59,6 +59,9 @@ DEFINE_bool(enable_shared_quota, false,
             "Enable shared quota for multi-process QoS coordination");
 DEFINE_string(shared_quota_shm_path, "mooncake_quota_shm",
               "Shared memory path for cross-process quota management");
+DEFINE_int32(
+    timeslice_unit_ms, 2,
+    "Time slice duration in milliseconds for QoS scheduling (default: 2ms)");
 
 namespace mooncake {
 namespace tent {
@@ -92,6 +95,7 @@ int XferBenchConfig::target_gpu_id = 0;
 std::string XferBenchConfig::priority;
 bool XferBenchConfig::enable_shared_quota = false;
 std::string XferBenchConfig::shared_quota_shm_path;
+int XferBenchConfig::timeslice_unit_ms = 2;
 
 void XferBenchConfig::loadFromFlags() {
     seg_type = FLAGS_seg_type;
@@ -125,6 +129,7 @@ void XferBenchConfig::loadFromFlags() {
     priority = FLAGS_priority;
     enable_shared_quota = FLAGS_enable_shared_quota;
     shared_quota_shm_path = FLAGS_shared_quota_shm_path;
+    timeslice_unit_ms = FLAGS_timeslice_unit_ms;
 }
 
 double XferMetricStats::percentile(double p) {

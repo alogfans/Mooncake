@@ -42,6 +42,11 @@ Workers::Workers(RdmaTransport* transport)
             LOG(WARNING) << "Failed to enable shared quota: "
                          << status.ToString();
         }
+        // Configure timeslice duration for QoS scheduling
+        int timeslice_unit_ms =
+            conf->get("transports/rdma/timeslice_unit_ms", 2);
+        device_quota_->getSharedQuota()->setTimesliceUnitMs(timeslice_unit_ms);
+        LOG(INFO) << "QoS timeslice_unit_ms: " << timeslice_unit_ms;
     }
     auto enable_quota = conf->get("transports/rdma/enable_quota", true);
     device_quota_->setEnableQuota(enable_quota);
@@ -55,6 +60,11 @@ Workers::Workers(RdmaTransport* transport)
     else if (priority_str == "low")
         priority = 2;
     device_quota_->setPriority(priority);
+
+    // Configure local priority timeslice (for intra-process QoS)
+    // Uses rdtscp for high-precision timing
+    timeslice_us_ = conf->get("transports/rdma/local_timeslice_us", 100);
+    LOG(INFO) << "Local QoS timeslice_us: " << timeslice_us_;
 
     // Set slice calculation parameters (must match rdma_transport.cpp)
     device_quota_->setSliceParams(transport_->params_->workers.block_size);
@@ -277,22 +287,26 @@ void Workers::asyncPostSend() {
 
     bool can_send = shared_quota ? shared_quota->canSend() : true;
     if (can_send) {
-        // Single-machine mode: strict priority (HIGH -> MEDIUM -> LOW)
-        // This ensures clear QoS differentiation for single-process scenarios
+        // Time-based priority scheduling (using rdtscp):
+        // Slot 0 (0-100us): HIGH only
+        // Slot 1 (100-200us): MEDIUM + HIGH
+        // Slot 2 (200-300us): ALL (LOW + MEDIUM + HIGH)
+        // Then repeat (finer granularity than shared quota)
+        // This ensures HIGH gets preference while LOW doesn't starve.
+        int current_slot = getCurrentPrioritySlot();
         bool found = false;
+
+        // Try to dispatch from allowed priorities in current time slot
         for (int prio = 0; prio < kNumPriorityLevels; ++prio) {
+            // Check if this priority is allowed in current slot
+            // Slot 0: only HIGH (prio <= 0)
+            // Slot 1: HIGH and MEDIUM (prio <= 1)
+            // Slot 2: all priorities (prio <= 2)
+            if (prio > current_slot) continue;  // Not allowed in this slot
             worker.queues[prio].pop(result);
             if (!result.empty()) {
                 found = true;
-                break;
-            }
-        }
-        // Fallback: try all queues (should not reach here if queues are
-        // properly managed)
-        if (!found) {
-            for (int prio = 0; prio < kNumPriorityLevels; ++prio) {
-                worker.queues[prio].pop(result);
-                if (!result.empty()) break;
+                break;  // Dispatched one batch, done
             }
         }
     }
@@ -744,5 +758,19 @@ Status Workers::generatePostPath(RdmaSlice* slice) {
     slice->target_rkey = target.buffer->rkey[slice->target_dev_id];
     return Status::OK();
 }
+
+int Workers::getCurrentPrioritySlot() const {
+    // Get current time in nanoseconds using rdtscp
+    uint64_t now_ns = getFastTimeNanos();
+    // Convert to microseconds and divide by timeslice duration
+    // Slot 0 (0-100us): HIGH only
+    // Slot 1 (100-200us): MEDIUM + HIGH
+    // Slot 2 (200-300us): ALL (LOW + MEDIUM + HIGH)
+    // Then repeat
+    uint64_t timeslice_ns = timeslice_us_ * 1000;
+    int slot = static_cast<int>((now_ns / timeslice_ns) % kNumPriorityLevels);
+    return slot;
+}
+
 }  // namespace tent
 }  // namespace mooncake

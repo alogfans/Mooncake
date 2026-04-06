@@ -71,6 +71,10 @@ std::shared_ptr<Config> loadConfig() {
         config->set("transports/rdma/shared_quota_shm_path",
                     XferBenchConfig::shared_quota_shm_path);
         config->set("transports/rdma/priority", XferBenchConfig::priority);
+        config->set("transports/rdma/timeslice_unit_ms",
+                    XferBenchConfig::timeslice_unit_ms);
+        LOG(INFO) << "QoS timeslice_unit_ms: "
+                  << XferBenchConfig::timeslice_unit_ms;
     }
 
     return config;
