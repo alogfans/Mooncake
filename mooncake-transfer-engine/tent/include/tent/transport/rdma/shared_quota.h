@@ -36,34 +36,25 @@
 namespace mooncake {
 namespace tent {
 
-static constexpr int MAX_PID_SLOTS = 256;
 static constexpr uint64_t SHM_MAGIC = 0x2025082772805203ULL;
-static constexpr int SHM_VERSION = 7;
+static constexpr int SHM_VERSION = 9;
 
-// Time slice configuration (in milliseconds)
-static constexpr int TIMESLICE_UNIT_MS = 10;  // 10ms per unit
-static constexpr int TIMESLICE_WEIGHT_HIGH = 9;   // HIGH: 9 units = 90ms
-static constexpr int TIMESLICE_WEIGHT_MEDIUM = 3; // MEDIUM: 3 units = 30ms
-static constexpr int TIMESLICE_WEIGHT_LOW = 1;    // LOW: 1 unit = 10ms
-static constexpr int TIMESLICE_TOTAL_WEIGHT = TIMESLICE_WEIGHT_HIGH + TIMESLICE_WEIGHT_MEDIUM + TIMESLICE_WEIGHT_LOW;  // 13
-
-struct ProcessEntry {
-    pid_t pid;              // 0 = free slot
-    int priority;           // PRIO_HIGH/PRIO_MEDIUM/PRIO_LOW
-    uint64_t last_heartbeat_ns;  // Last heartbeat for liveness check
-    uint8_t reserved[52];   // padding to 64 bytes
-};
+// Time slice configuration
+// Slot 0 (0-10ms):   HIGH only
+// Slot 1 (10-20ms):  MEDIUM + HIGH
+// Slot 2 (20-30ms):  ALL (LOW + MEDIUM + HIGH)
+// Then repeat: 30ms cycle
+static constexpr int TIMESLICE_UNIT_MS = 10;  // 10ms per slot
+static constexpr int NUM_SLOTS = 3;             // 3 slots per cycle
+static constexpr int CYCLE_DURATION_MS = TIMESLICE_UNIT_MS * NUM_SLOTS;  // 30ms
 
 struct SharedHeader {
     uint64_t magic;
     int32_t version;
 
-    // Global cycle start time
-    // Cycle = HIGH(90ms) + MEDIUM(30ms) + LOW(10ms) = 130ms, then repeats
-    std::atomic<uint64_t> cycle_start_ns;
-
-    // Active processes
-    ProcessEntry processes[MAX_PID_SLOTS];
+    // Current slot index (0, 1, 2)
+    // Advances every 10ms
+    std::atomic<int> current_slot;
 
     pthread_mutex_t global_mutex;
 };
@@ -77,23 +68,18 @@ class SharedQuotaManager {
     Status attach(const std::string& shm_name);
     Status detach();
 
-    // Check if current process can send (based on time slice)
+    // Check if current process can send
     bool canSend();
 
-    // Heartbeat to keep process alive
-    void heartbeat();
-
    private:
-    Status registerProcess();
-    Status unregisterProcess();
     void startBackgroundThread();
     void stopBackgroundThread();
     void backgroundThreadLoop();
     Status initializeHeader();
     Status initMutex(pthread_mutex_t* m);
 
-    // Get current priority based on time in cycle
-    int getCurrentPriority(uint64_t now, uint64_t cycle_start) const;
+    // Check if a priority is allowed in the given slot
+    bool isPriorityAllowedInSlot(int priority, int slot) const;
 
    private:
     std::string name_;
@@ -102,7 +88,6 @@ class SharedQuotaManager {
     size_t size_;
     bool created_;
     DeviceQuota* local_quota_;
-    pid_t my_pid_;
 
     // Background thread
     std::thread background_thread_;

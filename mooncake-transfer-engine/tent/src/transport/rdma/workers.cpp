@@ -45,6 +45,13 @@ Workers::Workers(RdmaTransport* transport)
     auto enable_quota = conf->get("transports/rdma/enable_quota", true);
     device_quota_->setEnableQuota(enable_quota);
 
+    // Configure priority from config (for shared quota QoS)
+    auto priority_str = conf->get("transports/rdma/priority", std::string("high"));
+    int priority = 0;  // Default: PRIO_HIGH
+    if (priority_str == "medium") priority = 1;
+    else if (priority_str == "low") priority = 2;
+    device_quota_->setPriority(priority);
+
     // Set slice calculation parameters (must match rdma_transport.cpp)
     device_quota_->setSliceParams(transport_->params_->workers.block_size);
 

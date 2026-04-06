@@ -182,6 +182,9 @@ class DeviceQuota {
     void setEnableQuota(bool enable) { enable_quota_ = enable; }
     bool getEnableQuota() const { return enable_quota_; }
 
+    void setPriority(int priority) { priority_ = priority; }
+    int getPriority() const { return priority_; }
+
     // Set slice calculation parameters (must match rdma_transport.cpp)
     void setSliceParams(uint64_t default_block_size, size_t max_slice_count = 64) {
         default_block_size_ = default_block_size;
@@ -246,6 +249,7 @@ class DeviceQuota {
     std::shared_ptr<SharedQuotaManager> shared_quota_;
     bool enable_quota_ = true;
     SchedulingParams sched_params_;
+    int priority_ = 0;  // PRIO_HIGH (0), PRIO_MEDIUM (1), or PRIO_LOW (2)
 
     // Slice calculation parameters (must match rdma_transport.cpp)
     uint64_t default_block_size_ = 1;  // Default to 1 (no alignment)
