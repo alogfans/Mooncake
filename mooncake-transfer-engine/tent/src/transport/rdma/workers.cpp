@@ -660,9 +660,6 @@ Status Workers::selectOptimalDevice(RouteHint& source, RouteHint& target,
 
     // Verify rail availability
     if (!rail.available(slice->source_dev_id, slice->target_dev_id)) {
-        LOG(INFO) << "Device pair not available: source_dev_id "
-                  << slice->source_dev_id << ", target_dev_id "
-                  << slice->target_dev_id;
         return selectFallbackDevice(source, target, slice);
     }
 
@@ -680,64 +677,80 @@ int Workers::getDeviceByFlatIndex(const RouteHint& hint, size_t flat_idx) {
 
 Status Workers::selectFallbackDevice(RouteHint& source, RouteHint& target,
                                      RdmaSlice* slice) {
-    LOG_EVERY_N(INFO, 100) << "fallback device selection for slice " << slice;
     bool same_machine =
         (source.segment->machine_id == target.segment->machine_id);
 
-    size_t src_total = 0;
-    for (size_t srank = 0; srank < Topology::DevicePriorityRanks; ++srank)
-        src_total += source.topo_entry->device_list[srank].size();
-
-    size_t dst_total = 0;
-    for (size_t trank = 0; trank < Topology::DevicePriorityRanks; ++trank)
-        dst_total += target.topo_entry->device_list[trank].size();
-
-    size_t total_combos = src_total * dst_total;
-    if ((size_t)slice->retry_count >= total_combos)
-        return Status::DeviceNotFound("No available path" LOC_MARK);
-
-    // First pass: try healthy rails only
-    // Second pass: try degraded rails if no healthy available
-    for (int pass = 0; pass < 2; ++pass) {
-        bool prefer_healthy = (pass == 0);
-        size_t idx = slice->retry_count;
-        while (idx < total_combos) {
-            size_t src_idx = idx / dst_total;
-            size_t dst_idx = idx % dst_total;
-            int sdev = getDeviceByFlatIndex(source, src_idx);
-            int tdev = getDeviceByFlatIndex(target, dst_idx);
-            bool reachable = true;
-            bool is_degraded = false;
-
-            if (same_machine) {
-                reachable = (sdev == tdev);  // loopback is safe
-            } else {
-                auto& worker = worker_context_[tl_wid];
-                auto& rail = worker.rails[target.segment->machine_id];
-                reachable = rail.available(sdev, tdev);
-                if (reachable) {
-                    is_degraded = rail.isDegraded(sdev, tdev);
-                }
-            }
-
-            // In first pass, skip degraded rails
-            if (prefer_healthy && is_degraded) {
-                ++idx;
-                continue;
-            }
-
-            if (reachable) {
-                slice->source_dev_id = sdev;
-                slice->target_dev_id = tdev;
-                slice->source_lkey = source.buffer->lkey[slice->source_dev_id];
-                slice->target_rkey = target.buffer->rkey[slice->target_dev_id];
-                return Status::OK();
-            }
-
-            ++idx;
+    std::vector<int> source_devices, target_devices;
+    for (size_t rank = 0; rank < Topology::DevicePriorityRanks; ++rank) {
+        for (int dev : source.topo_entry->device_list[rank]) {
+            source_devices.push_back(dev);
+        }
+        for (int dev : target.topo_entry->device_list[rank]) {
+            target_devices.push_back(dev);
         }
     }
 
+    auto& worker = worker_context_[tl_wid];
+    auto& rail = worker.rails[target.segment->machine_id];
+    if (!rail.ready() || target.topo != rail.remote())
+        rail.load(source.topo, target.topo);
+
+    // Use retry_count to try different source devices
+    // For each source device, select the best matching target device
+    for (int pass = 0; pass < 2; ++pass) {
+        bool prefer_healthy = (pass == 0);
+
+        // Try each source device in order, starting from retry_count
+        for (size_t sidx = slice->retry_count; sidx < source_devices.size(); ++sidx) {
+            int sdev = source_devices[sidx];
+
+            // Find the best matching target device for this source
+            int mapped_tdev = rail.findBestRemoteDevice(sdev, target.topo_entry->numa_node);
+
+            // Try mapped device first, then try all others
+            std::vector<int> target_candidates;
+            if (mapped_tdev >= 0) {
+                target_candidates.push_back(mapped_tdev);
+            }
+            for (int tdev : target_devices) {
+                if (tdev != mapped_tdev) {
+                    target_candidates.push_back(tdev);
+                }
+            }
+
+            for (int tdev : target_candidates) {
+                // Skip the exact pair that just failed
+                if (sdev == slice->source_dev_id && tdev == slice->target_dev_id) {
+                    continue;
+                }
+
+                bool reachable = true;
+                bool is_degraded = false;
+
+                if (same_machine) {
+                    reachable = (sdev == tdev);  // loopback is safe
+                } else {
+                    reachable = rail.available(sdev, tdev);
+                    if (reachable) {
+                        is_degraded = rail.isDegraded(sdev, tdev);
+                    }
+                }
+
+                // In first pass, skip degraded rails
+                if (prefer_healthy && is_degraded) {
+                    continue;
+                }
+
+                if (reachable) {
+                    slice->source_dev_id = sdev;
+                    slice->target_dev_id = tdev;
+                    return Status::OK();
+                }
+            }
+        }
+    }
+
+    LOG(ERROR) << "No available path found for slice " << slice;
     return Status::DeviceNotFound("No available path" LOC_MARK);
 }
 

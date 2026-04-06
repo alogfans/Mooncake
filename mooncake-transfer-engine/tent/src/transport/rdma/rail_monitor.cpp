@@ -32,7 +32,9 @@ Status RailMonitor::load(const Topology *local, const Topology *remote,
 
 bool RailMonitor::available(int local_nic, int remote_nic) {
     auto it = rail_states_.find(std::make_pair(local_nic, remote_nic));
-    if (it == rail_states_.end()) return false;
+    // Default to available if not explicitly marked as failed
+    // This allows new rail combinations to be tried
+    if (it == rail_states_.end()) return true;
     auto &st = it->second;
     auto now = std::chrono::steady_clock::now();
 
