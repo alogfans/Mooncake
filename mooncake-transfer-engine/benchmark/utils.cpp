@@ -52,6 +52,14 @@ DEFINE_string(
 DEFINE_bool(notifi, false,
             "Enable RDMA notification for performance measurement.");
 
+// QoS options
+DEFINE_string(priority, "high",
+              "QoS priority for transfer requests: high|medium|low");
+DEFINE_bool(enable_shared_quota, false,
+            "Enable shared quota for multi-process QoS coordination");
+DEFINE_string(shared_quota_shm_path, "mooncake_quota_shm",
+              "Shared memory path for cross-process quota management");
+
 namespace mooncake {
 namespace tent {
 std::string XferBenchConfig::seg_name;
@@ -80,6 +88,11 @@ bool XferBenchConfig::notifi = false;
 int XferBenchConfig::local_gpu_id = 0;
 int XferBenchConfig::target_gpu_id = 0;
 
+// QoS options
+std::string XferBenchConfig::priority;
+bool XferBenchConfig::enable_shared_quota = false;
+std::string XferBenchConfig::shared_quota_shm_path;
+
 void XferBenchConfig::loadFromFlags() {
     seg_type = FLAGS_seg_type;
     seg_name = FLAGS_seg_name;
@@ -107,6 +120,11 @@ void XferBenchConfig::loadFromFlags() {
 
     local_gpu_id = FLAGS_local_gpu_id;
     target_gpu_id = FLAGS_target_gpu_id;
+
+    // QoS options
+    priority = FLAGS_priority;
+    enable_shared_quota = FLAGS_enable_shared_quota;
+    shared_quota_shm_path = FLAGS_shared_quota_shm_path;
 }
 
 double XferMetricStats::percentile(double p) {

@@ -73,6 +73,11 @@ struct XferBenchConfig {
 
     static int local_gpu_id;
     static int target_gpu_id;
+
+    // QoS options
+    static std::string priority;  // "high", "medium", "low"
+    static bool enable_shared_quota;
+    static std::string shared_quota_shm_path;
 };
 
 struct XferMetricStats {

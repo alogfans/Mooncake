@@ -66,6 +66,14 @@ std::shared_ptr<Config> loadConfig() {
         }
     }
 
+    // QoS: Enable shared quota if configured
+    if (XferBenchConfig::enable_shared_quota) {
+        config->set("transports/rdma/shared_quota_shm_path",
+                    XferBenchConfig::shared_quota_shm_path);
+        LOG(INFO) << "Shared quota enabled: "
+                  << XferBenchConfig::shared_quota_shm_path;
+    }
+
     return config;
 }
 
@@ -270,6 +278,12 @@ double TENTBenchRunner::runSingleTransfer(uint64_t local_addr,
                                           uint64_t block_size,
                                           uint64_t batch_size, OpCode opcode) {
     auto batch_id = engine_->allocateBatch(batch_size);
+
+    // Map priority string to int
+    int priority = PRIO_HIGH;  // default
+    if (XferBenchConfig::priority == "medium") priority = PRIO_MEDIUM;
+    else if (XferBenchConfig::priority == "low") priority = PRIO_LOW;
+
     std::vector<Request> requests;
     for (uint64_t i = 0; i < batch_size; ++i) {
         Request entry;
@@ -278,6 +292,7 @@ double TENTBenchRunner::runSingleTransfer(uint64_t local_addr,
         entry.source = (void*)(local_addr + block_size * i);
         entry.target_id = handle_;
         entry.target_offset = target_addr + block_size * i;
+        entry.priority = priority;  // Set QoS priority
         requests.emplace_back(entry);
     }
     XferBenchTimer timer;

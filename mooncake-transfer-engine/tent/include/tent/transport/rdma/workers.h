@@ -183,10 +183,10 @@ class Workers {
     };
 
     // Priority queue configuration for proportional bandwidth allocation
-    // Target ratio under full load: High:Medium:Low = 9:3:1
+    // Target ratio under full load: High:Medium:Low = 9:3:1 (configurable)
     static constexpr int kNumPriorityLevels = NUM_PRIORITIES;
-    static constexpr int kPriorityWeight[kNumPriorityLevels] = {9, 3, 1};
-    static constexpr int kTotalWeight = 13;  // 9 + 3 + 1
+    int kPriorityWeight[kNumPriorityLevels];  // Configurable priority weights
+    int kTotalWeight;  // Sum of priority weights (computed at runtime)
 
     struct WorkerContext {
         std::thread thread;

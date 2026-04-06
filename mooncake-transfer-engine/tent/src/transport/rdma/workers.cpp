@@ -66,6 +66,29 @@ Workers::Workers(RdmaTransport* transport)
     }
 
     device_quota_->setSchedulingParams(params);
+
+    // Configure priority weights for QoS scheduling (format: "w0,w1,w2")
+    // Default: High:Medium:Low = 9:3:1
+    std::string prio_weights_str =
+        conf->get("transports/rdma/priority_weights", std::string("9,3,1"));
+    kTotalWeight = 0;
+    if (!prio_weights_str.empty()) {
+        size_t pos = 0;
+        for (size_t i = 0; i < kNumPriorityLevels && pos < prio_weights_str.length(); ++i) {
+            size_t end = prio_weights_str.find(',', pos);
+            if (end == std::string::npos) end = prio_weights_str.length();
+            std::string val = prio_weights_str.substr(pos, end - pos);
+            kPriorityWeight[i] = std::stoi(val);
+            kTotalWeight += kPriorityWeight[i];
+            pos = end + 1;
+        }
+    } else {
+        // Fallback to default values
+        kPriorityWeight[0] = 9;
+        kPriorityWeight[1] = 3;
+        kPriorityWeight[2] = 1;
+        kTotalWeight = 13;
+    }
 }
 
 Workers::~Workers() {
