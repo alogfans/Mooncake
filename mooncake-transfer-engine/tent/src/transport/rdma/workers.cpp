@@ -35,10 +35,22 @@ Workers::Workers(RdmaTransport* transport)
     auto& conf = transport_->conf_;
     auto shared_quota_shm_path =
         conf->get("transports/rdma/shared_quota_shm_path", "");
-    if (!shared_quota_shm_path.empty())
-        device_quota_->enableSharedQuota(shared_quota_shm_path);
+    if (!shared_quota_shm_path.empty()) {
+        auto status = device_quota_->enableSharedQuota(shared_quota_shm_path);
+        if (status.ok()) {
+            LOG(INFO) << "Shared quota enabled: " << shared_quota_shm_path;
+        } else {
+            LOG(WARNING) << "Failed to enable shared quota: " << status.ToString();
+        }
+    } else {
+        LOG(INFO) << "Shared quota disabled (single-machine mode)";
+    }
     auto enable_quota = conf->get("transports/rdma/enable_quota", true);
     device_quota_->setEnableQuota(enable_quota);
+    LOG(INFO) << "Priority weights: HIGH=" << kPriorityWeight[0]
+              << " MEDIUM=" << kPriorityWeight[1]
+              << " LOW=" << kPriorityWeight[2]
+              << " (total=" << kTotalWeight << ")";
 
     // Set slice calculation parameters (must match rdma_transport.cpp)
     device_quota_->setSliceParams(transport_->params_->workers.block_size);
@@ -281,30 +293,18 @@ void Workers::asyncPostSend() {
             }
         }
     } else {
-        // Single-machine mode: use weighted random (9:3:1)
-        int rand_val = SimpleRandom::Get().next(kTotalWeight);
-        int cumulative = 0;
-        int order_idx = 0;
-        int order[kNumPriorityLevels];
-
+        // Single-machine mode: strict priority (HIGH -> MEDIUM -> LOW)
+        // This ensures clear QoS differentiation for single-process scenarios
+        bool found = false;
         for (int prio = 0; prio < kNumPriorityLevels; ++prio) {
-            cumulative += kPriorityWeight[prio];
-            if (rand_val < cumulative) {
-                for (int i = 0; i <= prio; ++i) {
-                    order[order_idx++] = i;
-                }
+            worker.queues[prio].pop(result);
+            if (!result.empty()) {
+                found = true;
                 break;
             }
         }
-
-        // Try queues in weighted random order
-        for (int i = 0; i < order_idx; ++i) {
-            worker.queues[order[i]].pop(result);
-            if (!result.empty()) break;
-        }
-
-        // Fallback: try all queues
-        if (result.empty()) {
+        // Fallback: try all queues (should not reach here if queues are properly managed)
+        if (!found) {
             for (int prio = 0; prio < kNumPriorityLevels; ++prio) {
                 worker.queues[prio].pop(result);
                 if (!result.empty()) break;
