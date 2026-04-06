@@ -31,52 +31,41 @@
 #include <vector>
 #include <iostream>
 #include <errno.h>
-#include <atomic>
+#include <thread>
 
 namespace mooncake {
 namespace tent {
 
-static constexpr int MAX_DEVICES = 64;
 static constexpr int MAX_PID_SLOTS = 256;
-static constexpr uint64_t SHM_MAGIC = 0x2025082772805202ULL;
-static constexpr int SHM_VERSION = 4;  // bumped for QoS token bucket
+static constexpr uint64_t SHM_MAGIC = 0x2025082772805203ULL;
+static constexpr int SHM_VERSION = 7;
 
-// Time-sliced quota constants
-static constexpr uint64_t TIMESLICE_BASE_NS = 10000000ull;  // 10ms base unit (10x longer)
-static constexpr uint64_t QUOTA_WEIGHT[] = {9, 3, 1};       // High:Medium:Low
-static constexpr uint64_t QUOTA_TOTAL = 13;                 // 9 + 3 + 1
+// Time slice configuration (in milliseconds)
+static constexpr int TIMESLICE_UNIT_MS = 10;  // 10ms per unit
+static constexpr int TIMESLICE_WEIGHT_HIGH = 9;   // HIGH: 9 units = 90ms
+static constexpr int TIMESLICE_WEIGHT_MEDIUM = 3; // MEDIUM: 3 units = 30ms
+static constexpr int TIMESLICE_WEIGHT_LOW = 1;    // LOW: 1 unit = 10ms
+static constexpr int TIMESLICE_TOTAL_WEIGHT = TIMESLICE_WEIGHT_HIGH + TIMESLICE_WEIGHT_MEDIUM + TIMESLICE_WEIGHT_LOW;  // 13
 
-// Per-device time slice state
-struct TimeSliceState {
-    std::atomic<uint64_t> current_prio;  // Current priority in timeslice
-    std::atomic<uint64_t> slice_end_ns;  // When current timeslice ends
-    uint8_t reserved[64 - sizeof(std::atomic<uint64_t>) * 2];
-};
-
-struct PidUsage {
-    pid_t pid;                            // 0 == free slot
-    volatile uint64_t high_prio_bytes;    // high priority active bytes
-    volatile uint64_t medium_prio_bytes;  // medium priority active bytes
-    volatile uint64_t low_prio_bytes;     // low priority active bytes
-    uint8_t reserved[40];                 // padding -> total 64B
-};
-
-struct SharedDeviceEntry {
-    char dev_name[56];  // NUL-terminated device name, empty means unused
-    volatile uint64_t active_bytes;
-    volatile uint64_t high_prio_bytes;
-    volatile uint64_t medium_prio_bytes;
-    volatile uint64_t low_prio_bytes;
-    TimeSliceState timeslice;  // QoS timeslice state
-    PidUsage pid_usages[MAX_PID_SLOTS];
+struct ProcessEntry {
+    pid_t pid;              // 0 = free slot
+    int priority;           // PRIO_HIGH/PRIO_MEDIUM/PRIO_LOW
+    uint64_t last_heartbeat_ns;  // Last heartbeat for liveness check
+    uint8_t reserved[52];   // padding to 64 bytes
 };
 
 struct SharedHeader {
     uint64_t magic;
     int32_t version;
-    int32_t num_devices;
+
+    // Global cycle start time
+    // Cycle = HIGH(90ms) + MEDIUM(30ms) + LOW(10ms) = 130ms, then repeats
+    std::atomic<uint64_t> cycle_start_ns;
+
+    // Active processes
+    ProcessEntry processes[MAX_PID_SLOTS];
+
     pthread_mutex_t global_mutex;
-    SharedDeviceEntry devices[MAX_DEVICES];
 };
 
 class DeviceQuota;
@@ -88,32 +77,23 @@ class SharedQuotaManager {
     Status attach(const std::string& shm_name);
     Status detach();
 
-    Status diffusion();
+    // Check if current process can send (based on time slice)
+    bool canSend();
 
-    // QoS: get load by priority for a device (returns active_bytes)
-    uint64_t getHighPrioLoad(int dev_id) const;
-    uint64_t getMediumPrioLoad(int dev_id) const;
-    uint64_t getLowPrioLoad(int dev_id) const;
-
-    // Check if current timeslice allows the given priority to send
-    bool canSend(int dev_id, int priority) const;
+    // Heartbeat to keep process alive
+    void heartbeat();
 
    private:
-    void updateTimesliceInt(int dev_idx, uint64_t next_prio, uint64_t now);  // Internal helper
-    void updateTimeslice(int dev_idx);  // Advance to next timeslice if needed
-    Status attachProcess();
-    Status detachProcess();
-
-   private:
-    PidUsage* findOrCreatePidSlotLocked(int dev_id, pid_t pid);
-    PidUsage* findPidSlotLocked(int dev_id, pid_t pid);
-    int findDeviceIdByNameLocked(const std::string& dev_name);
+    Status registerProcess();
+    Status unregisterProcess();
+    void startBackgroundThread();
+    void stopBackgroundThread();
+    void backgroundThreadLoop();
     Status initializeHeader();
     Status initMutex(pthread_mutex_t* m);
-    void reclaimDeadPidsInternal();
-    static bool isPidAlive(pid_t pid);
-    int lock();
-    int unlock();
+
+    // Get current priority based on time in cycle
+    int getCurrentPriority(uint64_t now, uint64_t cycle_start) const;
 
    private:
     std::string name_;
@@ -122,6 +102,11 @@ class SharedQuotaManager {
     size_t size_;
     bool created_;
     DeviceQuota* local_quota_;
+    pid_t my_pid_;
+
+    // Background thread
+    std::thread background_thread_;
+    std::atomic<bool> background_running_;
 };
 
 }  // namespace tent

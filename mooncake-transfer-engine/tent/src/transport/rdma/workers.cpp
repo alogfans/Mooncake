@@ -260,37 +260,10 @@ void Workers::asyncPostSend() {
     auto& worker = worker_context_[tl_wid];
     std::vector<RdmaSliceList> result;
 
-    auto shared_quota =
-        device_quota_ ? device_quota_->getSharedQuota() : nullptr;
+    auto shared_quota = device_quota_ ? device_quota_->getSharedQuota() : nullptr;
 
-    if (shared_quota) {
-        // Multi-process mode: use shared timeslice state
-        static int schedule_log_count = 0;
-        int timeslice_prio = PRIO_HIGH;  // default
-        if (!worker.requests.empty()) {
-            int dev_id = worker.requests.begin()->first.local_device_id;
-            for (int prio = 0; prio < kNumPriorityLevels; ++prio) {
-                if (shared_quota->canSend(dev_id, prio)) {
-                    timeslice_prio = prio;
-                    if ((++schedule_log_count % 1000) == 0) {
-                        const char* prio_names[] = {"HIGH", "MEDIUM", "LOW"};
-                        LOG(INFO) << "QoS: Selected priority=" << prio_names[timeslice_prio];
-                    }
-                    break;
-                }
-            }
-        }
-        worker.queues[timeslice_prio].pop(result);
-
-        // If empty, try other priorities (prevent starvation)
-        if (result.empty()) {
-            for (int prio = 0; prio < kNumPriorityLevels; ++prio) {
-                if (prio == timeslice_prio) continue;
-                worker.queues[prio].pop(result);
-                if (!result.empty()) break;
-            }
-        }
-    } else {
+    bool can_send = shared_quota ? shared_quota->canSend() : true;
+    if (can_send) {
         // Single-machine mode: strict priority (HIGH -> MEDIUM -> LOW)
         // This ensures clear QoS differentiation for single-process scenarios
         bool found = false;

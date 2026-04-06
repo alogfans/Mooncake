@@ -387,16 +387,6 @@ Status DeviceQuota::release(int dev_id, uint64_t length, double latency) {
         }
     }
 
-    if (shared_quota_) {
-        thread_local uint64_t tl_last_ts = 0;
-        uint64_t now = getCurrentTimeInNano();
-        uint64_t diffusion_interval = 10 * 1000000ull;  // 10ms
-        if (now - tl_last_ts > diffusion_interval) {
-            tl_last_ts = now;
-            return shared_quota_->diffusion();
-        }
-    }
-
     return Status::OK();
 }
 

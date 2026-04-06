@@ -14,90 +14,37 @@
 
 #include "tent/transport/rdma/shared_quota.h"
 #include "tent/common/utils/os.h"
+#include "tent/common/types.h"
+
+#include <glog/logging.h>
+#include <unistd.h>
 
 namespace mooncake {
 namespace tent {
+
 SharedQuotaManager::SharedQuotaManager(DeviceQuota* local_quota)
     : hdr_(nullptr),
       fd_(-1),
       size_(sizeof(SharedHeader)),
       created_(false),
-      local_quota_(local_quota) {}
+      local_quota_(local_quota),
+      my_pid_(getpid()),
+      background_running_(false) {}
 
 SharedQuotaManager::~SharedQuotaManager() { detach(); }
 
-Status SharedQuotaManager::attach(const std::string& shm_name) {
-    name_ = shm_name;
-
-    // Open or create shared memory (mode 0666)
-    fd_ = shm_open(name_.c_str(), O_RDWR | O_CREAT, 0666);
-    if (fd_ < 0) {
-        return Status::InternalError("shm_open failed: " +
-                                     std::string(strerror(errno)));
-    }
-
-    // Ensure size
-    if (ftruncate(fd_, static_cast<off_t>(size_)) != 0) {
-        int e = errno;
-        close(fd_);
-        fd_ = -1;
-        return Status::InternalError("ftruncate failed: " +
-                                     std::string(strerror(e)));
-    }
-
-    // mmap
-    void* ptr =
-        mmap(nullptr, size_, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, 0);
-    if (ptr == MAP_FAILED) {
-        int e = errno;
-        close(fd_);
-        fd_ = -1;
-        return Status::InternalError("mmap failed: " +
-                                     std::string(strerror(e)));
-    }
-
-    hdr_ = reinterpret_cast<SharedHeader*>(ptr);
-
-    if (hdr_->magic != SHM_MAGIC || hdr_->version != SHM_VERSION) {
-        created_ = true;
-        Status s = initializeHeader();
-        if (!s.ok()) {
-            munmap(ptr, size_);
-            close(fd_);
-            hdr_ = nullptr;
-            fd_ = -1;
-            return s;
-        }
-    } else {
-        created_ = false;
-    }
-
-    Status s = attachProcess();
-    if (!s.ok()) return s;
-    return Status::OK();
-}
-
-Status SharedQuotaManager::detach() {
-    if (hdr_) {
-        detachProcess();
-        munmap(hdr_, size_);
-        hdr_ = nullptr;
-    }
-    if (fd_ >= 0) {
-        close(fd_);
-        fd_ = -1;
-    }
-    return Status::OK();
-}
-
 Status SharedQuotaManager::initializeHeader() {
-    memset(hdr_, 0, size_);
+    std::memset(hdr_, 0, size_);
+
     Status s = initMutex(&hdr_->global_mutex);
-    if (!s.ok()) {
-        return s;
-    }
+    if (!s.ok()) return s;
+
     hdr_->version = SHM_VERSION;
     hdr_->magic = SHM_MAGIC;
+
+    // Initialize cycle start to current time
+    hdr_->cycle_start_ns.store(getCurrentTimeInNano(), std::memory_order_release);
+
     return Status::OK();
 }
 
@@ -124,264 +71,210 @@ Status SharedQuotaManager::initMutex(pthread_mutex_t* m) {
     return Status::OK();
 }
 
-// attempt to acquire global lock; handle EOWNERDEAD
-int SharedQuotaManager::lock() {
-    if (!hdr_) return EINVAL;
+int SharedQuotaManager::getCurrentPriority(uint64_t now, uint64_t cycle_start) const {
+    // Calculate position in current cycle
+    uint64_t pos_ns = (now - cycle_start) % (TIMESLICE_TOTAL_WEIGHT * TIMESLICE_UNIT_MS * 1000000ull);
+
+    // Determine which priority's time slot we're in
+    // HIGH: [0, 9*10ms), MEDIUM: [9*10ms, 12*10ms), LOW: [12*10ms, 13*10ms)
+    uint64_t high_end = TIMESLICE_WEIGHT_HIGH * TIMESLICE_UNIT_MS * 1000000ull;
+    if (pos_ns < high_end) return static_cast<int>(PRIO_HIGH);
+
+    uint64_t medium_end = (TIMESLICE_WEIGHT_HIGH + TIMESLICE_WEIGHT_MEDIUM) * TIMESLICE_UNIT_MS * 1000000ull;
+    if (pos_ns < medium_end) return static_cast<int>(PRIO_MEDIUM);
+
+    return static_cast<int>(PRIO_LOW);
+}
+
+Status SharedQuotaManager::attach(const std::string& shm_name) {
+    name_ = shm_name;
+
+    fd_ = shm_open(name_.c_str(), O_RDWR | O_CREAT, 0666);
+    if (fd_ < 0) {
+        return Status::InternalError("shm_open failed: " +
+                                     std::string(std::strerror(errno)));
+    }
+
+    if (ftruncate(fd_, static_cast<off_t>(size_)) != 0) {
+        int e = errno;
+        close(fd_);
+        fd_ = -1;
+        return Status::InternalError("ftruncate failed: " + std::string(std::strerror(e)));
+    }
+
+    void* ptr = mmap(nullptr, size_, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, 0);
+    if (ptr == MAP_FAILED) {
+        int e = errno;
+        close(fd_);
+        fd_ = -1;
+        return Status::InternalError("mmap failed: " + std::string(std::strerror(e)));
+    }
+
+    hdr_ = reinterpret_cast<SharedHeader*>(ptr);
+
+    if (hdr_->magic != SHM_MAGIC || hdr_->version != SHM_VERSION) {
+        created_ = true;
+        Status s = initializeHeader();
+        if (!s.ok()) {
+            munmap(ptr, size_);
+            close(fd_);
+            hdr_ = nullptr;
+            fd_ = -1;
+            return s;
+        }
+    } else {
+        created_ = false;
+    }
+
+    Status s = registerProcess();
+    if (!s.ok()) {
+        detach();
+        return s;
+    }
+
+    startBackgroundThread();
+
+    return Status::OK();
+}
+
+Status SharedQuotaManager::detach() {
+    stopBackgroundThread();
+
+    if (hdr_) {
+        unregisterProcess();
+        munmap(hdr_, size_);
+        hdr_ = nullptr;
+    }
+
+    if (fd_ >= 0) {
+        close(fd_);
+        fd_ = -1;
+    }
+
+    return Status::OK();
+}
+
+Status SharedQuotaManager::registerProcess() {
+    if (!hdr_) return Status::InvalidArgument("not attached");
+
+    int my_priority = static_cast<int>(PRIO_HIGH);  // TODO: from config
+
     int rc = pthread_mutex_lock(&hdr_->global_mutex);
-    if (rc == 0) return 0;
-    if (rc == EOWNERDEAD) {
-        // make consistent so others can continue
-#if defined(PTHREAD_MUTEX_ROBUST)
-        int rc2 = pthread_mutex_consistent(&hdr_->global_mutex);
-        if (rc2 != 0) {
-            return rc2;
-        }
-#endif
-        // We hold the lock now — repair data if needed
-        reclaimDeadPidsInternal();
-        return 0;
-    }
-    return rc;
-}
-
-int SharedQuotaManager::unlock() {
-    if (!hdr_) return EINVAL;
-    return pthread_mutex_unlock(&hdr_->global_mutex);
-}
-
-void SharedQuotaManager::reclaimDeadPidsInternal() {
-    if (!hdr_) return;
-    // Assumes caller holds lock (but we also call from lock() on EOWNERDEAD)
-    for (int i = 0; i < hdr_->num_devices; ++i) {
-        // skip unused slots (dev_name empty)
-        if (hdr_->devices[i].dev_name[0] == '\0') continue;
-        SharedDeviceEntry& dev = hdr_->devices[i];
-        for (int s = 0; s < MAX_PID_SLOTS; ++s) {
-            pid_t p = dev.pid_usages[s].pid;
-            if (p == 0) continue;
-            if (!isPidAlive(p)) {
-                // zero out slot — we'll recompute active_bytes in diffusion
-                dev.pid_usages[s].pid = 0;
-                dev.pid_usages[s].high_prio_bytes = 0;
-                dev.pid_usages[s].medium_prio_bytes = 0;
-                dev.pid_usages[s].low_prio_bytes = 0;
-            }
-        }
-    }
-}
-
-bool SharedQuotaManager::isPidAlive(pid_t pid) {
-    if (pid <= 0) return false;
-    int r = kill(pid, 0);
-    if (r == 0) return true;
-    if (errno == ESRCH) return false;
-    return true;  // other errors (EPERM) -> treat as alive
-}
-
-int SharedQuotaManager::findDeviceIdByNameLocked(const std::string& dev_name) {
-    if (!hdr_) return -1;
-    for (int i = 0; i < hdr_->num_devices; ++i) {
-        if (hdr_->devices[i].dev_name[0] == '\0') continue;
-        if (strncmp(hdr_->devices[i].dev_name, dev_name.c_str(),
-                    sizeof(hdr_->devices[i].dev_name)) == 0)
-            return i;
-    }
-    return -1;
-}
-
-PidUsage* SharedQuotaManager::findOrCreatePidSlotLocked(int dev_id, pid_t pid) {
-    if (!hdr_) return nullptr;
-    if (dev_id < 0 || dev_id >= hdr_->num_devices) return nullptr;
-    SharedDeviceEntry& dev = hdr_->devices[dev_id];
-    PidUsage* empty = nullptr;
-    for (int s = 0; s < MAX_PID_SLOTS; ++s) {
-        if (dev.pid_usages[s].pid == pid) return &dev.pid_usages[s];
-        if (dev.pid_usages[s].pid == 0 && empty == nullptr)
-            empty = &dev.pid_usages[s];
-    }
-    if (empty) {
-        empty->pid = pid;
-        empty->high_prio_bytes = 0;
-        empty->medium_prio_bytes = 0;
-        empty->low_prio_bytes = 0;
-    }
-    return empty;
-}
-
-PidUsage* SharedQuotaManager::findPidSlotLocked(int dev_id, pid_t pid) {
-    if (!hdr_) return nullptr;
-    if (dev_id < 0 || dev_id >= hdr_->num_devices) return nullptr;
-    SharedDeviceEntry& dev = hdr_->devices[dev_id];
-    for (int s = 0; s < MAX_PID_SLOTS; ++s) {
-        if (dev.pid_usages[s].pid == pid) return &dev.pid_usages[s];
-    }
-    return nullptr;
-}
-
-Status SharedQuotaManager::attachProcess() {
-    if (!hdr_) return Status::InvalidArgument("not attached");
-
-    int rc = lock();
     if (rc != 0) {
-        return Status::InternalError("failed to lock shared mutex: " +
-                                     std::string(strerror(rc)));
+        return Status::InternalError("mutex lock failed: " + std::string(std::strerror(rc)));
     }
 
-    auto topo = local_quota_->getTopology();
-    for (size_t i = 0; i < topo->getNicCount(); ++i) {
-        if (topo->getNicType(i) != Topology::NIC_RDMA) continue;
-        auto dev_name = topo->getNicName(i);
-        if (findDeviceIdByNameLocked(dev_name) >= 0) continue;
-        int empty_idx = -1;
-        for (int j = 0; j < MAX_DEVICES; ++j) {
-            if (hdr_->devices[j].dev_name[0] == '\0') {
-                empty_idx = j;
-                break;
-            }
+    // Find empty slot or existing slot
+    int empty_slot = -1;
+    for (int i = 0; i < MAX_PID_SLOTS; ++i) {
+        if (hdr_->processes[i].pid == my_pid_) {
+            hdr_->processes[i].last_heartbeat_ns = getCurrentTimeInNano();
+            pthread_mutex_unlock(&hdr_->global_mutex);
+            return Status::OK();
         }
-        if (empty_idx < 0) continue;
-        strncpy(hdr_->devices[empty_idx].dev_name, dev_name.c_str(), 56);
-        hdr_->devices[empty_idx].active_bytes = 0;
+        if (hdr_->processes[i].pid == 0 && empty_slot < 0) {
+            empty_slot = i;
+        }
     }
 
-    int count = 0;
-    for (int i = 0; i < MAX_DEVICES; ++i)
-        if (hdr_->devices[i].dev_name[0] != '\0') ++count;
-    hdr_->num_devices = count;
+    if (empty_slot >= 0) {
+        hdr_->processes[empty_slot].pid = my_pid_;
+        hdr_->processes[empty_slot].priority = my_priority;
+        hdr_->processes[empty_slot].last_heartbeat_ns = getCurrentTimeInNano();
+        LOG(INFO) << "Registered process " << my_pid_ << " with priority " << my_priority;
+    } else {
+        pthread_mutex_unlock(&hdr_->global_mutex);
+        return Status::InternalError("no free process slot");
+    }
 
-    unlock();
+    pthread_mutex_unlock(&hdr_->global_mutex);
     return Status::OK();
 }
 
-Status SharedQuotaManager::detachProcess() { return Status::OK(); }
-
-Status SharedQuotaManager::diffusion() {
+Status SharedQuotaManager::unregisterProcess() {
     if (!hdr_) return Status::InvalidArgument("not attached");
-    pid_t pid = getpid();
-    int rc = lock();
-    if (rc != 0)
-        return Status::InternalError("lock failed: " +
-                                     std::string(strerror(rc)));
-    for (int d = 0; d < hdr_->num_devices; ++d) {
-        std::string dev_name = hdr_->devices[d].dev_name;
-        auto dev_id = local_quota_->getTopology()->getNicId(dev_name);
-        if (dev_name.empty() || dev_id < 0) continue;
-        PidUsage* slot = findOrCreatePidSlotLocked(dev_id, pid);
-        if (!slot) {
-            unlock();
-            return Status::InternalError("no free pid slot for device");
+
+    int rc = pthread_mutex_lock(&hdr_->global_mutex);
+    if (rc != 0) return Status::OK();
+
+    for (int i = 0; i < MAX_PID_SLOTS; ++i) {
+        if (hdr_->processes[i].pid == my_pid_) {
+            hdr_->processes[i].pid = 0;
+            LOG(INFO) << "Unregistered process " << my_pid_;
+            break;
         }
-        // Report per-priority active bytes
-        slot->high_prio_bytes =
-            local_quota_->getActiveBytesByPriority(dev_id, PRIO_HIGH);
-        slot->medium_prio_bytes =
-            local_quota_->getActiveBytesByPriority(dev_id, PRIO_MEDIUM);
-        slot->low_prio_bytes =
-            local_quota_->getActiveBytesByPriority(dev_id, PRIO_LOW);
-
-        uint64_t high_sum = 0, med_sum = 0, low_sum = 0, total_sum = 0;
-        for (int s = 0; s < MAX_PID_SLOTS; ++s) {
-            pid_t p = hdr_->devices[d].pid_usages[s].pid;
-            if (p == 0) continue;
-            high_sum += hdr_->devices[d].pid_usages[s].high_prio_bytes;
-            med_sum += hdr_->devices[d].pid_usages[s].medium_prio_bytes;
-            low_sum += hdr_->devices[d].pid_usages[s].low_prio_bytes;
-        }
-        total_sum = high_sum + med_sum + low_sum;
-
-        hdr_->devices[d].active_bytes = total_sum;
-        hdr_->devices[d].high_prio_bytes = high_sum;
-        hdr_->devices[d].medium_prio_bytes = med_sum;
-        hdr_->devices[d].low_prio_bytes = low_sum;
-        // For compatibility: set diffusion_active_bytes (sum of other
-        // processes)
-        uint64_t my_bytes = slot->high_prio_bytes + slot->medium_prio_bytes +
-                            slot->low_prio_bytes;
-        uint64_t diffusion_active_bytes =
-            total_sum < my_bytes ? 0 : total_sum - my_bytes;
-        local_quota_->setDiffusionActiveBytes(dev_id, diffusion_active_bytes);
-
-        // Update timeslice state
-        updateTimeslice(d);
     }
 
-    unlock();
+    pthread_mutex_unlock(&hdr_->global_mutex);
     return Status::OK();
 }
 
-uint64_t SharedQuotaManager::getHighPrioLoad(int dev_id) const {
-    if (!hdr_ || dev_id < 0 || dev_id >= hdr_->num_devices) return 0;
-    return hdr_->devices[dev_id].high_prio_bytes;
-}
+bool SharedQuotaManager::canSend() {
+    if (!hdr_) return true;
 
-uint64_t SharedQuotaManager::getMediumPrioLoad(int dev_id) const {
-    if (!hdr_ || dev_id < 0 || dev_id >= hdr_->num_devices) return 0;
-    return hdr_->devices[dev_id].medium_prio_bytes;
-}
-
-uint64_t SharedQuotaManager::getLowPrioLoad(int dev_id) const {
-    if (!hdr_ || dev_id < 0 || dev_id >= hdr_->num_devices) return 0;
-    return hdr_->devices[dev_id].low_prio_bytes;
-}
-
-void SharedQuotaManager::updateTimesliceInt(int dev_idx, uint64_t next_prio, uint64_t now) {
-    if (!hdr_) return;
-    auto& ts = hdr_->devices[dev_idx].timeslice;
-
-    ts.current_prio.store(next_prio, std::memory_order_relaxed);
-    ts.slice_end_ns.store(now + TIMESLICE_BASE_NS * QUOTA_WEIGHT[next_prio],
-                          std::memory_order_relaxed);
-}
-
-void SharedQuotaManager::updateTimeslice(int dev_idx) {
-    if (!hdr_) return;
-    uint64_t now = getCurrentTimeInNano();
-    auto& ts = hdr_->devices[dev_idx].timeslice;
-
-    // Initialize on first use
-    uint64_t current_end = ts.slice_end_ns.load(std::memory_order_relaxed);
-    if (current_end == 0) {
-        ts.current_prio.store(PRIO_HIGH, std::memory_order_relaxed);
-        ts.slice_end_ns.store(now + TIMESLICE_BASE_NS * QUOTA_WEIGHT[PRIO_HIGH],
-                              std::memory_order_relaxed);
-        return;
-    }
-
-    // Check if current timeslice has ended
-    if (now >= current_end) {
-        // Simple round-robin through all priorities (0 -> 1 -> 2 -> 0 ...)
-        // This ensures fair bandwidth allocation regardless of current load
-        uint64_t current = ts.current_prio.load(std::memory_order_relaxed);
-        uint64_t next_prio = (current + 1) % NUM_PRIORITIES;
-        ts.current_prio.store(next_prio, std::memory_order_relaxed);
-        ts.slice_end_ns.store(now + TIMESLICE_BASE_NS * QUOTA_WEIGHT[next_prio],
-                              std::memory_order_relaxed);
-    }
-}
-
-bool SharedQuotaManager::canSend(int dev_id, int priority) const {
-    if (!hdr_ || dev_id < 0 || dev_id >= hdr_->num_devices)
-        return true;  // Allow if no quota
-    if (priority < 0 || priority >= NUM_PRIORITIES) return true;
-
-    const auto& ts = hdr_->devices[dev_id].timeslice;
-    uint64_t current_prio = ts.current_prio.load(std::memory_order_relaxed);
     uint64_t now = getCurrentTimeInNano();
 
-    // Check if we're still in current timeslice
-    if (now < ts.slice_end_ns.load(std::memory_order_relaxed)) {
-        // Still in timeslice - only allow matching priority
-        return (int)current_prio == priority;
+    // Get my priority
+    int my_priority = static_cast<int>(PRIO_HIGH);  // TODO: from config
+    for (int i = 0; i < MAX_PID_SLOTS; ++i) {
+        if (hdr_->processes[i].pid == my_pid_) {
+            my_priority = hdr_->processes[i].priority;
+            break;
+        }
     }
 
-    // Timeslice ended - advance to next priority
-    // (const_cast is safe here as we're just updating timeslice state)
-    uint64_t next_prio = (current_prio + 1) % NUM_PRIORITIES;
-    const_cast<SharedQuotaManager*>(this)->updateTimesliceInt(dev_id, next_prio, now);
+    // Get current priority based on time in cycle
+    uint64_t cycle_start = hdr_->cycle_start_ns.load(std::memory_order_acquire);
+    int current_prio = getCurrentPriority(now, cycle_start);
 
-    // Check again with updated timeslice
-    current_prio = ts.current_prio.load(std::memory_order_relaxed);
-    return (int)current_prio == priority;
+    // Only allow if priority matches
+    // Same priority processes can share, no explicit ownership needed
+    return (current_prio == my_priority);
+}
+
+void SharedQuotaManager::heartbeat() {
+    if (!hdr_) return;
+
+    uint64_t now = getCurrentTimeInNano();
+
+    int rc = pthread_mutex_lock(&hdr_->global_mutex);
+    if (rc != 0) return;
+
+    for (int i = 0; i < MAX_PID_SLOTS; ++i) {
+        if (hdr_->processes[i].pid == my_pid_) {
+            hdr_->processes[i].last_heartbeat_ns = now;
+            break;
+        }
+    }
+
+    pthread_mutex_unlock(&hdr_->global_mutex);
+}
+
+void SharedQuotaManager::startBackgroundThread() {
+    if (background_running_.exchange(true)) return;
+
+    background_thread_ = std::thread([this]() {
+        backgroundThreadLoop();
+    });
+}
+
+void SharedQuotaManager::stopBackgroundThread() {
+    if (!background_running_.exchange(false)) return;
+
+    if (background_thread_.joinable()) {
+        background_thread_.join();
+    }
+}
+
+void SharedQuotaManager::backgroundThreadLoop() {
+    const uint64_t SLEEP_INTERVAL_US = 1000;  // 1ms
+
+    while (background_running_.load(std::memory_order_relaxed)) {
+        // Background thread doesn't need to do anything actively
+        // Time is calculated on-the-fly from cycle_start_ns
+        // Just sleep to keep thread alive
+        usleep(SLEEP_INTERVAL_US);
+    }
 }
 
 }  // namespace tent
