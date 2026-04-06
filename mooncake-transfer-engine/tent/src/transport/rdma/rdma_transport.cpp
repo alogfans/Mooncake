@@ -302,7 +302,8 @@ Status RdmaTransport::submitTransferTasks(
 
         // Calculate block_size using shared helper (must match quota.cpp)
         uint64_t block_size = DeviceQuota::calculateBlockSize(
-            request.length, static_cast<uint32_t>(num_slices), default_block_size);
+            request.length, static_cast<uint32_t>(num_slices),
+            default_block_size);
 
         num_slices = std::max<uint64_t>(
             1, std::min<uint64_t>(num_slices, max_slice_count));
@@ -336,7 +337,8 @@ Status RdmaTransport::submitTransferTasks(
         uint64_t offset = 0;
         for (uint64_t slice_idx = 0; slice_idx < num_slices; ++slice_idx) {
             // Use shared helper for slice length (must match quota.cpp)
-            uint64_t length = DeviceQuota::getSliceLength(request.length, offset, block_size);
+            uint64_t length =
+                DeviceQuota::getSliceLength(request.length, offset, block_size);
             auto slice = RdmaSliceStorage::Get().allocate();
             slice->source_addr = (char*)request.source + offset;
             slice->target_addr = request.target_offset + offset;

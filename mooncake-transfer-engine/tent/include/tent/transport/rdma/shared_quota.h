@@ -44,8 +44,8 @@ static constexpr int SHM_VERSION = 9;
 // Slot 1 (10-20ms):  MEDIUM + HIGH
 // Slot 2 (20-30ms):  ALL (LOW + MEDIUM + HIGH)
 // Then repeat: 30ms cycle
-static constexpr int TIMESLICE_UNIT_MS = 10;  // 10ms per slot
-static constexpr int NUM_SLOTS = 3;             // 3 slots per cycle
+static constexpr int TIMESLICE_UNIT_MS = 2;  // 10ms per slot
+static constexpr int NUM_SLOTS = 3;          // 3 slots per cycle
 static constexpr int CYCLE_DURATION_MS = TIMESLICE_UNIT_MS * NUM_SLOTS;  // 30ms
 
 struct SharedHeader {

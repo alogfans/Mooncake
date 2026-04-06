@@ -186,22 +186,26 @@ class DeviceQuota {
     int getPriority() const { return priority_; }
 
     // Set slice calculation parameters (must match rdma_transport.cpp)
-    void setSliceParams(uint64_t default_block_size, size_t max_slice_count = 64) {
+    void setSliceParams(uint64_t default_block_size,
+                        size_t max_slice_count = 64) {
         default_block_size_ = default_block_size;
         max_slice_count_ = max_slice_count;
     }
 
-    // Helper: calculate block_size (must match rdma_transport.cpp logic exactly)
-    // Used by both quota allocation and rdma_transport slice creation
-    static uint64_t calculateBlockSize(uint64_t total_length, uint32_t num_slices,
+    // Helper: calculate block_size (must match rdma_transport.cpp logic
+    // exactly) Used by both quota allocation and rdma_transport slice creation
+    static uint64_t calculateBlockSize(uint64_t total_length,
+                                       uint32_t num_slices,
                                        uint64_t default_block_size) {
         auto roundup = [](uint64_t a, uint64_t b) -> uint64_t {
             return (a % b == 0) ? a : (a / b + 1) * b;
         };
-        return roundup((total_length + num_slices - 1) / num_slices, default_block_size);
+        return roundup((total_length + num_slices - 1) / num_slices,
+                       default_block_size);
     }
 
-    // Helper: get actual slice length at given offset (must match rdma_transport.cpp)
+    // Helper: get actual slice length at given offset (must match
+    // rdma_transport.cpp)
     static uint64_t getSliceLength(uint64_t total_length, uint64_t offset,
                                    uint64_t block_size) {
         return std::min<uint64_t>(total_length - offset, block_size);

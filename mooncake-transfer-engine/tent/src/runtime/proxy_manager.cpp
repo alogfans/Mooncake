@@ -238,7 +238,8 @@ Status ProxyManager::transferEventLoop(StagingTask& task,
     auto server_addr = task.params[0];
     bool local_staging = !task.params[1].empty();
     bool remote_staging = !task.params[2].empty();
-    const size_t kStageBuffers = std::min(chunk_count_, static_cast<size_t>(16));
+    const size_t kStageBuffers =
+        std::min(chunk_count_, static_cast<size_t>(16));
     uint64_t local_stage_buffer[kStageBuffers],
         remote_stage_buffer[kStageBuffers];
     if (local_staging) {

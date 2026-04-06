@@ -343,12 +343,14 @@ Status NVLinkTransport::setPeerAccess() {
 
 void NVLinkTransport::updateStats(int device_id, uint64_t bytes) {
     std::lock_guard<std::mutex> lock(stats_mutex_);
-    device_stats_[device_id].total_bytes.fetch_add(bytes, std::memory_order_relaxed);
+    device_stats_[device_id].total_bytes.fetch_add(bytes,
+                                                   std::memory_order_relaxed);
 }
 
 void NVLinkTransport::printTrafficStats() {
     uint64_t now = getCurrentTimeInNano();
-    uint64_t expected_last = last_print_time_ns_.load(std::memory_order_relaxed);
+    uint64_t expected_last =
+        last_print_time_ns_.load(std::memory_order_relaxed);
 
     if (expected_last == 0) {
         last_print_time_ns_.store(now, std::memory_order_relaxed);
@@ -367,8 +369,10 @@ void NVLinkTransport::printTrafficStats() {
 
             std::lock_guard<std::mutex> lock(stats_mutex_);
             for (auto& [dev_id, stats] : device_stats_) {
-                uint64_t total = stats.total_bytes.load(std::memory_order_relaxed);
-                uint64_t last = stats.last_second_bytes.load(std::memory_order_relaxed);
+                uint64_t total =
+                    stats.total_bytes.load(std::memory_order_relaxed);
+                uint64_t last =
+                    stats.last_second_bytes.load(std::memory_order_relaxed);
                 uint64_t delta = total - last;
                 double mbps = delta * 8.0 / 1e6;  // Mb/s
 

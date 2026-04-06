@@ -70,8 +70,7 @@ std::shared_ptr<Config> loadConfig() {
     if (XferBenchConfig::enable_shared_quota) {
         config->set("transports/rdma/shared_quota_shm_path",
                     XferBenchConfig::shared_quota_shm_path);
-        LOG(INFO) << "Shared quota enabled: "
-                  << XferBenchConfig::shared_quota_shm_path;
+        config->set("transports/rdma/priority", XferBenchConfig::priority);
     }
 
     return config;
@@ -281,8 +280,10 @@ double TENTBenchRunner::runSingleTransfer(uint64_t local_addr,
 
     // Map priority string to int
     int priority = PRIO_HIGH;  // default
-    if (XferBenchConfig::priority == "medium") priority = PRIO_MEDIUM;
-    else if (XferBenchConfig::priority == "low") priority = PRIO_LOW;
+    if (XferBenchConfig::priority == "medium")
+        priority = PRIO_MEDIUM;
+    else if (XferBenchConfig::priority == "low")
+        priority = PRIO_LOW;
 
     std::vector<Request> requests;
     for (uint64_t i = 0; i < batch_size; ++i) {

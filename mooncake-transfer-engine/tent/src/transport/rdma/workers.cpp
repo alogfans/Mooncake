@@ -39,17 +39,21 @@ Workers::Workers(RdmaTransport* transport)
     if (!shared_quota_shm_path.empty()) {
         auto status = device_quota_->enableSharedQuota(shared_quota_shm_path);
         if (!status.ok()) {
-            LOG(WARNING) << "Failed to enable shared quota: " << status.ToString();
+            LOG(WARNING) << "Failed to enable shared quota: "
+                         << status.ToString();
         }
     }
     auto enable_quota = conf->get("transports/rdma/enable_quota", true);
     device_quota_->setEnableQuota(enable_quota);
 
     // Configure priority from config (for shared quota QoS)
-    auto priority_str = conf->get("transports/rdma/priority", std::string("high"));
+    auto priority_str =
+        conf->get("transports/rdma/priority", std::string("high"));
     int priority = 0;  // Default: PRIO_HIGH
-    if (priority_str == "medium") priority = 1;
-    else if (priority_str == "low") priority = 2;
+    if (priority_str == "medium")
+        priority = 1;
+    else if (priority_str == "low")
+        priority = 2;
     device_quota_->setPriority(priority);
 
     // Set slice calculation parameters (must match rdma_transport.cpp)
@@ -86,7 +90,8 @@ Workers::Workers(RdmaTransport* transport)
     kTotalWeight = 0;
     if (!prio_weights_str.empty()) {
         size_t pos = 0;
-        for (size_t i = 0; i < kNumPriorityLevels && pos < prio_weights_str.length(); ++i) {
+        for (size_t i = 0;
+             i < kNumPriorityLevels && pos < prio_weights_str.length(); ++i) {
             size_t end = prio_weights_str.find(',', pos);
             if (end == std::string::npos) end = prio_weights_str.length();
             std::string val = prio_weights_str.substr(pos, end - pos);
@@ -267,7 +272,8 @@ void Workers::asyncPostSend() {
     auto& worker = worker_context_[tl_wid];
     std::vector<RdmaSliceList> result;
 
-    auto shared_quota = device_quota_ ? device_quota_->getSharedQuota() : nullptr;
+    auto shared_quota =
+        device_quota_ ? device_quota_->getSharedQuota() : nullptr;
 
     bool can_send = shared_quota ? shared_quota->canSend() : true;
     if (can_send) {
@@ -281,7 +287,8 @@ void Workers::asyncPostSend() {
                 break;
             }
         }
-        // Fallback: try all queues (should not reach here if queues are properly managed)
+        // Fallback: try all queues (should not reach here if queues are
+        // properly managed)
         if (!found) {
             for (int prio = 0; prio < kNumPriorityLevels; ++prio) {
                 worker.queues[prio].pop(result);

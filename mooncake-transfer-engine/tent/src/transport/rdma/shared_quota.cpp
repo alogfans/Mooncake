@@ -88,15 +88,18 @@ Status SharedQuotaManager::attach(const std::string& shm_name) {
         int e = errno;
         close(fd_);
         fd_ = -1;
-        return Status::InternalError("ftruncate failed: " + std::string(std::strerror(e)));
+        return Status::InternalError("ftruncate failed: " +
+                                     std::string(std::strerror(e)));
     }
 
-    void* ptr = mmap(nullptr, size_, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, 0);
+    void* ptr =
+        mmap(nullptr, size_, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, 0);
     if (ptr == MAP_FAILED) {
         int e = errno;
         close(fd_);
         fd_ = -1;
-        return Status::InternalError("mmap failed: " + std::string(std::strerror(e)));
+        return Status::InternalError("mmap failed: " +
+                                     std::string(std::strerror(e)));
     }
 
     hdr_ = reinterpret_cast<SharedHeader*>(ptr);
@@ -155,9 +158,7 @@ bool SharedQuotaManager::canSend() {
 void SharedQuotaManager::startBackgroundThread() {
     if (background_running_.exchange(true)) return;
 
-    background_thread_ = std::thread([this]() {
-        backgroundThreadLoop();
-    });
+    background_thread_ = std::thread([this]() { backgroundThreadLoop(); });
 }
 
 void SharedQuotaManager::stopBackgroundThread() {
@@ -174,7 +175,8 @@ void SharedQuotaManager::backgroundThreadLoop() {
     while (background_running_.load(std::memory_order_relaxed)) {
         // Advance slot every 10ms, protected by mutex
         uint64_t now = getCurrentTimeInNano();
-        int slot = static_cast<int>((now / (TIMESLICE_UNIT_MS * 1000000ull)) % NUM_SLOTS);
+        int slot = static_cast<int>((now / (TIMESLICE_UNIT_MS * 1000000ull)) %
+                                    NUM_SLOTS);
 
         pthread_mutex_lock(&hdr_->global_mutex);
         hdr_->current_slot.store(slot, std::memory_order_release);
