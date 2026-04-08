@@ -28,6 +28,15 @@
 namespace mooncake {
 namespace tent {
 thread_local int tl_wid = -1;
+
+// Error classification for CQ completions
+enum class ErrorClass { FLUSH, OTHER };
+
+static ErrorClass classifyError(int ibv_wc_status) {
+    if (ibv_wc_status == IBV_WC_WR_FLUSH_ERR) return ErrorClass::FLUSH;
+    return ErrorClass::OTHER;
+}
+
 Workers::Workers(RdmaTransport* transport)
     : transport_(transport), num_workers_(0), running_(false) {
     device_quota_ = std::make_unique<DeviceQuota>();
@@ -271,10 +280,15 @@ void Workers::disableEndpoint(RdmaSlice* slice, int ibv_wc_status) {
         auto& rail = worker.rails[desc->machine_id];
         rail.markFailed(slice->source_dev_id, slice->target_dev_id,
                         ibv_wc_status);
+        rail.markDegraded(slice->source_dev_id, slice->target_dev_id);
     }
+    // Remove endpoint from active store. It goes to the store's waiting_list
+    // which holds its shared_ptr alive until all inflight WRs produce CQEs.
+    // Never reset() here — that would kill other in-flight slices.
+    // reclaim() will clean up once inflight_slices_ reaches 0.
     if (slice->ep_weak_ptr) {
-        slice->ep_weak_ptr->acknowledge(slice, FAILED);
-        slice->ep_weak_ptr->reset();
+        auto ep = slice->ep_weak_ptr;
+        ep->context().endpointStore()->remove(ep);
     }
 }
 
@@ -345,7 +359,7 @@ void Workers::asyncPostSend() {
                     transport_->params_->workers.max_retry_count) {
                     LOG(WARNING)
                         << "Slice " << slice << " failed: retry count exceeded";
-                    disableEndpoint(slice);
+                    disableEndpoint(slice, IBV_WC_REM_ACCESS_ERR);
                     updateSliceStatus(slice, FAILED);
                 } else {
                     submit(slice);
@@ -363,7 +377,7 @@ void Workers::asyncPostSend() {
                     transport_->params_->workers.max_retry_count) {
                     LOG(WARNING)
                         << "Slice " << slice << " failed: retry count exceeded";
-                    disableEndpoint(slice);
+                    disableEndpoint(slice, IBV_WC_RETRY_EXC_ERR);
                     updateSliceStatus(slice, FAILED);
                 } else {
                     submit(slice);
@@ -428,8 +442,8 @@ void Workers::asyncPollCq() {
             }
             if (slice->word != PENDING) continue;
             if (wc[i].status != IBV_WC_SUCCESS) {
-                if (wc[i].status != IBV_WC_WR_FLUSH_ERR) {
-                    // TE handles them automatically
+                auto error_class = classifyError(wc[i].status);
+                if (error_class != ErrorClass::FLUSH) {
                     LOG(INFO) << "Detected error WQE for slice " << slice
                               << " (opcode: " << slice->task->request.opcode
                               << ", source_addr: " << (void*)slice->source_addr
@@ -438,16 +452,35 @@ void Workers::asyncPollCq() {
                               << ", local_nic: " << context->name()
                               << "): " << ibv_wc_status_str(wc[i].status);
                 }
-                slice->retry_count++;
-                if (slice->retry_count >=
-                    transport_->params_->workers.max_retry_count) {
-                    LOG(WARNING)
-                        << "Slice " << slice << " failed: retry count exceeded";
+
+                bool should_fail = false;
+                if (error_class == ErrorClass::FLUSH) {
+                    // Flush errors from reconnection don't consume retry
+                    // budget. Force path re-selection by clearing device
+                    // assignments.
+                    num_slices += ep->acknowledge(slice, PENDING);
+                    disableEndpoint(slice, wc[i].status);
+                    slice->source_dev_id = -1;
+                    slice->target_dev_id = -1;
+                    slice->ep_weak_ptr = nullptr;
+                } else {
+                    // OTHER errors: consume retry budget
+                    slice->retry_count++;
+                    if (slice->retry_count >=
+                        transport_->params_->workers.max_retry_count) {
+                        LOG(WARNING) << "Slice " << slice
+                                     << " failed: retry count exceeded";
+                        should_fail = true;
+                    } else {
+                        num_slices += ep->acknowledge(slice, PENDING);
+                        disableEndpoint(slice, wc[i].status);
+                    }
+                }
+
+                if (should_fail) {
                     num_slices += ep->acknowledge(slice, FAILED);
                     disableEndpoint(slice, wc[i].status);
                 } else {
-                    num_slices += ep->acknowledge(slice, PENDING);
-                    disableEndpoint(slice, wc[i].status);
                     submit(slice);
                 }
             } else {
@@ -459,6 +492,18 @@ void Workers::asyncPollCq() {
     }
     if (num_slices) {
         worker.inflight_slices.fetch_sub(num_slices);
+    }
+    // Periodically reclaim endpoints from store waiting lists.
+    // Endpoints in waiting_list have been removed from active use but are kept
+    // alive until inflight_slices_ == 0 (all CQEs received). reclaim() safely
+    // destroys them once no more completions are pending.
+    static constexpr uint64_t kReclaimIntervalNs = 5000000000ull;  // 5 seconds
+    uint64_t reclaim_ts = getCurrentTimeInNano();
+    if (reclaim_ts - worker.last_reclaim_ts > kReclaimIntervalNs) {
+        worker.last_reclaim_ts = reclaim_ts;
+        for (auto& context : transport_->context_set_) {
+            context->endpointStore()->reclaim();
+        }
     }
 }
 
@@ -695,17 +740,22 @@ Status Workers::selectFallbackDevice(RouteHint& source, RouteHint& target,
     if (!rail.ready() || target.topo != rail.remote())
         rail.load(source.topo, target.topo);
 
-    // Use retry_count to try different source devices
-    // For each source device, select the best matching target device
+    // Use retry_count to rotate through source devices
+    // For each source device, prefer the associated (direct rail) remote device
     for (int pass = 0; pass < 2; ++pass) {
         bool prefer_healthy = (pass == 0);
 
-        // Try each source device in order, starting from retry_count
-        for (size_t sidx = slice->retry_count; sidx < source_devices.size(); ++sidx) {
+        // Rotate through all source devices using retry_count as offset
+        size_t start_sidx = source_devices.empty()
+                                ? 0
+                                : slice->retry_count % source_devices.size();
+        for (size_t offset = 0; offset < source_devices.size(); ++offset) {
+            size_t sidx = (start_sidx + offset) % source_devices.size();
             int sdev = source_devices[sidx];
 
             // Find the best matching target device for this source
-            int mapped_tdev = rail.findBestRemoteDevice(sdev, target.topo_entry->numa_node);
+            int mapped_tdev =
+                rail.findBestRemoteDevice(sdev, target.topo_entry->numa_node);
 
             // Try mapped device first, then try all others
             std::vector<int> target_candidates;
@@ -719,11 +769,6 @@ Status Workers::selectFallbackDevice(RouteHint& source, RouteHint& target,
             }
 
             for (int tdev : target_candidates) {
-                // Skip the exact pair that just failed
-                if (sdev == slice->source_dev_id && tdev == slice->target_dev_id) {
-                    continue;
-                }
-
                 bool reachable = true;
                 bool is_degraded = false;
 

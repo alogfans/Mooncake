@@ -61,6 +61,7 @@ int FIFOEndpointStore::remove(RdmaEndPoint *ep) {
     auto key = ep->name();
     auto iter = endpoint_map_.find(key);
     if (iter != endpoint_map_.end() && iter->second.get() == ep) {
+        ep->setDisabledTimestamp();
         waiting_list_.insert(iter->second);
         endpoint_map_.erase(iter);
         auto fifo_iter = fifo_map_[key];
@@ -82,8 +83,18 @@ void FIFOEndpointStore::evictOne() {
 void FIFOEndpointStore::reclaim() {
     RWSpinlock::WriteGuard guard(endpoint_map_lock_);
     std::vector<std::shared_ptr<RdmaEndPoint>> to_delete;
+    auto now = getCurrentTimeInNano();
+    static constexpr uint64_t kMaxLifetimeNs = 300ull * 1000000000ull;  // 300s
     for (auto &endpoint : waiting_list_) {
-        if (!endpoint->getInflightSlices()) to_delete.push_back(endpoint);
+        if (!endpoint->getInflightSlices()) {
+            to_delete.push_back(endpoint);
+        } else if (now - endpoint->getDisabledTimestamp() >= kMaxLifetimeNs) {
+            LOG(ERROR) << "Force-reclaiming endpoint " << endpoint->name()
+                       << " after 300s with " << endpoint->getInflightSlices()
+                       << " inflight slices (possible CQE loss)";
+            endpoint->reset();
+            to_delete.push_back(endpoint);
+        }
     }
     for (auto &endpoint : to_delete) waiting_list_.erase(endpoint);
 }
@@ -140,6 +151,7 @@ int SIEVEEndpointStore::remove(RdmaEndPoint *ep) {
     auto key = ep->name();
     auto iter = endpoint_map_.find(key);
     if (iter != endpoint_map_.end() && iter->second.first.get() == ep) {
+        ep->setDisabledTimestamp();
         waiting_list_len_++;
         waiting_list_.insert(iter->second.first);
         endpoint_map_.erase(iter);
@@ -185,8 +197,18 @@ void SIEVEEndpointStore::reclaim() {
     if (waiting_list_len_.load(std::memory_order_relaxed) == 0) return;
     RWSpinlock::WriteGuard guard(endpoint_map_lock_);
     std::vector<std::shared_ptr<RdmaEndPoint>> to_delete;
+    auto now = getCurrentTimeInNano();
+    static constexpr uint64_t kMaxLifetimeNs = 300ull * 1000000000ull;  // 300s
     for (auto &endpoint : waiting_list_) {
-        if (!endpoint->getInflightSlices()) to_delete.push_back(endpoint);
+        if (!endpoint->getInflightSlices()) {
+            to_delete.push_back(endpoint);
+        } else if (now - endpoint->getDisabledTimestamp() >= kMaxLifetimeNs) {
+            LOG(ERROR) << "Force-reclaiming endpoint " << endpoint->name()
+                       << " after 300s with " << endpoint->getInflightSlices()
+                       << " inflight slices (possible CQE loss)";
+            endpoint->reset();
+            to_delete.push_back(endpoint);
+        }
     }
     for (auto &endpoint : to_delete) waiting_list_.erase(endpoint);
     waiting_list_len_ -= to_delete.size();

@@ -18,6 +18,7 @@
 #include <queue>
 
 #include "context.h"
+#include "tent/common/utils/os.h"
 
 namespace mooncake {
 namespace tent {
@@ -100,6 +101,14 @@ class RdmaEndPoint {
 
     int getInflightSlices() const;
 
+    void setDisabledTimestamp() {
+        disabled_ts_ = getCurrentTimeInNano();
+    }
+
+    uint64_t getDisabledTimestamp() const {
+        return disabled_ts_;
+    }
+
     RdmaContext& context() const { return *context_; }
 
     std::string name() const { return endpoint_name_; }
@@ -173,6 +182,11 @@ class RdmaEndPoint {
     WrDepthBlock* wr_depth_list_;
     volatile int inflight_slices_;
     uint32_t padding_[7];
+
+    // Timestamp when endpoint was disabled (moved to store's waiting_list).
+    // Used by reclaim() to enforce max lifetime and prevent resource leaks
+    // in extreme cases where inflight_slices_ never reaches 0.
+    uint64_t disabled_ts_ = 0;
     RWSpinlock lock_;
 
     std::string peer_server_name_;

@@ -200,6 +200,7 @@ class Workers {
         volatile bool in_suspend = false;
 
         std::unordered_map<std::string, RailMonitor> rails;
+        uint64_t last_reclaim_ts = 0;
         PerfMetricSummary perf;
         uint64_t padding[15];
     };
