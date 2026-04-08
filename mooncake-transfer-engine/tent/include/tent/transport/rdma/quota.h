@@ -66,6 +66,7 @@ class DeviceQuota {
         int dev_id;
         double score;
         bool is_cross_numa;
+        int dev_priority;
     };
 
     struct DeviceInfo {
@@ -217,6 +218,9 @@ class DeviceQuota {
     // Print traffic and weight statistics (called periodically from release)
     void printTrafficStats();
 
+    void fillDevicePriorities();
+    int getDevicePriority(int dev_id) const;
+
     // Scheduling parameters (only used when enable_quota=true)
     struct SchedulingParams {
         // Rank weights for device selection (rank 0:1:2)
@@ -236,6 +240,12 @@ class DeviceQuota {
         // Only this fraction of release() calls will update EWMA bandwidth
         // Inflight bytes are ALWAYS released (not sampled)
         double param_update_sample_rate = 0.1;
+
+        // Device priority rotation parameters
+        bool enable_device_priority = true;          // Enable/disable rotation
+        uint64_t epoch_duration_ns = 1000000000ull;  // 1 second per epoch
+        std::vector<int>
+            device_base_priorities;  // Base priority for each dev_id
     };
 
     void setSchedulingParams(const SchedulingParams &params) {
@@ -265,7 +275,8 @@ class DeviceQuota {
     // Build candidate devices list for smart scheduling
     Status buildCandidates(const Topology::MemEntry *entry,
                            uint64_t slice_bytes, uint64_t device_mask,
-                           std::vector<Candidate> &candidates);
+                           std::vector<Candidate> &candidates,
+                           int request_priority = 0);  // Request's priority
 
     // Select device for single-path (small requests)
     void selectSinglePath(const std::vector<Candidate> &candidates,

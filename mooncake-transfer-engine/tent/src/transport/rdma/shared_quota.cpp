@@ -32,10 +32,11 @@ SharedQuotaManager::SharedQuotaManager(DeviceQuota* local_quota)
 
 SharedQuotaManager::~SharedQuotaManager() { detach(); }
 
+// Check if a priority is allowed in the given slot
+// Slot 0 (HIGH only):     priority must be 0 (HIGH)
+// Slot 1 (MEDIUM+HIGH):   priority must be 0 or 1
+// Slot 2 (ALL):           any priority allowed
 bool SharedQuotaManager::isPriorityAllowedInSlot(int priority, int slot) const {
-    // Slot 0: HIGH only (priority <= 0)
-    // Slot 1: MEDIUM + HIGH (priority <= 1)
-    // Slot 2: ALL (priority <= 2, always true)
     return priority <= slot;
 }
 
@@ -48,6 +49,11 @@ Status SharedQuotaManager::initializeHeader() {
     hdr_->version = SHM_VERSION;
     hdr_->magic = SHM_MAGIC;
     hdr_->current_slot.store(0, std::memory_order_release);
+
+    // Initialize device slots with staggered pattern: 0,1,2,0,1,2,...
+    for (int i = 0; i < SharedHeader::MAX_DEVICES; ++i) {
+        hdr_->device_slots[i].store(i % NUM_SLOTS, std::memory_order_release);
+    }
 
     return Status::OK();
 }
@@ -139,20 +145,37 @@ Status SharedQuotaManager::detach() {
     return Status::OK();
 }
 
+// Check if current process can send (uses global slot for backward
+// compatibility) Returns true if process priority is allowed in current global
+// slot
 bool SharedQuotaManager::canSend() {
     if (!hdr_) return true;
 
-    // Get my priority from config
+    // Get this process's priority from config
     int my_priority = static_cast<int>(PRIO_HIGH);
     if (local_quota_) {
         my_priority = local_quota_->getPriority();
     }
 
-    // Get current slot
+    // Get current global slot
     int current_slot = hdr_->current_slot.load(std::memory_order_acquire);
 
     // Check if my priority is allowed in this slot
     return isPriorityAllowedInSlot(my_priority, current_slot);
+}
+
+// Get device's current priority slot
+// Returns 0 (HIGH), 1 (MEDIUM), or 2 (LOW)
+int SharedQuotaManager::getDevicePriority(int device_id) {
+    if (!hdr_) return 0;  // Default HIGH
+
+    // Clamp device_id to valid range
+    if (device_id < 0) device_id = 0;
+    if (device_id >= SharedHeader::MAX_DEVICES)
+        device_id = SharedHeader::MAX_DEVICES - 1;
+
+    // Return current slot for this device
+    return hdr_->device_slots[device_id].load(std::memory_order_acquire);
 }
 
 void SharedQuotaManager::startBackgroundThread() {
@@ -169,17 +192,29 @@ void SharedQuotaManager::stopBackgroundThread() {
     }
 }
 
+// Background thread: advance slots periodically
+// Updates both global slot and per-device slots
 void SharedQuotaManager::backgroundThreadLoop() {
     const uint64_t SLEEP_INTERVAL_US = 1000;  // 1ms
 
     while (background_running_.load(std::memory_order_relaxed)) {
-        // Advance slot based on configured timeslice duration
+        // Calculate base slot from time
         uint64_t now = getCurrentTimeInNano();
-        int slot = static_cast<int>((now / (timeslice_unit_ms_ * 1000000ull)) %
-                                    NUM_SLOTS);
+        uint64_t base_slot = now / (timeslice_unit_ms_ * 1000000ull);
 
         pthread_mutex_lock(&hdr_->global_mutex);
-        hdr_->current_slot.store(slot, std::memory_order_release);
+        // Update global slot (for backward compatibility)
+        int global_slot = static_cast<int>(base_slot % NUM_SLOTS);
+        hdr_->current_slot.store(global_slot, std::memory_order_release);
+
+        // Update per-device slots (staggered for better parallelism)
+        // Device 0: 0,1,2,0,1,2,...
+        // Device 1: 1,2,0,1,2,0,... (offset by 1)
+        // Device 2: 2,0,1,2,0,1,... (offset by 2)
+        for (int i = 0; i < SharedHeader::MAX_DEVICES; ++i) {
+            int slot = static_cast<int>((base_slot + i) % NUM_SLOTS);
+            hdr_->device_slots[i].store(slot, std::memory_order_release);
+        }
         pthread_mutex_unlock(&hdr_->global_mutex);
 
         usleep(SLEEP_INTERVAL_US);

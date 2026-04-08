@@ -136,8 +136,8 @@ Status DeviceQuota::allocate(uint64_t total_length, uint32_t num_slices,
     // ========== Smart mode: EWMA-based selection ==========
     // Reuse thread-local buffer
     tl_candidates.clear();
-    Status status =
-        buildCandidates(entry, slice_bytes, device_mask, tl_candidates);
+    Status status = buildCandidates(entry, slice_bytes, device_mask,
+                                    tl_candidates, priority);
     if (!status.ok()) return status;
 
     // Exploration: 1% of requests use multi-path to discover true device
@@ -189,9 +189,55 @@ bool DeviceQuota::isCrossNumaNodeIdle(int dev_numa) const {
     return true;
 }
 
+int DeviceQuota::getDevicePriority(int dev_id) const {
+    // Rotation enabled: compute priority based on current epoch
+    uint64_t now = getFastTimeNanos();
+    uint64_t epoch = now / sched_params_.epoch_duration_ns;
+
+    // Get base priority for this device
+    int base_priority = 0;  // Default HIGH
+    if (dev_id < (int)sched_params_.device_base_priorities.size()) {
+        base_priority = sched_params_.device_base_priorities[dev_id];
+    }
+
+    // Rotate: shift priority by epoch number
+    // epoch 0: [0,1,2,0] -> [0,1,2,0]
+    // epoch 1: [0,1,2,0] -> [1,2,0,1]
+    // epoch 2: [0,1,2,0] -> [2,0,1,2]
+    int num_priority_levels = 3;  // HIGH, MEDIUM, LOW
+    int dev_priority = (base_priority + epoch) % num_priority_levels;
+
+    return dev_priority;
+}
+
+void DeviceQuota::fillDevicePriorities() {
+    if (!sched_params_.enable_device_priority) return;
+
+    size_t num_devices = devices_.size();
+    sched_params_.device_base_priorities.clear();
+    sched_params_.device_base_priorities.reserve(num_devices);
+
+    // Distribute priorities evenly: 0,1,2,0,1,2,...
+    int num_priority_levels = 3;  // HIGH, MEDIUM, LOW
+    for (size_t i = 0; i < num_devices; ++i) {
+        sched_params_.device_base_priorities.push_back(i % num_priority_levels);
+    }
+
+    // Log the auto-filled priorities
+    std::ostringstream oss;
+    oss << "[";
+    for (size_t i = 0; i < sched_params_.device_base_priorities.size(); ++i) {
+        if (i > 0) oss << ",";
+        oss << sched_params_.device_base_priorities[i];
+    }
+    oss << "]";
+    LOG(INFO) << "Auto-filled device base priorities: " << oss.str();
+}
+
 Status DeviceQuota::buildCandidates(const Topology::MemEntry* entry,
                                     uint64_t slice_bytes, uint64_t device_mask,
-                                    std::vector<Candidate>& candidates) {
+                                    std::vector<Candidate>& candidates,
+                                    int request_priority) {
     candidates.clear();
     for (size_t rank = 0; rank < Topology::DevicePriorityRanks; ++rank) {
         for (int dev_id : entry->device_list[rank]) {
@@ -201,6 +247,30 @@ Status DeviceQuota::buildCandidates(const Topology::MemEntry* entry,
             bool is_cross_numa = (rank == 2);
             // Cross-NUMA devices: only use if their local node is idle
             if (is_cross_numa && !isCrossNumaNodeIdle(dev.numa_id)) continue;
+
+            // Get device's current priority slot
+            // Priority values: 0=HIGH, 1=MEDIUM, 2=LOW
+            // Device accepts request if dev_priority >= request_priority
+            int dev_priority;
+            if (shared_quota_) {
+                // Multi-process: use shared quota per-device slot
+                // All processes see the same device slot (coordinated)
+                dev_priority = shared_quota_->getDevicePriority(dev_id);
+            } else {
+                // Single-process: use local device priority rotation
+                dev_priority = getDevicePriority(dev_id);
+                // If rotation disabled, default to LOW (accept all)
+                if (!sched_params_.enable_device_priority) {
+                    dev_priority = PRIO_LOW;
+                }
+            }
+
+            // Filter: device must accept this request priority
+            // dev_priority=0(HIGH): only request_priority=0(HIGH)
+            // dev_priority=1(MEDIUM): request_priority=0,1
+            // dev_priority=2(LOW): request_priority=0,1,2
+            if (dev_priority < request_priority) continue;
+
             double effective_bw = dev.getEwmaBandwidth();
             uint64_t inflight = dev.getInflightBytes();
             // Score = (effective_bandwidth * rank_weight) / pending_bytes
@@ -210,7 +280,7 @@ Status DeviceQuota::buildCandidates(const Topology::MemEntry* entry,
             // Set minimum score to 0.01 to avoid zero scores
             double score = std::max(raw_score, 0.01);
 
-            candidates.push_back({dev_id, score, is_cross_numa});
+            candidates.push_back({dev_id, score, is_cross_numa, dev_priority});
         }
     }
 

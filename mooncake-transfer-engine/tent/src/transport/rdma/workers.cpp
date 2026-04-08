@@ -55,7 +55,6 @@ Workers::Workers(RdmaTransport* transport)
         int timeslice_unit_ms =
             conf->get("transports/rdma/timeslice_unit_ms", 2);
         device_quota_->getSharedQuota()->setTimesliceUnitMs(timeslice_unit_ms);
-        LOG(INFO) << "QoS timeslice_unit_ms: " << timeslice_unit_ms;
     }
     auto enable_quota = conf->get("transports/rdma/enable_quota", true);
     device_quota_->setEnableQuota(enable_quota);
@@ -73,7 +72,6 @@ Workers::Workers(RdmaTransport* transport)
     // Configure local priority timeslice (for intra-process QoS)
     // Uses rdtscp for high-precision timing
     timeslice_us_ = conf->get("transports/rdma/local_timeslice_us", 100);
-    LOG(INFO) << "Local QoS timeslice_us: " << timeslice_us_;
 
     // Set slice calculation parameters (must match rdma_transport.cpp)
     device_quota_->setSliceParams(transport_->params_->workers.block_size);
@@ -83,6 +81,13 @@ Workers::Workers(RdmaTransport* transport)
     params.ewma_alpha = conf->get("transports/rdma/ewma_alpha", 0.01);
     params.enable_ewma_learning =
         conf->get("transports/rdma/enable_ewma_learning", true);
+
+    // Configure device priority
+    params.enable_device_priority =
+        conf->get("transports/rdma/device_priority", false);
+    if (params.enable_device_priority) {
+        device_quota_->fillDevicePriorities();
+    }
 
     // Configure rank weights from config (format: "w0,w1,w2")
     std::string weights_str =
@@ -299,29 +304,28 @@ void Workers::asyncPostSend() {
     auto shared_quota =
         device_quota_ ? device_quota_->getSharedQuota() : nullptr;
 
+    // Multi-process: check if this process can send (global slot)
+    // Single-process: always true, priority handled locally below
     bool can_send = shared_quota ? shared_quota->canSend() : true;
+
     if (can_send) {
-        // Time-based priority scheduling (using rdtscp):
-        // Slot 0 (0-100us): HIGH only
-        // Slot 1 (100-200us): MEDIUM + HIGH
-        // Slot 2 (200-300us): ALL (LOW + MEDIUM + HIGH)
+        // Local time-based priority scheduling (using rdtscp):
+        // Slot 0 (0-100us): HIGH requests only
+        // Slot 1 (100-200us): MEDIUM + HIGH requests
+        // Slot 2 (200-300us): ALL requests (LOW + MEDIUM + HIGH)
         // Then repeat (finer granularity than shared quota)
         // This ensures HIGH gets preference while LOW doesn't starve.
         int current_slot = getCurrentPrioritySlot();
-        bool found = false;
 
         // Try to dispatch from allowed priorities in current time slot
+        // Request can run if its priority <= current_slot
+        // HIGH(0): can run in all slots (0,1,2)
+        // MEDIUM(1): can run in slots 1,2
+        // LOW(2): can run only in slot 2
         for (int prio = 0; prio < kNumPriorityLevels; ++prio) {
-            // Check if this priority is allowed in current slot
-            // Slot 0: only HIGH (prio <= 0)
-            // Slot 1: HIGH and MEDIUM (prio <= 1)
-            // Slot 2: all priorities (prio <= 2)
             if (prio > current_slot) continue;  // Not allowed in this slot
             worker.queues[prio].pop(result);
-            if (!result.empty()) {
-                found = true;
-                break;  // Dispatched one batch, done
-            }
+            if (!result.empty()) break;  // Dispatched one batch, done
         }
     }
 

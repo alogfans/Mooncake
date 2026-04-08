@@ -37,7 +37,7 @@ namespace mooncake {
 namespace tent {
 
 static constexpr uint64_t SHM_MAGIC = 0x2025082772805203ULL;
-static constexpr int SHM_VERSION = 9;
+static constexpr int SHM_VERSION = 10;
 
 // Time slice configuration
 // Slot 0:            HIGH only
@@ -50,9 +50,14 @@ struct SharedHeader {
     uint64_t magic;
     int32_t version;
 
-    // Current slot index (0, 1, 2)
-    // Advances every 2ms
+    // Global slot index (0, 1, 2) - legacy, for backward compatibility
     std::atomic<int> current_slot;
+
+    // Per-device slot indices (0, 1, 2)
+    // Each device advances independently
+    // Max 16 devices supported
+    static constexpr int MAX_DEVICES = 16;
+    std::atomic<int> device_slots[MAX_DEVICES];
 
     pthread_mutex_t global_mutex;
 };
@@ -66,8 +71,12 @@ class SharedQuotaManager {
     Status attach(const std::string& shm_name);
     Status detach();
 
-    // Check if current process can send
+    // Check if current process can send (global slot, for backward
+    // compatibility)
     bool canSend();
+
+    // Get device's current priority slot (0=HIGH, 1=MEDIUM, 2=LOW)
+    int getDevicePriority(int device_id);
 
     // Set time slice duration in milliseconds (must be > 0)
     void setTimesliceUnitMs(int ms) { timeslice_unit_ms_ = ms; }
