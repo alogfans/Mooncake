@@ -101,13 +101,9 @@ class RdmaEndPoint {
 
     int getInflightSlices() const;
 
-    void setDisabledTimestamp() {
-        disabled_ts_ = getCurrentTimeInNano();
-    }
+    void setDisabledTimestamp() { disabled_ts_ = getCurrentTimeInNano(); }
 
-    uint64_t getDisabledTimestamp() const {
-        return disabled_ts_;
-    }
+    uint64_t getDisabledTimestamp() const { return disabled_ts_; }
 
     RdmaContext& context() const { return *context_; }
 
