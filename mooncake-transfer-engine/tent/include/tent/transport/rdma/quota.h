@@ -83,6 +83,46 @@ class DeviceQuota {
         std::atomic<uint64_t> last_second_bytes{0};  // Bytes in last second
         uint64_t padding3[4];
 
+        // For bandwidth normalization using minimum latency probe
+        // Track minimum latency and corresponding transfer size during the
+        // period
+        std::atomic<double> min_latency_{std::numeric_limits<double>::max()};
+        std::atomic<uint64_t> min_latency_size_{0};
+        std::atomic<uint64_t> sample_count_{0};
+
+        void addSample(uint64_t length, double latency) {
+            double current_min = min_latency_.load(std::memory_order_relaxed);
+
+            // Update minimum if this sample is better
+            while (latency < current_min) {
+                if (min_latency_.compare_exchange_weak(
+                        current_min, latency, std::memory_order_relaxed,
+                        std::memory_order_relaxed)) {
+                    // Successfully updated, also store the size
+                    min_latency_size_.store(length, std::memory_order_relaxed);
+                    break;
+                }
+            }
+            sample_count_.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        // Get minimum latency for this period
+        double getMinLatency() const {
+            return min_latency_.load(std::memory_order_relaxed);
+        }
+
+        // Get the transfer size that produced the minimum latency
+        uint64_t getMinLatencySize() const {
+            return min_latency_size_.load(std::memory_order_relaxed);
+        }
+
+        // Reset tracker for next period
+        void resetPeriodTracker() {
+            min_latency_.store(std::numeric_limits<double>::max());
+            min_latency_size_.store(0);
+            sample_count_.store(0, std::memory_order_relaxed);
+        }
+
         // Get current inflight bytes
         uint64_t getInflightBytes() const {
             return inflight_bytes.load(std::memory_order_relaxed);
@@ -101,13 +141,6 @@ class DeviceQuota {
         // Get current EWMA bandwidth
         double getEwmaBandwidth() const {
             return ewma_bandwidth_bps.load(std::memory_order_relaxed);
-        }
-
-        // Update EWMA bandwidth
-        void updateEwmaBandwidth(double observed_bps, double alpha) {
-            double current = ewma_bandwidth_bps.load(std::memory_order_relaxed);
-            double new_bw = alpha * current + (1.0 - alpha) * observed_bps;
-            ewma_bandwidth_bps.store(new_bw, std::memory_order_relaxed);
         }
 
         // Calculate theoretical bandwidth in bytes/sec
@@ -236,10 +269,9 @@ class DeviceQuota {
         // Enable/disable EWMA learning (bandwidth adaptation)
         bool enable_ewma_learning = true;
 
-        // Sampling rate for EWMA updates (0.01 = 1%, 0.1 = 10%, 1.0 = 100%)
-        // Only this fraction of release() calls will update EWMA bandwidth
-        // Inflight bytes are ALWAYS released (not sampled)
-        double param_update_sample_rate = 0.1;
+        // Fixed overhead for bandwidth normalization (seconds)
+        // Represents protocol overhead independent of transfer size
+        double bw_normalization_beta = 5e-6;  // 5 microseconds default
 
         // Device priority rotation parameters
         bool enable_device_priority = true;          // Enable/disable rotation

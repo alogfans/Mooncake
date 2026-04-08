@@ -20,6 +20,9 @@
 #include <iostream>
 #include <iomanip>
 
+// Enable bandwidth learning debug logging
+#define BANDWIDTH_LEARNING_DEBUG 1
+
 namespace mooncake {
 namespace tent {
 
@@ -407,16 +410,19 @@ void DeviceQuota::printTrafficStats() {
                 uint64_t last =
                     dev.last_second_bytes.load(std::memory_order_relaxed);
                 uint64_t delta = total - last;
-                double mbps = delta * 8.0 / 1e6;  // Mb/s
+                double throughput_gb_s = delta / 1e9;             // GB/s
+                double ewma_gb_s = dev.getEwmaBandwidth() / 1e9;  // GB/s
 
                 dev.last_second_bytes.store(total, std::memory_order_relaxed);
 
                 // Skip devices with zero traffic
-                if (mbps < 0.01) continue;
+                if (throughput_gb_s < 0.01) continue;
 
                 if (!first) oss << " | ";
                 oss << "dev" << dev_id << ": " << std::fixed
-                    << std::setprecision(2) << mbps << " Mb/s";
+                    << std::setprecision(2) << throughput_gb_s
+                    << " GB/s (ewma: " << std::setprecision(2) << ewma_gb_s
+                    << " GB/s)";
                 first = false;
             }
 
@@ -438,27 +444,84 @@ Status DeviceQuota::release(int dev_id, uint64_t length, double latency) {
     auto& dev = it->second;
     dev.subInflight(length);
     if (sched_params_.enable_ewma_learning) {
-        thread_local uint64_t tl_sample_counter = 0;
-        double sample_rate = sched_params_.param_update_sample_rate;
-        bool should_update = (sample_rate >= 1.0) ||
-                             ((++tl_sample_counter %
-                               static_cast<uint64_t>(1.0 / sample_rate)) == 0);
+        // Add sample for bandwidth estimation
+        dev.addSample(length, latency);
+        // Update bandwidth estimate periodically (every ~1 second)
+        // Use global atomic timer to coordinate all threads
+        static std::atomic<uint64_t> last_update_ns{0};
+        uint64_t now = getCurrentTimeInNano();
+        uint64_t expected_last = last_update_ns.load(std::memory_order_relaxed);
+        if (now - expected_last >= 1000000000ULL) {  // 1 second
+            // Try to claim the update slot (only one thread will succeed)
+            if (last_update_ns.compare_exchange_strong(
+                    expected_last, now, std::memory_order_relaxed,
+                    std::memory_order_relaxed)) {
+                // Get actual throughput for this second
+                uint64_t total =
+                    dev.total_bytes.load(std::memory_order_relaxed);
+                uint64_t last =
+                    dev.last_second_bytes.load(std::memory_order_relaxed);
+                uint64_t delta_bytes = total - last;
+                double actual_bw_bps =
+                    static_cast<double>(delta_bytes);  // bytes/sec
 
-        if (should_update) {
-            if (length >= 4096 && latency >= 1e-6) {
-                double observed_bps = length / latency;
-                double alpha = sched_params_.ewma_alpha;
-                double current_ewma = dev.getEwmaBandwidth();
-                double new_ewma =
-                    alpha * current_ewma + (1.0 - alpha) * observed_bps;
+                // Get minimum latency probe
+                double l_min = dev.getMinLatency();
+                uint64_t sample_count =
+                    dev.sample_count_.load(std::memory_order_relaxed);
 
-                // Clamp to reasonable bounds (10% to 300% of theoretical)
-                double min_bw = dev.getTheoreticalBandwidth() * 0.1;
-                double max_bw = dev.getTheoreticalBandwidth() * 3.0;
-                new_ewma = std::clamp(new_ewma, min_bw, max_bw);
+                if (sample_count > 0 &&
+                    l_min < std::numeric_limits<double>::max() * 0.5) {
+                    // Bandwidth normalization: take max of actual and probe
+                    double beta = sched_params_.bw_normalization_beta;
+                    double pure_transmission_time =
+                        std::max(1e-9, l_min - beta);
 
-                dev.ewma_bandwidth_bps.store(new_ewma,
-                                             std::memory_order_relaxed);
+                    // Use the size that produced minimum latency as reference
+                    uint64_t s_size = dev.getMinLatencySize();
+                    if (s_size == 0)
+                        s_size = 1024 * 1024;  // Default 1MB fallback
+
+                    double bw_probe_bps =
+                        static_cast<double>(s_size) / pure_transmission_time;
+
+                    // Normalize: max(actual, probe) as EWMA input
+                    double raw_norm_bps = std::max(actual_bw_bps, bw_probe_bps);
+
+                    // Clamp to [75%, 100%] of theoretical bandwidth
+                    double theoretical_bw = dev.getTheoreticalBandwidth();
+                    double min_bw = theoretical_bw * 0.75;
+                    double max_bw = theoretical_bw * 1.0;
+                    raw_norm_bps = std::clamp(raw_norm_bps, min_bw, max_bw);
+
+                    // Apply EWMA smoothing
+                    double alpha = sched_params_.ewma_alpha;
+                    double current_ewma = dev.getEwmaBandwidth();
+                    double new_ewma =
+                        alpha * current_ewma + (1.0 - alpha) * raw_norm_bps;
+
+                    dev.ewma_bandwidth_bps.store(new_ewma,
+                                                 std::memory_order_relaxed);
+
+#ifdef BANDWIDTH_LEARNING_DEBUG
+                    LOG(INFO)
+                        << "[Bandwidth Normalization] dev" << dev_id
+                        << " actual_bw: " << (actual_bw_bps / 1e9) << " GB/s"
+                        << ", l_min: " << (l_min * 1e6) << " us"
+                        << ", s_size: " << (s_size / 1024) << " KB"
+                        << ", bw_probe: " << (bw_probe_bps / 1e9) << " GB/s"
+                        << ", raw_norm: " << (raw_norm_bps / 1e9) << " GB/s"
+                        << ", ewma: " << (current_ewma / 1e9) << " -> "
+                        << (new_ewma / 1e9) << " GB/s"
+                        << ", samples: " << sample_count;
+#endif
+                }
+
+                // Update last_second_bytes for next period
+                dev.last_second_bytes.store(total, std::memory_order_relaxed);
+
+                // Reset tracker for next period
+                dev.resetPeriodTracker();
             }
         }
     }
