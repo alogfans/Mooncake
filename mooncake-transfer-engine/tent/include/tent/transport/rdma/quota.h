@@ -273,6 +273,10 @@ class DeviceQuota {
         // Represents protocol overhead independent of transfer size
         double bw_normalization_beta = 5e-6;  // 5 microseconds default
 
+        // Parallel correction factor for bw_probe
+        // NICs can internally parallelize send/receive operations
+        double bw_probe_factor = 2.0;
+
         // Device priority rotation parameters
         bool enable_device_priority = true;          // Enable/disable rotation
         uint64_t epoch_duration_ns = 1000000000ull;  // 1 second per epoch
