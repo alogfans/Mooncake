@@ -83,43 +83,58 @@ class DeviceQuota {
         std::atomic<uint64_t> last_second_bytes{0};  // Bytes in last second
         uint64_t padding3[4];
 
-        // For bandwidth normalization using minimum latency probe
-        // Track minimum latency and corresponding transfer size during the
-        // period
+        // For bandwidth normalization using peak bandwidth probe
+        // Track maximum L_i / (tau_i - beta) during the period
+        // This represents the peak bandwidth capability observed
+        std::atomic<double> max_bw_ratio_{0.0};  // max of L_i / (tau_i - beta)
         std::atomic<double> min_latency_{std::numeric_limits<double>::max()};
-        std::atomic<uint64_t> min_latency_size_{0};
         std::atomic<uint64_t> sample_count_{0};
+        static constexpr double kBwNormalizationBeta = 5e-6;  // 5 microseconds
 
         void addSample(uint64_t length, double latency) {
-            double current_min = min_latency_.load(std::memory_order_relaxed);
+            // Compute bandwidth ratio for this sample
+            double pure_latency =
+                std::max(1e-9, latency - kBwNormalizationBeta);
+            double bw_ratio = static_cast<double>(length) / pure_latency;
 
-            // Update minimum if this sample is better
+            // Update maximum if this sample is better
+            double current_max = max_bw_ratio_.load(std::memory_order_relaxed);
+            while (bw_ratio > current_max) {
+                if (max_bw_ratio_.compare_exchange_weak(
+                        current_max, bw_ratio, std::memory_order_relaxed,
+                        std::memory_order_relaxed)) {
+                    break;
+                }
+            }
+
+            // Also track minimum latency for monitoring
+            double current_min = min_latency_.load(std::memory_order_relaxed);
             while (latency < current_min) {
                 if (min_latency_.compare_exchange_weak(
                         current_min, latency, std::memory_order_relaxed,
                         std::memory_order_relaxed)) {
-                    // Successfully updated, also store the size
-                    min_latency_size_.store(length, std::memory_order_relaxed);
                     break;
                 }
             }
+
             sample_count_.fetch_add(1, std::memory_order_relaxed);
         }
 
-        // Get minimum latency for this period
+        // Get peak bandwidth ratio for this period
+        double getMaxBwRatio() const {
+            return max_bw_ratio_.load(std::memory_order_relaxed);
+        }
+
+        // Get minimum latency for monitoring/debugging
         double getMinLatency() const {
             return min_latency_.load(std::memory_order_relaxed);
         }
 
-        // Get the transfer size that produced the minimum latency
-        uint64_t getMinLatencySize() const {
-            return min_latency_size_.load(std::memory_order_relaxed);
-        }
-
         // Reset tracker for next period
         void resetPeriodTracker() {
-            min_latency_.store(std::numeric_limits<double>::max());
-            min_latency_size_.store(0);
+            max_bw_ratio_.store(0.0, std::memory_order_relaxed);
+            min_latency_.store(std::numeric_limits<double>::max(),
+                               std::memory_order_relaxed);
             sample_count_.store(0, std::memory_order_relaxed);
         }
 

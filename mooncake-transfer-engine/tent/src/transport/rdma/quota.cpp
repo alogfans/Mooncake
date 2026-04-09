@@ -401,55 +401,68 @@ void DeviceQuota::printTrafficStats() {
         if (last_print_time_ns.compare_exchange_strong(
                 expected_last, now, std::memory_order_relaxed,
                 std::memory_order_relaxed)) {
-
             // First, update EWMA bandwidth for all devices
             if (sched_params_.enable_ewma_learning) {
                 for (auto& [dev_id, dev] : devices_) {
-                    uint64_t total = dev.total_bytes.load(std::memory_order_relaxed);
-                    uint64_t last = dev.last_second_bytes.load(std::memory_order_relaxed);
+                    uint64_t total =
+                        dev.total_bytes.load(std::memory_order_relaxed);
+                    uint64_t last =
+                        dev.last_second_bytes.load(std::memory_order_relaxed);
                     uint64_t delta_bytes = total - last;
                     double actual_bw_bps = static_cast<double>(delta_bytes);
 
+                    double max_bw_ratio = dev.getMaxBwRatio();
                     double l_min = dev.getMinLatency();
-                    uint64_t sample_count = dev.sample_count_.load(std::memory_order_relaxed);
+                    uint64_t sample_count =
+                        dev.sample_count_.load(std::memory_order_relaxed);
 
-                    if (sample_count > 0 && l_min < std::numeric_limits<double>::max() * 0.5) {
+                    if (sample_count > 0 && max_bw_ratio > 0) {
                         // Skip update if insufficient samples
                         constexpr uint64_t kMinSampleThreshold = 20000;
                         if (sample_count < kMinSampleThreshold) {
                             // Use initial theoretical value
-                            double theoretical_bw = dev.getTheoreticalBandwidth();
-                            dev.ewma_bandwidth_bps.store(theoretical_bw, std::memory_order_relaxed);
+                            double theoretical_bw =
+                                dev.getTheoreticalBandwidth();
+                            dev.ewma_bandwidth_bps.store(
+                                theoretical_bw, std::memory_order_relaxed);
                         } else {
-                            double beta = sched_params_.bw_normalization_beta;
-                            double pure_transmission_time = std::max(1e-9, l_min - beta);
-
-                            uint64_t s_size = dev.getMinLatencySize();
-                            if (s_size == 0) s_size = 1024 * 1024;
-
-                            double bw_probe_bps = static_cast<double>(s_size) / pure_transmission_time;
+                            // bw_probe_bps is already max of L_i / (tau_i -
+                            // beta)
+                            double bw_probe_bps = max_bw_ratio;
 
                             // Give bw_probe parallel correction factor
-                            double raw_norm_bps = std::max(actual_bw_bps, bw_probe_bps * sched_params_.bw_probe_factor);
+                            double raw_norm_bps = std::max(
+                                actual_bw_bps,
+                                bw_probe_bps * sched_params_.bw_probe_factor);
 
-                            double theoretical_bw = dev.getTheoreticalBandwidth();
+                            double theoretical_bw =
+                                dev.getTheoreticalBandwidth();
                             double min_bw = theoretical_bw * 0.75;
                             double max_bw = theoretical_bw * 1.0;
-                            raw_norm_bps = std::clamp(raw_norm_bps, min_bw, max_bw);
+                            raw_norm_bps =
+                                std::clamp(raw_norm_bps, min_bw, max_bw);
 
                             double alpha = sched_params_.ewma_alpha;
                             double current_ewma = dev.getEwmaBandwidth();
-                            double new_ewma = alpha * current_ewma + (1.0 - alpha) * raw_norm_bps;
-                            dev.ewma_bandwidth_bps.store(new_ewma, std::memory_order_relaxed);
+                            double new_ewma = alpha * current_ewma +
+                                              (1.0 - alpha) * raw_norm_bps;
+                            dev.ewma_bandwidth_bps.store(
+                                new_ewma, std::memory_order_relaxed);
 
 #ifdef BANDWIDTH_LEARNING_DEBUG
-                            LOG(INFO) << "[Bandwidth Normalization] dev" << dev_id
-                                << " actual_bw: " << (actual_bw_bps / 1e9) << " GB/s"
+                            LOG(INFO)
+                                << "[Bandwidth Normalization] dev" << dev_id
+                                << " actual_bw: " << (actual_bw_bps / 1e9)
+                                << " GB/s"
                                 << ", l_min: " << (l_min * 1e6) << " us"
-                                << ", s_size: " << (s_size / 1024) << " KB"
-                                << ", bw_probe: " << (bw_probe_bps / 1e9) << " GB/s"
-                                << ", raw_norm: " << (raw_norm_bps / 1e9) << " GB/s"
-                                << ", ewma: " << (current_ewma / 1e9) << " -> " << (new_ewma / 1e9) << " GB/s"
+                                << ", max_bw_ratio: " << (max_bw_ratio / 1e9)
+                                << " GB/s"
+                                << ", bw_probe: " << (bw_probe_bps / 1e9)
+                                << " GB/s"
+                                << ", raw_norm: " << (raw_norm_bps / 1e9)
+                                << " GB/s"
+                                << ", ewma: " << (current_ewma / 1e9) << " -> "
+                                << (new_ewma / 1e9) << " GB/s"
                                 << ", samples: " << sample_count;
 #endif
                         }
@@ -465,8 +478,10 @@ void DeviceQuota::printTrafficStats() {
             oss << "[RDMA Traffic] ";
             bool first = true;
             for (auto& [dev_id, dev] : devices_) {
-                uint64_t total = dev.total_bytes.load(std::memory_order_relaxed);
-                uint64_t last = dev.last_second_bytes.load(std::memory_order_relaxed);
+                uint64_t total =
+                    dev.total_bytes.load(std::memory_order_relaxed);
+                uint64_t last =
+                    dev.last_second_bytes.load(std::memory_order_relaxed);
                 uint64_t delta = total - last;
                 double throughput_gb_s = delta / 1e9;
                 double ewma_gb_s = dev.getEwmaBandwidth() / 1e9;
