@@ -79,6 +79,14 @@ struct XferBenchConfig {
     static bool enable_shared_quota;
     static std::string shared_quota_shm_path;
     static int timeslice_unit_ms;  // Time slice duration in ms
+
+    // Bandwidth monitoring options
+    static std::string bw_csv_output;
+    static int bw_interval_ms;
+
+    // Fault injection options
+    static int fault_device_id;
+    static int fault_power_percent;
 };
 
 struct XferMetricStats {

@@ -18,12 +18,19 @@
 #include <sys/epoll.h>
 
 #include <cassert>
+#include <thread>
+#include <chrono>
 
 #include "tent/transport/rdma/endpoint_store.h"
 #include "tent/common/utils/ip.h"
 #include "tent/common/utils/string_builder.h"
 #include "tent/common/utils/os.h"
 #include "tent/common/utils/random.h"
+
+// Fault injection support (defined in benchmark/main.cpp)
+extern "C" {
+    extern uint64_t getInjectedLatencyUs(int device_id);
+}
 
 namespace mooncake {
 namespace tent {
@@ -33,6 +40,14 @@ thread_local int tl_wid = -1;
 // Reduces memory and CPU overhead from timestamp tracking
 static constexpr uint64_t kLatencySampleRate = 100;  // Sample 1 in 100 slices
 thread_local uint64_t tl_slice_counter = 0;
+
+// Delayed release queue for fault injection
+struct DelayedRelease {
+    RdmaSlice* slice;
+    uint64_t ready_time_ns;  // When to process this slice
+    double inflight_lat;      // Latency to report
+};
+thread_local std::vector<DelayedRelease> tl_delayed_releases;
 
 // Latency breakdown statistics (thread-local for performance)
 // 5 stages: submit->enqueue, enqueue->dequeue, dequeue->post_send,
@@ -479,6 +494,24 @@ void Workers::asyncPollCq() {
     int num_slices = 0;
 
     uint64_t current_ts = getCurrentTimeInNano();
+
+    // Process delayed releases first (fault injection)
+    auto it = tl_delayed_releases.begin();
+    while (it != tl_delayed_releases.end()) {
+        if (current_ts >= it->ready_time_ns) {
+            // Time to process this delayed slice
+            RdmaSlice* slice = it->slice;
+            double transfer_lat_sec = it->inflight_lat / 1e6;
+            if (slice->retry_count == 0) {
+                device_quota_->release(slice->source_dev_id, slice->length,
+                                       transfer_lat_sec);
+            }
+            it = tl_delayed_releases.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
     std::vector<RdmaSlice*> slice_to_remove;
     for (auto& slice : worker.inflight_slice_set) {
         if (slice->word != PENDING) continue;
@@ -575,11 +608,33 @@ void Workers::asyncPollCq() {
                 enqueue_lat = 0;  // Not tracked for non-sampled
                 inflight_lat = (poll_ts - slice->enqueue_ts) / 1000.0;
             }
+
+            // Inject fault latency for EWMA learning
+            // This makes quota think the device is slower, reducing its usage
+            bool delay_release = false;
+            uint64_t injected_us = 0;
+            if (slice->source_dev_id >= 0) {
+                injected_us = getInjectedLatencyUs(slice->source_dev_id);
+                if (injected_us > 0 && injected_us != UINT64_MAX) {
+                    inflight_lat += injected_us;  // Add 1000us for 50% power
+                    delay_release = true;
+
+                    // Delay processing: put into delayed queue instead of immediate release
+                    // This simulates slow device without blocking current thread
+                    DelayedRelease dr;
+                    dr.slice = slice;
+                    dr.ready_time_ns = poll_ts + injected_us * 1000;  // Convert us to ns
+                    dr.inflight_lat = inflight_lat;
+                    tl_delayed_releases.push_back(dr);
+                }
+            }
+
             // Use inflight_lat (pure transfer time) to exclude queue wait time
             // This reflects actual device/NUMA performance, not scheduling
             // delay
-            double transfer_lat_sec = inflight_lat / 1e6;
-            if (slice->retry_count == 0) {
+            // Skip immediate release if delayed (will be processed later)
+            if (!delay_release && slice->retry_count == 0) {
+                double transfer_lat_sec = inflight_lat / 1e6;
                 device_quota_->release(slice->source_dev_id, slice->length,
                                        transfer_lat_sec);
             }
