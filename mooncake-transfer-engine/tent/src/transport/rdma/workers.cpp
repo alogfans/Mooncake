@@ -29,6 +29,39 @@ namespace mooncake {
 namespace tent {
 thread_local int tl_wid = -1;
 
+// Latency sampling configuration (only 1 in N slices are measured)
+// Reduces memory and CPU overhead from timestamp tracking
+static constexpr uint64_t kLatencySampleRate = 100;  // Sample 1 in 100 slices
+thread_local uint64_t tl_slice_counter = 0;
+
+// Latency breakdown statistics (thread-local for performance)
+// 5 stages: submit->enqueue, enqueue->dequeue, dequeue->post_send,
+// post_send->complete, complete->api_ready
+struct LatencyBreakdownStats {
+    uint64_t total_submit_enqueue_ns = 0;
+    uint64_t total_queue_wait_ns = 0;
+    uint64_t total_dequeue_post_ns = 0;
+    uint64_t total_post_complete_ns = 0;
+    uint64_t total_complete_api_ns = 0;
+    uint64_t total_samples = 0;
+    uint64_t last_print_ns = 0;
+
+    void reset() {
+        total_submit_enqueue_ns = 0;
+        total_queue_wait_ns = 0;
+        total_dequeue_post_ns = 0;
+        total_post_complete_ns = 0;
+        total_complete_api_ns = 0;
+        total_samples = 0;
+    }
+};
+thread_local LatencyBreakdownStats tl_latency_stats;
+
+// Helper: check if this slice should be sampled for latency measurement
+inline bool shouldSampleLatency() {
+    return (++tl_slice_counter % kLatencySampleRate) == 0;
+}
+
 // Error classification for CQ completions
 enum class ErrorClass { FLUSH, OTHER };
 
@@ -333,6 +366,11 @@ void Workers::asyncPostSend() {
         if (slice_list.num_slices == 0) continue;
         auto slice = slice_list.first;
         for (int id = 0; id < slice_list.num_slices; ++id) {
+            // Stage 2 end: when worker dequeues the slice (sampled only)
+            if (slice->user_submit_ts > 0) {  // Indicates this slice is marked for sampling
+                slice->dequeue_ts = getCurrentTimeInNano();
+            }
+
             auto status = generatePostPath(slice);
             if (!status.ok()) {
                 LOG(ERROR) << "Failed to generate post path for slice " << slice
@@ -372,7 +410,33 @@ void Workers::asyncPostSend() {
             continue;
         }
 
+        // Stage 3: Record post_send timestamps (only for sampled slices)
+        // First pass: check which slices need sampling
+        bool needs_timing = false;
+        for (int id = 0; id < (int)slices.size(); ++id) {
+            if (!slices[id]->failed && slices[id]->user_submit_ts > 0) {
+                needs_timing = true;
+                break;
+            }
+        }
+
+        uint64_t post_send_start = 0, post_send_end = 0;
+        if (needs_timing) {
+            post_send_start = getCurrentTimeInNano();
+        }
         int num_submitted = endpoint->submitSlices(slices, tl_wid);
+        if (needs_timing) {
+            post_send_end = getCurrentTimeInNano();
+        }
+
+        // Set post_send timestamps only for sampled slices
+        for (int id = 0; id < num_submitted; ++id) {
+            if (!slices[id]->failed && slices[id]->user_submit_ts > 0) {
+                slices[id]->post_send_start_ts = post_send_start;
+                slices[id]->post_send_end_ts = post_send_end;
+            }
+        }
+
         for (int id = 0; id < num_submitted; ++id) {
             auto slice = slices[id];
             if (slice->failed) {
@@ -386,8 +450,16 @@ void Workers::asyncPostSend() {
                 } else {
                     submit(slice);
                 }
-            } else {
-                slice->submit_ts = getCurrentTimeInNano();
+            }
+        }
+
+        // Stage 3: Set post_send_end timestamp for successfully submitted
+        // slices
+        for (int id = 0; id < num_submitted; ++id) {
+            auto slice = slices[id];
+            if (!slice->failed) {
+                slice->post_send_start_ts = post_send_start;
+                slice->post_send_end_ts = post_send_end;
             }
         }
 
@@ -410,6 +482,8 @@ void Workers::asyncPollCq() {
     std::vector<RdmaSlice*> slice_to_remove;
     for (auto& slice : worker.inflight_slice_set) {
         if (slice->word != PENDING) continue;
+        // Skip timeout check for non-sampled slices (enqueue_ts == 0)
+        if (slice->enqueue_ts == 0) continue;
         if (current_ts - slice->enqueue_ts > slice_timeout_ns_) {
             auto ep = slice->ep_weak_ptr;
             LOG(WARNING) << "Slice " << slice
@@ -433,9 +507,74 @@ void Workers::asyncPollCq() {
             auto slice = (RdmaSlice*)wc[i].wr_id;
             worker.inflight_slice_set.erase(slice);
             auto ep = slice->ep_weak_ptr;
-            double enqueue_lat =
-                (slice->submit_ts - slice->enqueue_ts) / 1000.0;
-            double inflight_lat = (poll_ts - slice->submit_ts) / 1000.0;
+
+            // Calculate 5-stage latency breakdown (only for sampled slices)
+            // user_submit_ts > 0 indicates this slice is sampled
+            if (slice->user_submit_ts > 0 && slice->dequeue_ts > 0 &&
+                slice->post_send_end_ts > 0) {
+                // Stage 4: Record complete_ts for sampled slices
+                slice->complete_ts = poll_ts;
+
+                uint64_t submit_enqueue_ns =
+                    slice->enqueue_ts - slice->user_submit_ts;
+                uint64_t queue_wait_ns = slice->dequeue_ts - slice->enqueue_ts;
+                uint64_t dequeue_post_ns =
+                    slice->post_send_end_ts - slice->dequeue_ts;
+                uint64_t post_complete_ns = poll_ts - slice->post_send_end_ts;
+
+                tl_latency_stats.total_submit_enqueue_ns += submit_enqueue_ns;
+                tl_latency_stats.total_queue_wait_ns += queue_wait_ns;
+                tl_latency_stats.total_dequeue_post_ns += dequeue_post_ns;
+                tl_latency_stats.total_post_complete_ns += post_complete_ns;
+                tl_latency_stats.total_samples++;
+
+                // Print every 5 seconds
+                if (poll_ts - tl_latency_stats.last_print_ns >= 5000000000ULL &&
+                    tl_latency_stats.total_samples > 0) {
+                    uint64_t n = tl_latency_stats.total_samples;
+                    double avg1 = tl_latency_stats.total_submit_enqueue_ns /
+                                  (double)n / 1000.0;
+                    double avg2 = tl_latency_stats.total_queue_wait_ns /
+                                  (double)n / 1000.0;
+                    double avg3 = tl_latency_stats.total_dequeue_post_ns /
+                                  (double)n / 1000.0;
+                    double avg4 = tl_latency_stats.total_post_complete_ns /
+                                  (double)n / 1000.0;
+                    double avg5 = tl_latency_stats.total_complete_api_ns /
+                                  (double)n / 1000.0;
+                    double total = avg1 + avg2 + avg3 + avg4 + avg5;
+
+                    LOG(INFO) << "[Latency Breakdown] samples=" << n
+                              << " | submit->enqueue: " << avg1 << " us"
+                              << " | enqueue->dequeue: " << avg2 << " us"
+                              << " | dequeue->post: " << avg3 << " us"
+                              << " | post->complete: " << avg4 << " us"
+                              << " | complete->api: " << avg5 << " us"
+                              << " | total: " << total << " us";
+
+                    tl_latency_stats.last_print_ns = poll_ts;
+                    tl_latency_stats.reset();
+                }
+            }
+
+            // For bandwidth learning: use timing (only if sampled)
+            double enqueue_lat = 0;
+            double inflight_lat = 0;
+            if (slice->enqueue_ts > 0 && slice->post_send_end_ts > 0) {
+                // Sampled slice: use actual breakdown timing
+                if (slice->dequeue_ts > 0) {
+                    enqueue_lat = (slice->dequeue_ts - slice->enqueue_ts) / 1000.0;
+                } else {
+                    enqueue_lat = (poll_ts - slice->enqueue_ts) / 1000.0;
+                }
+                inflight_lat = (poll_ts - slice->post_send_end_ts) / 1000.0;
+            } else {
+                // Non-sampled slice: use legacy timing estimation
+                // enqueue_ts might be 0 for non-sampled slices, so estimate
+                // This is a fallback for unsampled slices
+                enqueue_lat = 0;  // Not tracked for non-sampled
+                inflight_lat = (poll_ts - slice->enqueue_ts) / 1000.0;
+            }
             // Use inflight_lat (pure transfer time) to exclude queue wait time
             // This reflects actual device/NUMA performance, not scheduling
             // delay
@@ -488,9 +627,20 @@ void Workers::asyncPollCq() {
                     submit(slice);
                 }
             } else {
+                // Stage 5: Set api_ready_ts for sampled slices only
+                if (slice->user_submit_ts > 0) {
+                    slice->api_ready_ts = getCurrentTimeInNano();
+                }
                 num_slices += ep->acknowledge(slice, COMPLETED);
                 worker.perf.inflight_lat.add(inflight_lat);
                 worker.perf.enqueue_lat.add(enqueue_lat);
+
+                // Update Stage 5 statistics (only for sampled slices)
+                if (slice->complete_ts > 0 && slice->api_ready_ts > 0) {
+                    uint64_t complete_api_ns =
+                        slice->api_ready_ts - slice->complete_ts;
+                    tl_latency_stats.total_complete_api_ns += complete_api_ns;
+                }
             }
         }
     }

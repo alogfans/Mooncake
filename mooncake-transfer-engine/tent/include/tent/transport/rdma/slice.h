@@ -62,8 +62,25 @@ struct RdmaSlice {
     int qp_index = 0;
     int retry_count = 0;
     bool failed = false;
-    uint64_t enqueue_ts = 0;
-    uint64_t submit_ts = 0;
+
+    // Latency breakdown: 5 stages of end-to-end transfer
+    // Stage 1: Submit -> Enqueue
+    uint64_t user_submit_ts = 0;  // When user called submit()
+    uint64_t enqueue_ts = 0;      // When slice entered worker queue
+
+    // Stage 2: Queue Wait (enqueue -> dequeue)
+    uint64_t dequeue_ts = 0;  // When worker dequeued the slice
+
+    // Stage 3: Dequeue -> Post Send
+    uint64_t post_send_start_ts = 0;  // Before ibv_post_send()
+    uint64_t post_send_end_ts = 0;    // After ibv_post_send()
+
+    // Stage 4: Post Send -> Poll Success
+    uint64_t complete_ts = 0;  // When CQE was polled
+
+    // Stage 5: Poll Success -> API Ready
+    uint64_t api_ready_ts = 0;  // When status became queryable via API
+
     int priority = PRIO_HIGH;      // QoS priority
     uint64_t device_mask = ~0ULL;  // Device mask for quota allocation
 

@@ -253,7 +253,11 @@ Status RdmaTransport::submitTransferTasks(
     const int num_workers = params_->workers.num_workers;
     std::vector<RdmaSliceList> slice_lists(num_workers);
     std::vector<RdmaSlice*> slice_tails(num_workers, nullptr);
-    auto enqueue_ts = getCurrentTimeInNano();
+
+    // Latency sampling: 1 in 100 slices are measured
+    static constexpr uint64_t kLatencySampleRate = 100;
+    static std::atomic<uint64_t> g_slice_counter{0};
+    uint64_t current_slice_idx = g_slice_counter.fetch_add(1);
 
     static std::atomic<int> g_caller_threads(0);
     thread_local int tl_caller_id = g_caller_threads.fetch_add(1);
@@ -350,7 +354,17 @@ Status RdmaTransport::submitTransferTasks(
             slice->ep_weak_ptr = nullptr;
             slice->word = PENDING;
             slice->next = nullptr;
-            slice->enqueue_ts = enqueue_ts;
+
+            // Latency sampling: only set timestamps for sampled slices (1 in 100)
+            bool is_sampled = (current_slice_idx++ % kLatencySampleRate) == 0;
+            if (is_sampled) {
+                slice->user_submit_ts = getCurrentTimeInNano();
+                slice->enqueue_ts = getCurrentTimeInNano();
+            } else {
+                slice->user_submit_ts = 0;
+                slice->enqueue_ts = 0;
+            }
+
             slice->source_dev_id = slice_dev_ids[slice_idx];
             slice->source_location = source_location;
             // Query device rank for adaptive weight learning
