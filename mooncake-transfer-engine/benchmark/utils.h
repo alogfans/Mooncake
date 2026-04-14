@@ -85,7 +85,7 @@ struct XferBenchConfig {
     static int bw_monitor_interval_ms;
     static int bw_monitor_fault_time_ms;
     static int bw_monitor_recovery_time_ms;
-    static std::string bw_monitor_fault_mode;
+    static int bw_monitor_fault_percent;
 };
 
 struct XferMetricStats {

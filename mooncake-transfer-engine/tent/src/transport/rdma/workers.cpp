@@ -25,6 +25,11 @@
 #include "tent/common/utils/os.h"
 #include "tent/common/utils/random.h"
 
+// Global fault injection state (defined in benchmark/main.cpp)
+extern "C" {
+    extern double getDeviceRateFactor(int device_id);
+}
+
 namespace mooncake {
 namespace tent {
 thread_local int tl_wid = -1;
@@ -575,6 +580,18 @@ void Workers::asyncPollCq() {
                 enqueue_lat = 0;  // Not tracked for non-sampled
                 inflight_lat = (poll_ts - slice->enqueue_ts) / 1000.0;
             }
+
+            // Apply fault injection rate limiting (fallback if IBV rate limit unavailable)
+            // This simulates device slowdown by inflating the latency
+            // Quota's EWMA will detect this and reduce usage of the slowed device
+            if (slice->source_dev_id >= 0) {
+                double rate_factor = getDeviceRateFactor(slice->source_dev_id);
+                if (rate_factor < 1.0 && rate_factor > 0.0) {
+                    // Inflate latency: 50% speed → 2x latency
+                    inflight_lat = inflight_lat / rate_factor;
+                }
+            }
+
             // Use inflight_lat (pure transfer time) to exclude queue wait time
             // This reflects actual device/NUMA performance, not scheduling
             // delay

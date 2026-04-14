@@ -72,8 +72,8 @@ DEFINE_int32(bw_monitor_fault_time_ms, 1000,
              "Device fault simulation time in milliseconds (default: 1000ms = 1s)");
 DEFINE_int32(bw_monitor_recovery_time_ms, 3000,
              "Device recovery time in milliseconds (default: 3000ms = 3s)");
-DEFINE_string(bw_monitor_fault_mode, "half_speed",
-              "Fault simulation mode: half_speed|disconnect (default: half_speed)");
+DEFINE_int32(bw_monitor_fault_percent, 50,
+             "Device fault level: 0=disabled, 50=half speed, 100=full power (default: 50)");
 
 namespace mooncake {
 namespace tent {
@@ -114,7 +114,7 @@ std::string XferBenchConfig::bw_monitor_output;
 int XferBenchConfig::bw_monitor_interval_ms = 10;
 int XferBenchConfig::bw_monitor_fault_time_ms = 1000;
 int XferBenchConfig::bw_monitor_recovery_time_ms = 3000;
-std::string XferBenchConfig::bw_monitor_fault_mode = "half_speed";
+int XferBenchConfig::bw_monitor_fault_percent = 50;
 
 void XferBenchConfig::loadFromFlags() {
     seg_type = FLAGS_seg_type;
@@ -155,7 +155,7 @@ void XferBenchConfig::loadFromFlags() {
     bw_monitor_interval_ms = FLAGS_bw_monitor_interval_ms;
     bw_monitor_fault_time_ms = FLAGS_bw_monitor_fault_time_ms;
     bw_monitor_recovery_time_ms = FLAGS_bw_monitor_recovery_time_ms;
-    bw_monitor_fault_mode = FLAGS_bw_monitor_fault_mode;
+    bw_monitor_fault_percent = FLAGS_bw_monitor_fault_percent;
 }
 
 double XferMetricStats::percentile(double p) {

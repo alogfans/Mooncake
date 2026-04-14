@@ -28,8 +28,55 @@ using namespace mooncake::tent;
 
 // Global fault injection state (accessed by TENT RDMA transport)
 extern "C" {
-    // Bitmask of disabled devices (bit N = 1 means device N is disabled)
-    std::atomic<uint64_t> g_fault_device_mask{0};
+    // Fault injection state per device
+    // 0 = disabled, 100 = full power, 50 = half speed
+    struct DeviceFault {
+        std::atomic<int> percent{100};            // 0-100
+        std::atomic<uint32_t> rate_limit_mbps{0};  // IBV rate limit
+
+        void setPercent(int device_id, int value) {
+            percent.store(value, std::memory_order_relaxed);
+            if (value == 0) {
+                // Disabled - clear rate limit
+                rate_limit_mbps.store(0, std::memory_order_relaxed);
+            } else if (value < 100) {
+                // Rate limited - calculate Mbps
+                constexpr uint32_t MAX_LINK_MBPS = 200000;  // 200 Gbps
+                rate_limit_mbps.store(MAX_LINK_MBPS * value / 100, std::memory_order_relaxed);
+            } else {
+                // Full speed - clear rate limit
+                rate_limit_mbps.store(0, std::memory_order_relaxed);
+            }
+        }
+
+        int getPercent() const { return percent.load(std::memory_order_relaxed); }
+        bool isDisabled() const { return percent.load(std::memory_order_relaxed) == 0; }
+        double getRateFactor() const {
+            int p = percent.load(std::memory_order_relaxed);
+            return p == 0 ? 0.0 : p / 100.0;
+        }
+    };
+    static DeviceFault g_fault;
+
+    // Public API: 0=disabled, 50=half, 100=full
+    void setDevicePower(int device_id, int percent) {
+        g_fault.setPercent(device_id, percent);
+        LOG(INFO) << "[FaultInjection] Device " << device_id
+                  << " power: " << percent << "%";
+    }
+
+    // Getter functions for TENT transport layer
+    bool isDeviceDisabled(int device_id) {
+        return g_fault.isDisabled();
+    }
+
+    double getDeviceRateFactor(int device_id) {
+        return g_fault.getRateFactor();
+    }
+
+    uint32_t getDeviceRateLimitMbps(int device_id) {
+        return g_fault.rate_limit_mbps.load(std::memory_order_relaxed);
+    }
 }
 
 // ============================================================================
@@ -57,7 +104,8 @@ public:
           active_devices_(2),
           fault_time_ms_(1000),      // Default: fault at 1 second
           recovery_time_ms_(3000),   // Default: recover at 3 seconds
-          sampling_interval_ms_(10)  // Default: 10ms sampling
+          sampling_interval_ms_(10),  // Default: 10ms sampling
+          fault_percent_(50)         // Default: 50% power
     {}
 
     void setFaultTiming(uint64_t fault_ms, uint64_t recovery_ms) {
@@ -77,8 +125,8 @@ public:
         output_file_ = filename;
     }
 
-    void setFaultMode(const std::string& mode) {
-        fault_mode_ = mode;
+    void setFaultPercent(int percent) {
+        fault_percent_ = percent;
     }
 
     void start() {
@@ -202,26 +250,18 @@ private:
             // Check for fault trigger
             if (elapsed_ms >= fault_time_ms_ && !fault_active_) {
                 fault_active_ = true;
-                LOG(WARNING) << "=== DEVICE FAULT SIMULATED: " << fault_mode_
-                             << " at t=" << (elapsed_ms / 1000.0) << "s ===";
-                if (fault_mode_ == "half_speed") {
-                    active_devices_ = std::max(1, active_devices_ / 2);
-                    // Disable device 0 for half bandwidth (only device 1 active)
-                    g_fault_device_mask.store(0x1, std::memory_order_relaxed);  // Bit 0 = device 0
-                } else if (fault_mode_ == "disconnect") {
-                    active_devices_ = 1;
-                    // Disable device 0 completely
-                    g_fault_device_mask.store(0x1, std::memory_order_relaxed);  // Bit 0 = device 0
-                }
+                LOG(WARNING) << "=== DEVICE FAULT INJECTED: " << fault_percent_
+                             << "% at t=" << (elapsed_ms / 1000.0) << "s ===";
+                setDevicePower(0, fault_percent_);
+                active_devices_ = fault_percent_ > 0 ? 2 : 1;
             }
 
             // Check for recovery
             if (elapsed_ms >= recovery_time_ms_ && fault_active_) {
                 fault_active_ = false;
-                active_devices_ = 2;  // Restore to 2 devices
+                active_devices_ = 2;
                 LOG(INFO) << "=== DEVICE RECOVERY at t=" << (elapsed_ms / 1000.0) << "s ===";
-                // Re-enable device 0
-                g_fault_device_mask.store(0, std::memory_order_relaxed);  // Clear all faults
+                setDevicePower(0, 100);  // 100% = full power
             }
 
             // Calculate instantaneous bandwidth
@@ -280,7 +320,7 @@ private:
     uint64_t fault_time_ms_;
     uint64_t recovery_time_ms_;
     uint64_t sampling_interval_ms_;
-    std::string fault_mode_;
+    int fault_percent_;
     std::string output_file_;
     std::vector<Sample> samples_;
     std::thread monitor_thread_;
@@ -406,14 +446,14 @@ int main(int argc, char* argv[]) {
         g_bandwidth_monitor->setSamplingInterval(XferBenchConfig::bw_monitor_interval_ms);
         g_bandwidth_monitor->setFaultTiming(XferBenchConfig::bw_monitor_fault_time_ms,
                                              XferBenchConfig::bw_monitor_recovery_time_ms);
-        g_bandwidth_monitor->setFaultMode(XferBenchConfig::bw_monitor_fault_mode);
+        g_bandwidth_monitor->setFaultPercent(XferBenchConfig::bw_monitor_fault_percent);
 
         LOG(INFO) << "High-precision bandwidth monitoring enabled:";
         LOG(INFO) << "  Output file: " << XferBenchConfig::bw_monitor_output;
         LOG(INFO) << "  Sampling interval: " << XferBenchConfig::bw_monitor_interval_ms << " ms";
         LOG(INFO) << "  Fault time: " << XferBenchConfig::bw_monitor_fault_time_ms << " ms";
         LOG(INFO) << "  Recovery time: " << XferBenchConfig::bw_monitor_recovery_time_ms << " ms";
-        LOG(INFO) << "  Fault mode: " << XferBenchConfig::bw_monitor_fault_mode;
+        LOG(INFO) << "  Fault level: " << XferBenchConfig::bw_monitor_fault_percent << "%";
     }
 
     std::unique_ptr<BenchRunner> runner;

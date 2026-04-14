@@ -25,7 +25,7 @@
 
 // Global fault injection state (defined in benchmark/main.cpp)
 extern "C" {
-    extern std::atomic<uint64_t> g_fault_device_mask;
+    extern bool isDeviceDisabled(int device_id);
 }
 
 namespace mooncake {
@@ -74,9 +74,6 @@ Status DeviceQuota::allocate(uint64_t total_length, uint32_t num_slices,
                              uint64_t device_mask) {
     slice_dev_ids.clear();
     slice_dev_ids.reserve(num_slices);  // Pre-allocate to avoid reallocation
-
-    // Apply fault injection mask at the top level
-    device_mask &= ~g_fault_device_mask.load(std::memory_order_relaxed);  // Remove disabled devices from allowed set
 
     // Fast path: cached location entry lookup
     const Topology::MemEntry* entry = nullptr;
@@ -129,6 +126,7 @@ Status DeviceQuota::allocate(uint64_t total_length, uint32_t num_slices,
             for (int dev_id : entry->device_list[rank]) {
                 if (!devices_.count(dev_id)) continue;
                 if ((device_mask & (1ULL << dev_id)) == 0) continue;
+                if (isDeviceDisabled(dev_id)) continue;  // Fault injection
                 tl_eligible.push_back(dev_id);
             }
             if (tl_eligible.empty()) break;
@@ -254,6 +252,7 @@ Status DeviceQuota::buildCandidates(const Topology::MemEntry* entry,
         for (int dev_id : entry->device_list[rank]) {
             if (!devices_.count(dev_id) || !(device_mask & (1ULL << dev_id)))
                 continue;
+            if (isDeviceDisabled(dev_id)) continue;  // Fault injection
             const auto& dev = devices_[dev_id];
             bool is_cross_numa = (rank == 2);
             // Cross-NUMA devices: only use if their local node is idle
