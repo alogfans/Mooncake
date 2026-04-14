@@ -79,6 +79,13 @@ struct XferBenchConfig {
     static bool enable_shared_quota;
     static std::string shared_quota_shm_path;
     static int timeslice_unit_ms;  // Time slice duration in ms
+
+    // High-precision bandwidth monitoring options
+    static std::string bw_monitor_output;
+    static int bw_monitor_interval_ms;
+    static int bw_monitor_fault_time_ms;
+    static int bw_monitor_recovery_time_ms;
+    static std::string bw_monitor_fault_mode;
 };
 
 struct XferMetricStats {

@@ -23,6 +23,11 @@
 // Enable bandwidth learning debug logging
 // #define BANDWIDTH_LEARNING_DEBUG 1
 
+// Global fault injection state (defined in benchmark/main.cpp)
+extern "C" {
+    extern std::atomic<uint64_t> g_fault_device_mask;
+}
+
 namespace mooncake {
 namespace tent {
 
@@ -69,6 +74,9 @@ Status DeviceQuota::allocate(uint64_t total_length, uint32_t num_slices,
                              uint64_t device_mask) {
     slice_dev_ids.clear();
     slice_dev_ids.reserve(num_slices);  // Pre-allocate to avoid reallocation
+
+    // Apply fault injection mask at the top level
+    device_mask &= ~g_fault_device_mask.load(std::memory_order_relaxed);  // Remove disabled devices from allowed set
 
     // Fast path: cached location entry lookup
     const Topology::MemEntry* entry = nullptr;
