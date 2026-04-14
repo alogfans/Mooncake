@@ -23,11 +23,6 @@
 // Enable bandwidth learning debug logging
 // #define BANDWIDTH_LEARNING_DEBUG 1
 
-// Global fault injection state (defined in benchmark/main.cpp)
-extern "C" {
-    extern bool isDeviceDisabled(int device_id);
-}
-
 namespace mooncake {
 namespace tent {
 
@@ -126,7 +121,6 @@ Status DeviceQuota::allocate(uint64_t total_length, uint32_t num_slices,
             for (int dev_id : entry->device_list[rank]) {
                 if (!devices_.count(dev_id)) continue;
                 if ((device_mask & (1ULL << dev_id)) == 0) continue;
-                if (isDeviceDisabled(dev_id)) continue;  // Fault injection
                 tl_eligible.push_back(dev_id);
             }
             if (tl_eligible.empty()) break;
@@ -252,7 +246,6 @@ Status DeviceQuota::buildCandidates(const Topology::MemEntry* entry,
         for (int dev_id : entry->device_list[rank]) {
             if (!devices_.count(dev_id) || !(device_mask & (1ULL << dev_id)))
                 continue;
-            if (isDeviceDisabled(dev_id)) continue;  // Fault injection
             const auto& dev = devices_[dev_id];
             bool is_cross_numa = (rank == 2);
             // Cross-NUMA devices: only use if their local node is idle

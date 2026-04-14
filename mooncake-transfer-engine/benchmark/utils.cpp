@@ -63,18 +63,6 @@ DEFINE_int32(
     timeslice_unit_ms, 2,
     "Time slice duration in milliseconds for QoS scheduling (default: 2ms)");
 
-// High-precision bandwidth monitoring options
-DEFINE_string(bw_monitor_output, "",
-              "Output CSV file for high-precision bandwidth monitoring");
-DEFINE_int32(bw_monitor_interval_ms, 10,
-             "Sampling interval in milliseconds for bandwidth monitoring (default: 10ms)");
-DEFINE_int32(bw_monitor_fault_time_ms, 1000,
-             "Device fault simulation time in milliseconds (default: 1000ms = 1s)");
-DEFINE_int32(bw_monitor_recovery_time_ms, 3000,
-             "Device recovery time in milliseconds (default: 3000ms = 3s)");
-DEFINE_int32(bw_monitor_fault_percent, 50,
-             "Device fault level: 0=disabled, 50=half speed, 100=full power (default: 50)");
-
 namespace mooncake {
 namespace tent {
 std::string XferBenchConfig::seg_name;
@@ -109,13 +97,6 @@ bool XferBenchConfig::enable_shared_quota = false;
 std::string XferBenchConfig::shared_quota_shm_path;
 int XferBenchConfig::timeslice_unit_ms = 2;
 
-// High-precision bandwidth monitoring options
-std::string XferBenchConfig::bw_monitor_output;
-int XferBenchConfig::bw_monitor_interval_ms = 10;
-int XferBenchConfig::bw_monitor_fault_time_ms = 1000;
-int XferBenchConfig::bw_monitor_recovery_time_ms = 3000;
-int XferBenchConfig::bw_monitor_fault_percent = 50;
-
 void XferBenchConfig::loadFromFlags() {
     seg_type = FLAGS_seg_type;
     seg_name = FLAGS_seg_name;
@@ -149,13 +130,6 @@ void XferBenchConfig::loadFromFlags() {
     enable_shared_quota = FLAGS_enable_shared_quota;
     shared_quota_shm_path = FLAGS_shared_quota_shm_path;
     timeslice_unit_ms = FLAGS_timeslice_unit_ms;
-
-    // High-precision bandwidth monitoring options
-    bw_monitor_output = FLAGS_bw_monitor_output;
-    bw_monitor_interval_ms = FLAGS_bw_monitor_interval_ms;
-    bw_monitor_fault_time_ms = FLAGS_bw_monitor_fault_time_ms;
-    bw_monitor_recovery_time_ms = FLAGS_bw_monitor_recovery_time_ms;
-    bw_monitor_fault_percent = FLAGS_bw_monitor_fault_percent;
 }
 
 double XferMetricStats::percentile(double p) {

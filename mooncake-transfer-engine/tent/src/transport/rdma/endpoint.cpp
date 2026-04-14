@@ -22,8 +22,6 @@
 #include <iomanip>
 #include <queue>
 #include <mutex>
-#include <thread>
-#include <chrono>
 
 #include "tent/common/status.h"
 #include "tent/common/types.h"
@@ -31,11 +29,6 @@
 #include "tent/common/utils/os.h"
 #include "tent/common/utils/string_builder.h"
 #include "tent/thirdparty/nlohmann/json.h"
-
-// Rate limit support for fault injection
-extern "C" {
-    extern uint32_t getDeviceRateLimitMbps(int device_id);
-}
 
 namespace mooncake {
 namespace tent {
@@ -751,52 +744,6 @@ int RdmaEndPoint::setupOneQP(int qp_index, const std::string& peer_gid,
         LOG(ERROR) << ss.str();
         if (reply_msg) *reply_msg = ss.str();
         return -1;
-    }
-
-    // Apply IBV rate limit if configured (for fault injection testing)
-    // This is a debug feature that requires hardware support (ConnectX-5+)
-    // Extract device_id from context name (e.g., "rocep5s0f0" -> index in context_set)
-    // For simplicity, we'll use a global counter to track which device this context belongs to
-    static std::unordered_map<RdmaContext*, int> context_device_map;
-    static std::mutex context_device_map_mutex;
-    static int next_device_id = 0;
-
-    int device_id = -1;
-    {
-        std::lock_guard<std::mutex> lock(context_device_map_mutex);
-        auto it = context_device_map.find(context_);
-        if (it == context_device_map.end()) {
-            device_id = next_device_id++;
-            context_device_map[context_] = device_id;
-        } else {
-            device_id = it->second;
-        }
-    }
-
-    uint32_t rate_limit_mbps = getDeviceRateLimitMbps(device_id);
-    if (rate_limit_mbps > 0) {
-#ifdef IBV_QP_RATE_LIMIT
-        memset(&attr, 0, sizeof(attr));
-        attr.rate_limit = rate_limit_mbps;  // Units: 1 Mbps
-        ret = context_->verbs_.ibv_modify_qp(qp, &attr, IBV_QP_RATE_LIMIT);
-        if (ret) {
-            // Rate limit not supported by hardware or driver - log but don't fail
-            static std::once_flag flag;
-            std::call_once(flag, []() {
-                LOG(WARNING) << "IBV_QP_RATE_LIMIT not supported by hardware/driver, "
-                             << "falling back to software rate limiting";
-            });
-        } else {
-            VLOG(1) << "Set QP rate limit on device " << device_id
-                    << ": " << rate_limit_mbps << " Mbps";
-        }
-#else
-        static std::once_flag flag;
-        std::call_once(flag, []() {
-            LOG(WARNING) << "IBV_QP_RATE_LIMIT not defined in headers, "
-                         << "falling back to software rate limiting";
-        });
-#endif
     }
 
     return 0;
