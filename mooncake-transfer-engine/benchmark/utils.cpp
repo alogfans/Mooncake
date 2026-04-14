@@ -63,14 +63,6 @@ DEFINE_int32(
     timeslice_unit_ms, 2,
     "Time slice duration in milliseconds for QoS scheduling (default: 2ms)");
 
-// Fault injection options (for testing quota scheduling)
-DEFINE_int32(fault_device_id, 0,
-             "Device ID to inject fault (0-based, default: 0)");
-DEFINE_int32(fault_time_ms, 1000,
-             "Time to inject fault in milliseconds (default: 1000ms = 1s)");
-DEFINE_int32(fault_power_percent, 50,
-             "Device power after fault: 0=disabled, 50=half, 100=full (default: 50)");
-
 namespace mooncake {
 namespace tent {
 std::string XferBenchConfig::seg_name;
@@ -105,11 +97,6 @@ bool XferBenchConfig::enable_shared_quota = false;
 std::string XferBenchConfig::shared_quota_shm_path;
 int XferBenchConfig::timeslice_unit_ms = 2;
 
-// Fault injection options
-int XferBenchConfig::fault_device_id = 0;
-int XferBenchConfig::fault_time_ms = 1000;
-int XferBenchConfig::fault_power_percent = 50;
-
 void XferBenchConfig::loadFromFlags() {
     seg_type = FLAGS_seg_type;
     seg_name = FLAGS_seg_name;
@@ -143,11 +130,6 @@ void XferBenchConfig::loadFromFlags() {
     enable_shared_quota = FLAGS_enable_shared_quota;
     shared_quota_shm_path = FLAGS_shared_quota_shm_path;
     timeslice_unit_ms = FLAGS_timeslice_unit_ms;
-
-    // Fault injection options
-    fault_device_id = FLAGS_fault_device_id;
-    fault_time_ms = FLAGS_fault_time_ms;
-    fault_power_percent = FLAGS_fault_power_percent;
 }
 
 double XferMetricStats::percentile(double p) {

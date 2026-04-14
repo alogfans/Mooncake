@@ -18,50 +18,7 @@
 #include "te_backend.h"
 #include "tent_backend.h"
 
-#include <atomic>
-#include <thread>
-#include <chrono>
-
 using namespace mooncake::tent;
-
-// ============================================================================
-// Fault Injection (for testing quota scheduling)
-// ============================================================================
-extern "C" {
-    // Per-device power state: 0=disabled, 50=half speed, 100=full
-    static std::atomic<int> g_device_power[64] = {
-        100, 100, 100, 100, 100, 100, 100, 100,
-        100, 100, 100, 100, 100, 100, 100, 100,
-        100, 100, 100, 100, 100, 100, 100, 100,
-        100, 100, 100, 100, 100, 100, 100, 100,
-        100, 100, 100, 100, 100, 100, 100, 100,
-        100, 100, 100, 100, 100, 100, 100, 100,
-        100, 100, 100, 100, 100, 100, 100, 100,
-        100, 100, 100, 100, 100, 100, 100, 100
-    };
-
-    // Set device power (0=disabled, 50=half, 100=full)
-    void setDevicePower(int device_id, int percent) {
-        if (device_id >= 0 && device_id < 64) {
-            g_device_power[device_id].store(percent, std::memory_order_relaxed);
-            LOG(INFO) << "[FaultInject] Dev" << device_id << " power=" << percent << "%";
-        }
-    }
-
-    // Check if device is disabled (for quota filtering)
-    bool isDeviceDisabled(int device_id) {
-        if (device_id < 0 || device_id >= 64) return false;
-        return g_device_power[device_id].load(std::memory_order_relaxed) == 0;
-    }
-
-    // Get device power factor (for rate limiting)
-    // Returns: 0.0 (disabled) to 1.0 (full power)
-    double getDevicePowerFactor(int device_id) {
-        if (device_id < 0 || device_id >= 64) return 1.0;
-        int power = g_device_power[device_id].load(std::memory_order_relaxed);
-        return power / 100.0;
-    }
-}
 
 int processBatchSizes(BenchRunner& runner, size_t block_size, size_t batch_size,
                       int num_threads) {
@@ -159,20 +116,6 @@ int main(int argc, char* argv[]) {
     }
     printStatsHeader();
     bool interrupted = false;
-
-    // Start fault injection thread if configured
-    std::thread fault_thread;
-    if (XferBenchConfig::fault_time_ms > 0) {
-        fault_thread = std::thread([]() {
-            std::this_thread::sleep_for(
-                std::chrono::milliseconds(XferBenchConfig::fault_time_ms));
-            setDevicePower(XferBenchConfig::fault_device_id,
-                          XferBenchConfig::fault_power_percent);
-        });
-        LOG(INFO) << "Fault injection scheduled: Dev" << XferBenchConfig::fault_device_id
-                  << " -> " << XferBenchConfig::fault_power_percent
-                  << "% at t=" << XferBenchConfig::fault_time_ms << "ms";
-    }
     for (int num_threads = XferBenchConfig::start_num_threads;
          !interrupted && num_threads <= XferBenchConfig::max_num_threads;
          num_threads *= 2) {
@@ -196,7 +139,5 @@ int main(int argc, char* argv[]) {
         }
         runner->stopInitiator();
     }
-
-    if (fault_thread.joinable()) fault_thread.join();
     return 0;
 }

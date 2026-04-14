@@ -18,20 +18,12 @@
 #include <sys/epoll.h>
 
 #include <cassert>
-#include <thread>
-#include <chrono>
 
 #include "tent/transport/rdma/endpoint_store.h"
 #include "tent/common/utils/ip.h"
 #include "tent/common/utils/string_builder.h"
 #include "tent/common/utils/os.h"
 #include "tent/common/utils/random.h"
-
-// Fault injection support (defined in benchmark/main.cpp)
-extern "C" {
-    extern double getDevicePowerFactor(int device_id);
-    extern bool isDeviceDisabled(int device_id);
-}
 
 namespace mooncake {
 namespace tent {
@@ -428,25 +420,6 @@ void Workers::asyncPostSend() {
             }
         }
 
-        // Apply software rate limiting for fault injection
-        // Check all slices for rate limiting, sleep if any device is throttled
-        double min_power_factor = 1.0;
-        for (size_t id = 0; id < slices.size(); ++id) {
-            if (slices[id]->source_dev_id >= 0) {
-                double factor = getDevicePowerFactor(slices[id]->source_dev_id);
-                if (factor < min_power_factor) min_power_factor = factor;
-            }
-        }
-        if (min_power_factor < 1.0 && min_power_factor > 0.0) {
-            // Sleep to reduce rate: e.g., 50% power → 2x time per batch
-            // Base delay: 10us at full power, scale by 1/factor
-            static constexpr uint64_t kBaseDelayUs = 10;
-            uint64_t delay_us = kBaseDelayUs / min_power_factor - kBaseDelayUs;
-            if (delay_us > 0 && delay_us < 10000) {  // Cap at 10ms
-                std::this_thread::sleep_for(std::chrono::microseconds(delay_us));
-            }
-        }
-
         uint64_t post_send_start = 0, post_send_end = 0;
         if (needs_timing) {
             post_send_start = getCurrentTimeInNano();
@@ -530,23 +503,6 @@ void Workers::asyncPollCq() {
         int nr_poll = cq->poll(kPollCount, wc);
         if (nr_poll < 0) continue;
         auto poll_ts = getCurrentTimeInNano();
-
-        // Inject hardware fault for disabled devices
-        // This simulates real RDMA hardware failure (ibv_poll_cq returns error)
-        for (int i = 0; i < nr_poll; ++i) {
-            auto slice = (RdmaSlice*)wc[i].wr_id;
-            if (slice && slice->source_dev_id >= 0 && isDeviceDisabled(slice->source_dev_id)) {
-                // Simulate hardware timeout error
-                wc[i].status = IBV_WC_RESP_TIMEOUT_ERR;
-                static std::atomic<int> fault_log_count{0};
-                int count = fault_log_count.fetch_add(1, std::memory_order_relaxed);
-                if (count < 3) {
-                    LOG(WARNING) << "[FaultInject] Simulated HW failure on Dev"
-                                 << slice->source_dev_id << " for slice " << slice;
-                }
-            }
-        }
-
         for (int i = 0; i < nr_poll; ++i) {
             auto slice = (RdmaSlice*)wc[i].wr_id;
             worker.inflight_slice_set.erase(slice);
