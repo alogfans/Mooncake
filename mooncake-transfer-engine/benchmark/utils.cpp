@@ -63,18 +63,6 @@ DEFINE_int32(
     timeslice_unit_ms, 2,
     "Time slice duration in milliseconds for QoS scheduling (default: 2ms)");
 
-// Bandwidth monitoring options
-DEFINE_string(bw_csv_output, "bandwidth.csv",
-             "Output CSV file for bandwidth monitoring");
-DEFINE_int32(bw_interval_ms, 10,
-             "Bandwidth sampling interval in milliseconds (default: 10ms)");
-
-// Fault injection options
-DEFINE_int32(fault_device_id, 0,
-             "Device ID to inject fault (default: 0)");
-DEFINE_int32(fault_power_percent, 0,
-             "Device power during fault (default: 0=disabled, <100=disabled, 100=normal)");
-
 namespace mooncake {
 namespace tent {
 std::string XferBenchConfig::seg_name;
@@ -109,14 +97,6 @@ bool XferBenchConfig::enable_shared_quota = false;
 std::string XferBenchConfig::shared_quota_shm_path;
 int XferBenchConfig::timeslice_unit_ms = 2;
 
-// Bandwidth monitoring options
-std::string XferBenchConfig::bw_csv_output = "bandwidth.csv";
-int XferBenchConfig::bw_interval_ms = 10;
-
-// Fault injection options
-int XferBenchConfig::fault_device_id = 0;
-int XferBenchConfig::fault_power_percent = 50;
-
 void XferBenchConfig::loadFromFlags() {
     seg_type = FLAGS_seg_type;
     seg_name = FLAGS_seg_name;
@@ -150,14 +130,6 @@ void XferBenchConfig::loadFromFlags() {
     enable_shared_quota = FLAGS_enable_shared_quota;
     shared_quota_shm_path = FLAGS_shared_quota_shm_path;
     timeslice_unit_ms = FLAGS_timeslice_unit_ms;
-
-    // Bandwidth monitoring options
-    bw_csv_output = FLAGS_bw_csv_output;
-    bw_interval_ms = FLAGS_bw_interval_ms;
-
-    // Fault injection options
-    fault_device_id = FLAGS_fault_device_id;
-    fault_power_percent = FLAGS_fault_power_percent;
 }
 
 double XferMetricStats::percentile(double p) {
