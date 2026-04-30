@@ -44,6 +44,7 @@ class Topology {
         std::string pci_bus_id;
         NicType type;
         int numa_node;
+        double bw_gbps{200.0};
     };
 
     using MemID = int;
@@ -94,6 +95,8 @@ class Topology {
 
     const std::string findNearMem(const std::string& name,
                                   MemType type = MEM_HOST) const;
+
+    Status detectNicBandwidth();
 
    public:
     std::vector<NicEntry> nic_list_;

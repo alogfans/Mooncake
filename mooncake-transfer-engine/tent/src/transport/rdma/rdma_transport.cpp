@@ -363,6 +363,22 @@ Status RdmaTransport::submitTransferTasks(
         num_slices = std::max<uint64_t>(
             1, std::min<uint64_t>(num_slices, max_slice_count));
 
+        auto source_locations =
+            Platform::getLoader().getLocation(request.source, 1, false);
+        std::string source_location = source_locations.empty()
+                                          ? kWildcardLocation
+                                          : source_locations[0].location;
+
+        std::vector<int> slice_dev_ids;
+        auto alloc_status = workers_->getDeviceQuota()->allocate(
+            request.length, static_cast<uint32_t>(num_slices),
+            source_location, slice_dev_ids);
+        if (!alloc_status.ok()) {
+            LOG(WARNING) << "Device quota allocation failed: "
+                         << alloc_status.message();
+            return alloc_status;
+        }
+
         uint64_t offset = 0;
         for (uint64_t slice_idx = 0; slice_idx < num_slices; ++slice_idx) {
             uint64_t length =
@@ -377,8 +393,12 @@ Status RdmaTransport::submitTransferTasks(
             slice->word = PENDING;
             slice->next = nullptr;
             slice->enqueue_ts = enqueue_ts;
+            if (slice_idx < slice_dev_ids.size()) {
+                slice->source_dev_id = slice_dev_ids[slice_idx];
+            }
             task.num_slices++;
             offset += length;
+
             int part_id =
                 ((enable_spray ? submit_slices : static_cast<int>(slice_idx)) /
                  num_devices) %

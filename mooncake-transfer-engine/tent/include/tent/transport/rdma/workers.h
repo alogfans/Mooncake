@@ -53,6 +53,8 @@ class Workers {
 
     Status cancel(RdmaSliceList &slice_list);
 
+    DeviceQuota* getDeviceQuota() { return device_quota_.get(); }
+
    private:
     using Task = std::function<void()>;
 

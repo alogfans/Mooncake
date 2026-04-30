@@ -523,14 +523,10 @@ int Workers::getDeviceRank(const RouteHint& hint, int device_id) {
 Status Workers::selectOptimalDevice(RouteHint& source, RouteHint& target,
                                     RdmaSlice* slice) {
     auto& worker = worker_context_[tl_wid];
-    if (slice->source_dev_id < 0) {
-        CHECK_STATUS(device_quota_->allocate(
-            slice->length, source.buffer->location, slice->source_dev_id));
-    }
 
     if (slice->source_dev_id < 0)
         return Status::DeviceNotFound(
-            "No device could access the slice memory region" LOC_MARK);
+            "Source device not allocated by quota system" LOC_MARK);
 
     auto& rail = worker.rails[target.segment->machine_id];
     if (!rail.ready() || target.topo != rail.remote())
@@ -559,23 +555,6 @@ Status Workers::selectOptimalDevice(RouteHint& source, RouteHint& target,
             break;
         }
     }
-    /*
-    if (slice->target_dev_id < 0) {
-        int mapped_dev_id = rail.findBestRemoteDevice(
-            slice->source_dev_id, target.topo_entry->numa_node);
-        for (size_t rank = 0; rank < Topology::DevicePriorityRanks; ++rank) {
-            auto &list = target.topo_entry->device_list[rank];
-            if (list.empty()) continue;
-            auto it = std::find(list.begin(), list.end(), mapped_dev_id);
-            if (it != list.end()) {
-                slice->target_dev_id = mapped_dev_id;
-                break;
-            }
-            slice->target_dev_id = list[SimpleRandom::Get().next(list.size())];
-            break;
-        }
-    }
-    */
 
     if (slice->target_dev_id < 0)
         return Status::DeviceNotFound(

@@ -118,6 +118,7 @@ Status Topology::parse(const std::string& json_content) {
                 nic.type =
                     static_cast<NicType>(item.value("type", NIC_UNKNOWN));
                 nic.numa_node = item.value("numa_node", -1);
+                nic.bw_gbps = item.value("bw_gbps", 0.0);
                 nic_list_.push_back(nic);
             }
         }
@@ -146,6 +147,8 @@ Status Topology::parse(const std::string& json_content) {
     } catch (std::exception& e) {
         return Status::MalformedJson(std::string(e.what()) + LOC_MARK);
     }
+
+    detectNicBandwidth();
     return Status::OK();
 }
 
@@ -231,6 +234,62 @@ const std::string Topology::findNearMem(const std::string& name,
         }
     }
     return "";
+}
+
+Status Topology::detectNicBandwidth() {
+    for (auto& nic : nic_list_) {
+        if (nic.type != NIC_RDMA) continue;
+
+        if (nic.bw_gbps > 0) {
+            continue;
+        }
+
+        std::string device_name = nic.name;
+        size_t colon_pos = device_name.find(':');
+        if (colon_pos != std::string::npos) {
+            device_name = device_name.substr(0, colon_pos);
+        }
+
+        std::string rate_path = "/sys/class/infiniband/" + device_name + "/ports/1/rate";
+        std::ifstream rate_file(rate_path);
+        if (rate_file.is_open()) {
+            std::string rate_str;
+            std::getline(rate_file, rate_str);
+
+            double gbps = 200.0;
+            if (rate_str.find("100") != std::string::npos ||
+                rate_str.find("100Gb") != std::string::npos) {
+                gbps = 100.0;
+            } else if (rate_str.find("200") != std::string::npos ||
+                       rate_str.find("200Gb") != std::string::npos ||
+                       rate_str.find("HDR") != std::string::npos) {
+                gbps = 200.0;
+            } else if (rate_str.find("EDR") != std::string::npos) {
+                gbps = 100.0;
+            } else if (rate_str.find("50") != std::string::npos ||
+                       rate_str.find("50Gb") != std::string::npos) {
+                gbps = 50.0;
+            } else if (rate_str.find("25") != std::string::npos ||
+                       rate_str.find("25Gb") != std::string::npos ||
+                       rate_str.find("IB4") != std::string::npos) {
+                gbps = 25.0;
+            } else if (rate_str.find("10") != std::string::npos ||
+                       rate_str.find("10Gb") != std::string::npos) {
+                gbps = 10.0;
+            } else if (rate_str.find("40") != std::string::npos ||
+                       rate_str.find("40Gb") != std::string::npos) {
+                gbps = 40.0;
+            } else if (rate_str.find("56") != std::string::npos ||
+                       rate_str.find("FDR") != std::string::npos) {
+                gbps = 56.0;
+            }
+
+            nic.bw_gbps = gbps;
+        } else {
+            nic.bw_gbps = 200.0;
+        }
+    }
+    return Status::OK();
 }
 
 }  // namespace tent

@@ -59,10 +59,6 @@ class DeviceQuota {
         uint64_t padding1[7];
         std::atomic<uint64_t> diffusion_active_bytes{0};
         uint64_t padding2[7];
-        std::atomic<double> beta0{0.0};  // Fixed latency (PCIe, setup)
-        uint64_t padding3[7];
-        std::atomic<double> beta1{1.0};  // Effective bandwidth correction
-        uint64_t padding4[7];
     };
 
    public:
@@ -78,8 +74,10 @@ class DeviceQuota {
 
     Status enableSharedQuota(const std::string &shm_name);
 
-    Status allocate(uint64_t length, const std::string &location,
-                    int &chosen_dev_id);
+    Status allocate(uint64_t total_length, uint32_t num_slices,
+                    const std::string &location,
+                    std::vector<int> &slice_dev_ids,
+                    uint64_t device_mask = ~0ULL);
 
     Status release(int dev_id, uint64_t length, double latency);
 
@@ -104,6 +102,40 @@ class DeviceQuota {
 
     void setCrossNumaAccess(bool enable = true) { allow_cross_numa_ = enable; }
 
+    void setBatchThreshold(uint32_t threshold) {
+        batch_threshold_ = std::max(1u, threshold);
+    }
+
+    static uint64_t calculateBlockSize(uint64_t total_length,
+                                       uint32_t num_slices,
+                                       uint64_t default_block_size) {
+        auto roundup = [](uint64_t a, uint64_t b) -> uint64_t {
+            return (a % b == 0) ? a : (a / b + 1) * b;
+        };
+        return roundup((total_length + num_slices - 1) / num_slices,
+                       default_block_size);
+    }
+
+    static uint64_t getSliceLength(uint64_t total_length, uint64_t offset,
+                                   uint64_t block_size) {
+        return std::min<uint64_t>(total_length - offset, block_size);
+    }
+
+   private:
+    struct Candidate {
+        int dev_id;
+        double score;
+        double bw_gbps;
+    };
+
+    void selectSinglePath(const std::vector<Candidate>& candidates,
+                          uint32_t num_slices, uint64_t total_length,
+                          std::vector<int>& slice_dev_ids);
+
+    void selectMultiPath(const std::vector<Candidate>& candidates,
+                         uint32_t num_slices, uint64_t total_length,
+                         std::vector<int>& slice_dev_ids);
+
    private:
     std::shared_ptr<Topology> local_topology_;
     std::unordered_map<int, DeviceInfo> devices_;
@@ -115,6 +147,7 @@ class DeviceQuota {
     std::shared_ptr<SharedQuotaManager> shared_quota_;
     bool enable_quota_ = true;
     bool update_quota_params_ = true;
+    uint32_t batch_threshold_ = 4;
 };
 
 }  // namespace tent
