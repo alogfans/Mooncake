@@ -33,6 +33,7 @@
 namespace mooncake {
 namespace tent {
 struct RdmaSlice;
+struct RdmaTask;
 
 struct RdmaSliceList {
     RdmaSlice* first = nullptr;
@@ -47,11 +48,28 @@ struct RdmaTask {
     volatile int success_slices;
     volatile int resolved_slices;
     volatile TransferStatusEnum first_error = PENDING;
+
+    // Reference counting for independent lifecycle management
+    // When ref_count reaches 0, the task is deallocated from Slab
+    std::atomic<int> ref_count{0};
+
+    void ref() { ref_count.fetch_add(1, std::memory_order_relaxed); }
+    void deref();  // Defined after RdmaTaskStorage typedef
 };
+
+using RdmaTaskStorage = Slab<RdmaTask>;
+
+// Inline definition of deref after RdmaTaskStorage is available
+inline void RdmaTask::deref() {
+    if (ref_count.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        RdmaTaskStorage::Get().deallocate(this);
+    }
+}
 
 class RdmaEndPoint;
 
 struct RdmaSlice {
+    int priority = PRIO_HIGH;      // QoS priority
     void* source_addr = nullptr;
     uint64_t target_addr = 0;
     size_t length = 0;
@@ -69,8 +87,14 @@ struct RdmaSlice {
     int qp_index = 0;
     int retry_count = 0;
     bool failed = false;
-    uint64_t enqueue_ts = 0;
-    uint64_t submit_ts = 0;
+    uint64_t user_submit_ts = 0;     // User API call timestamp
+    uint64_t enqueue_ts = 0;         // Queue enqueue timestamp
+    uint64_t dequeue_ts = 0;         // Queue dequeue timestamp
+    uint64_t post_send_start_ts = 0; // Post send start timestamp
+    uint64_t post_send_end_ts = 0;   // Post send end timestamp
+    uint64_t complete_ts = 0;        // Completion timestamp
+    uint64_t api_ready_ts = 0;       // API ready timestamp
+    uint64_t submit_ts = 0;          // Legacy submit timestamp
 };
 
 using RdmaSliceStorage = Slab<RdmaSlice>;

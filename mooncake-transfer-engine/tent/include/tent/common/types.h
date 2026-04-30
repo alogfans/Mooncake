@@ -25,6 +25,12 @@
 namespace mooncake {
 namespace tent {
 
+// QoS Priority levels (used throughout the system)
+static constexpr uint8_t PRIO_HIGH = 0;
+static constexpr uint8_t PRIO_MEDIUM = 1;
+static constexpr uint8_t PRIO_LOW = 2;
+static constexpr int NUM_PRIORITIES = 3;
+
 using BatchID = uint64_t;
 using SegmentID = uint64_t;
 
@@ -44,6 +50,7 @@ struct Request {
     SegmentID target_id;
     uint64_t target_offset;
     size_t length;
+    int priority = PRIO_HIGH;  // QoS priority
 };
 
 enum TransferStatusEnum {

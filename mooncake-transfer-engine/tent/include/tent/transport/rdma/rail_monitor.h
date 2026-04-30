@@ -25,6 +25,12 @@ class RailMonitor {
     const static size_t kMaxNuma = 16;
 
    public:
+    enum RailHealth {
+        RAIL_HEALTHY = 0,
+        RAIL_DEGRADED = 1,
+        RAIL_PAUSED = 2,
+    };
+
     RailMonitor() = default;
 
     ~RailMonitor() = default;
@@ -40,7 +46,12 @@ class RailMonitor {
 
     bool available(int local_nic, int remote_nic);
 
-    void markFailed(int local_nic, int remote_nic);
+    void markFailed(int local_nic, int remote_nic,
+                    int transport_error = 0);  // 0 = unknown error
+
+    void markDegraded(int local_nic, int remote_nic);
+
+    bool isDegraded(int local_nic, int remote_nic);
 
     void markRecovered(int local_nic, int remote_nic);
 
@@ -73,6 +84,12 @@ class RailMonitor {
         std::chrono::steady_clock::time_point last_error{};
         bool paused = false;
         std::chrono::steady_clock::time_point resume_time{};
+
+        // New fields for enhanced monitoring
+        RailHealth health = RAIL_HEALTHY;
+        int degraded_count = 0;
+        std::chrono::steady_clock::time_point last_degraded{};
+        std::chrono::steady_clock::time_point degraded_since{};
     };
 
     std::unordered_map<std::pair<int, int>, RailState, PairHash> rail_states_;

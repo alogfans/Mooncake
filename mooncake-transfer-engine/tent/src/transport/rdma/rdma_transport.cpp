@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "tent/transport/rdma/rdma_transport.h"
+#include "tent/transport/rdma/slice.h"
 #include "tent/transport/rdma/ibv_loader.h"
 
 #include <glog/logging.h>
@@ -279,7 +280,7 @@ Status RdmaTransport::uninstall() {
 }
 
 Status RdmaTransport::allocateSubBatch(SubBatchRef& batch, size_t max_size) {
-    auto rdma_batch = Slab<RdmaSubBatch>::Get().allocate();
+    auto rdma_batch = RdmaSubBatchStorage::Get().allocate();
     if (!rdma_batch)
         return Status::InternalError(
             "Unable to allocate RDMA sub-batch" LOC_MARK);
@@ -293,6 +294,8 @@ Status RdmaTransport::freeSubBatch(SubBatchRef& batch) {
     auto rdma_batch = dynamic_cast<RdmaSubBatch*>(batch);
     if (!rdma_batch)
         return Status::InvalidArgument("Invalid RDMA sub-batch" LOC_MARK);
+
+    // Free slices
     for (auto slice : rdma_batch->slice_chain) {
         while (slice) {
             auto next = slice->next;
@@ -300,7 +303,13 @@ Status RdmaTransport::freeSubBatch(SubBatchRef& batch) {
             slice = next;
         }
     }
-    Slab<RdmaSubBatch>::Get().deallocate(rdma_batch);
+
+    // Free tasks
+    for (auto task : rdma_batch->task_list) {
+        task->deref();
+    }
+
+    RdmaSubBatchStorage::Get().deallocate(rdma_batch);
     batch = nullptr;
     return Status::OK();
 }
@@ -336,12 +345,20 @@ Status RdmaTransport::submitTransferTasks(
         size_t max_slice_count = 64;
         if (type == MTYPE_CUDA || opcode == Request::WRITE)
             max_slice_count = 32;
-        rdma_batch->task_list.push_back(RdmaTask{});
-        auto& task = rdma_batch->task_list.back();
-        task.request = request;
-        task.num_slices = 0;
-        task.status_word = PENDING;
-        task.transferred_bytes = 0;
+
+        // Allocate task independently from Slab for separate lifecycle
+        // management
+        auto* task = RdmaTaskStorage::Get().allocate();
+        if (!task)
+            return Status::InternalError("Failed to allocate task" LOC_MARK);
+
+        task->request = request;
+        task->num_slices = 0;
+        task->status_word = PENDING;
+        task->transferred_bytes = 0;
+        task->success_slices = 0;
+        task->resolved_slices = 0;
+        task->first_error = PENDING;
 
         const double merge_ratio = 0.25;
         uint64_t base_block = default_block_size;
@@ -363,6 +380,31 @@ Status RdmaTransport::submitTransferTasks(
         num_slices = std::max<uint64_t>(
             1, std::min<uint64_t>(num_slices, max_slice_count));
 
+        // ========== Quota makes ALL device decisions ==========
+        // Allocate devices for all slices of this request at once
+        std::string source_location =
+            (request.source != nullptr)
+                ? Platform::getLoader()
+                      .getLocation(request.source, request.length)[0]
+                      .location
+                : std::string("");
+
+        std::vector<int> slice_dev_ids;
+        Status alloc_status = workers_->getDeviceQuota()->allocate(
+            request.length,                     // Total request length
+            static_cast<uint32_t>(num_slices),  // Number of slices
+            source_location,                    // Source location
+            slice_dev_ids,           // Output: device IDs for each slice
+            request.priority,        // Priority
+            rdma_batch->device_mask  // Device mask
+        );
+
+        if (!alloc_status.ok()) {
+            LOG(WARNING) << "Device quota allocation failed: "
+                         << alloc_status.message();
+            return alloc_status;
+        }
+
         uint64_t offset = 0;
         for (uint64_t slice_idx = 0; slice_idx < num_slices; ++slice_idx) {
             uint64_t length =
@@ -371,13 +413,20 @@ Status RdmaTransport::submitTransferTasks(
             slice->source_addr = (char*)request.source + offset;
             slice->target_addr = request.target_offset + offset;
             slice->length = length;
-            slice->task = &task;
+            slice->task = task;
             slice->retry_count = 0;
             slice->ep_weak_ptr.reset();
             slice->word = PENDING;
             slice->next = nullptr;
             slice->enqueue_ts = enqueue_ts;
-            task.num_slices++;
+
+            // Set device IDs from quota allocation
+            slice->source_dev_id = slice_dev_ids[slice_idx];
+            slice->target_dev_id = slice->source_dev_id;  // Same device for now
+
+            slice->task = task;
+            task->num_slices++;
+            task->ref();  // Increase ref count for each slice
             offset += length;
             int part_id =
                 ((enable_spray ? submit_slices : static_cast<int>(slice_idx)) /
@@ -394,6 +443,10 @@ Status RdmaTransport::submitTransferTasks(
                 list.first = tail = slice;
             }
         }
+
+        // Add task to batch (increase ref count for batch ownership)
+        task->ref();
+        rdma_batch->task_list.push_back(task);
     }
 
     for (int i = 0; i < num_workers; ++i) {
@@ -411,8 +464,8 @@ Status RdmaTransport::getTransferStatus(SubBatchRef batch, int task_id,
     if (task_id < 0 || task_id >= (int)rdma_batch->task_list.size()) {
         return Status::InvalidArgument("Invalid task ID" LOC_MARK);
     }
-    auto& task = rdma_batch->task_list[task_id];
-    status = TransferStatus{task.status_word, task.transferred_bytes};
+    auto* task = rdma_batch->task_list[task_id];
+    status = TransferStatus{task->status_word, task->transferred_bytes};
     return Status::OK();
 }
 

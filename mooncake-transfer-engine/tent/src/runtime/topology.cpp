@@ -50,6 +50,7 @@ std::string Topology::toString() const {
         nj["pci_bus_id"] = nic.pci_bus_id;
         nj["type"] = nic.type;
         nj["numa_node"] = nic.numa_node;
+        nj["bw_gbps"] = nic.bw_gbps;
         j["nics"].push_back(nj);
     }
 
@@ -76,7 +77,8 @@ void Topology::print() const {
     int id = 0;
     for (auto& entry : nic_list_) {
         LOG(INFO) << "[" << id << "] " << entry.name << " (type " << entry.type
-                  << ") " << entry.pci_bus_id << " on NUMA " << entry.numa_node;
+                  << ") " << entry.pci_bus_id << " on NUMA " << entry.numa_node
+                  << " " << entry.bw_gbps << " Gbps";
         id++;
     }
 
@@ -118,6 +120,7 @@ Status Topology::parse(const std::string& json_content) {
                 nic.type =
                     static_cast<NicType>(item.value("type", NIC_UNKNOWN));
                 nic.numa_node = item.value("numa_node", -1);
+                nic.bw_gbps = item.value("bw_gbps", 200.0);
                 nic_list_.push_back(nic);
             }
         }

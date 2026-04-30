@@ -31,33 +31,35 @@
 #include <vector>
 #include <iostream>
 #include <errno.h>
+#include <thread>
 
 namespace mooncake {
 namespace tent {
 
-static constexpr int MAX_DEVICES = 64;
-static constexpr int MAX_PID_SLOTS = 256;
-static constexpr uint64_t SHM_MAGIC = 0x2025082772805202ULL;
-static constexpr int SHM_VERSION = 1;
+static constexpr uint64_t SHM_MAGIC = 0x2025082772805203ULL;
+static constexpr int SHM_VERSION = 10;
 
-struct PidUsage {
-    pid_t pid;                     // 0 == free slot
-    volatile uint64_t used_bytes;  // local used bytes reported by this pid
-    uint8_t reserved[56];          // padding -> total 64B
-};
-
-struct SharedDeviceEntry {
-    char dev_name[56];  // NUL-terminated device name, empty means unused
-    volatile uint64_t active_bytes;
-    PidUsage pid_usages[MAX_PID_SLOTS];
-};
+// Time slice configuration
+// Slot 0:            HIGH only
+// Slot 1:            MEDIUM + HIGH
+// Slot 2:            ALL (LOW + MEDIUM + HIGH)
+// Then repeat
+static constexpr int NUM_SLOTS = 3;  // 3 slots per cycle
 
 struct SharedHeader {
     uint64_t magic;
     int32_t version;
-    int32_t num_devices;
+
+    // Global slot index (0, 1, 2) - legacy, for backward compatibility
+    std::atomic<int> current_slot;
+
+    // Per-device slot indices (0, 1, 2)
+    // Each device advances independently
+    // Max 16 devices supported
+    static constexpr int MAX_DEVICES = 16;
+    std::atomic<int> device_slots[MAX_DEVICES];
+
     pthread_mutex_t global_mutex;
-    SharedDeviceEntry devices[MAX_DEVICES];
 };
 
 class DeviceQuota;
@@ -69,22 +71,26 @@ class SharedQuotaManager {
     Status attach(const std::string& shm_name);
     Status detach();
 
-    Status diffusion();
+    // Check if current process can send (global slot, for backward
+    // compatibility)
+    bool canSend();
+
+    // Get device's current priority slot (0=HIGH, 1=MEDIUM, 2=LOW)
+    int getDevicePriority(int device_id);
+
+    // Set time slice duration in milliseconds (must be > 0)
+    void setTimesliceUnitMs(int ms) { timeslice_unit_ms_ = ms; }
+    int getTimesliceUnitMs() const { return timeslice_unit_ms_; }
 
    private:
-    Status attachProcess();
-    Status detachProcess();
-
-   private:
-    PidUsage* findOrCreatePidSlotLocked(int dev_id, pid_t pid);
-    PidUsage* findPidSlotLocked(int dev_id, pid_t pid);
-    int findDeviceIdByNameLocked(const std::string& dev_name);
+    void startBackgroundThread();
+    void stopBackgroundThread();
+    void backgroundThreadLoop();
     Status initializeHeader();
     Status initMutex(pthread_mutex_t* m);
-    void reclaimDeadPidsInternal();
-    static bool isPidAlive(pid_t pid);
-    int lock();
-    int unlock();
+
+    // Check if a priority is allowed in the given slot
+    bool isPriorityAllowedInSlot(int priority, int slot) const;
 
    private:
     std::string name_;
@@ -93,6 +99,11 @@ class SharedQuotaManager {
     size_t size_;
     bool created_;
     DeviceQuota* local_quota_;
+    int timeslice_unit_ms_ = 2;  // Default: 2ms per slot
+
+    // Background thread
+    std::thread background_thread_;
+    std::atomic<bool> background_running_;
 };
 
 }  // namespace tent

@@ -33,6 +33,7 @@
 #include "slice.h"
 #include "quota.h"
 #include "tent/runtime/control_plane.h"
+#include "tent/runtime/slab.h"
 #include "tent/runtime/transport.h"
 #include "tent/runtime/topology.h"
 
@@ -47,11 +48,15 @@ class LocalBuffers;
 using RdmaContextSet = std::vector<std::shared_ptr<RdmaContext>>;
 
 struct RdmaSubBatch : public Transport::SubBatch {
-    std::vector<RdmaTask> task_list;
+    std::vector<RdmaTask*>
+        task_list;  // Changed to pointer for independent lifecycle
     std::vector<RdmaSlice*> slice_chain;
     size_t max_size;
+    uint64_t device_mask = ~0ULL;  // Device mask for quota allocation
     virtual size_t size() const { return task_list.size(); }
 };
+
+using RdmaSubBatchStorage = Slab<RdmaSubBatch>;
 
 class RdmaTransport : public Transport {
     friend class Workers;

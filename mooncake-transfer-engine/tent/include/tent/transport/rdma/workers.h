@@ -28,11 +28,13 @@
 #include "rail_monitor.h"
 #include "tent/common/utils/os.h"
 #include "tent/common/concurrent/bounded_mpsc_queue.h"
+#include "tent/common/types.h"  // for PRIO_* constants
 
 namespace mooncake {
 namespace tent {
 
 class RdmaTransport;
+class DeviceQuota;
 class Workers {
    public:
     static constexpr size_t kCapacity = 1024 * 8;
@@ -52,6 +54,8 @@ class Workers {
     Status submit(RdmaSliceList &slice_list, int worker_id = -1);
 
     Status cancel(RdmaSliceList &slice_list);
+
+    DeviceQuota* getDeviceQuota() { return device_quota_.get(); }
 
    private:
     using Task = std::function<void()>;
@@ -121,7 +125,8 @@ class Workers {
 
     std::shared_ptr<RdmaEndPoint> getEndpoint(PostPath path);
 
-    void disableEndpoint(RdmaSlice *slice);
+    void disableEndpoint(RdmaSlice *slice, int ibv_wc_status);
+    int getCurrentPrioritySlot() const;
 
     using GroupedRequests =
         std::unordered_map<PostPath, std::vector<RdmaSlice *>, PostPathHash>;
@@ -175,9 +180,13 @@ class Workers {
         PerfMetric inflight_lat;
     };
 
+    static constexpr int kNumPriorityLevels = NUM_PRIORITIES;
+    int kPriorityWeight[kNumPriorityLevels];  // Configurable priority weights
+    int kTotalWeight;  // Sum of priority weights (computed at runtime)
+
     struct WorkerContext {
         std::thread thread;
-        BoundedSliceQueue queue;
+        BoundedSliceQueue queues[kNumPriorityLevels];  // Priority queues
         GroupedRequests requests;
         std::unordered_set<RdmaSlice *> inflight_slice_set;
         std::atomic<int64_t> inflight_slices = 0;
@@ -188,11 +197,13 @@ class Workers {
 
         std::unordered_map<std::string, RailMonitor> rails;
         PerfMetricSummary perf;
-        uint64_t padding[16];
+        uint64_t last_reclaim_ts = 0;
+        uint64_t padding[15];
     };
 
     WorkerContext *worker_context_;
     uint64_t slice_timeout_ns_;
+    int timeslice_us_ = 100;  // Time slice duration in microseconds
 
     std::unique_ptr<DeviceQuota> device_quota_;
     bool always_tier1_ = false;

@@ -46,7 +46,8 @@ bool RailMonitor::available(int local_nic, int remote_nic) {
     return true;
 }
 
-void RailMonitor::markFailed(int local_nic, int remote_nic) {
+void RailMonitor::markFailed(int local_nic, int remote_nic,
+                             int transport_error) {
     auto it = rail_states_.find(std::make_pair(local_nic, remote_nic));
     if (it == rail_states_.end()) return;
     auto &st = it->second;
@@ -69,6 +70,25 @@ void RailMonitor::markFailed(int local_nic, int remote_nic) {
         st.resume_time = now + st.cooldown;
         updateBestMapping();
     }
+}
+
+void RailMonitor::markDegraded(int local_nic, int remote_nic) {
+    auto it = rail_states_.find(std::make_pair(local_nic, remote_nic));
+    if (it == rail_states_.end()) return;
+    auto &st = it->second;
+    st.health = RAIL_DEGRADED;
+    st.degraded_count++;
+    auto now = std::chrono::steady_clock::now();
+    if (st.degraded_count == 1) {
+        st.last_degraded = now;
+        st.degraded_since = now;
+    }
+}
+
+bool RailMonitor::isDegraded(int local_nic, int remote_nic) {
+    auto it = rail_states_.find(std::make_pair(local_nic, remote_nic));
+    if (it == rail_states_.end()) return false;
+    return it->second.health == RAIL_DEGRADED;
 }
 
 void RailMonitor::markRecovered(int local_nic, int remote_nic) {
