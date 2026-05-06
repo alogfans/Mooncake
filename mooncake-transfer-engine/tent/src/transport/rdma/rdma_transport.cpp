@@ -296,6 +296,10 @@ Status RdmaTransport::freeSubBatch(SubBatchRef& batch) {
     auto rdma_batch = dynamic_cast<RdmaSubBatch*>(batch);
     if (!rdma_batch)
         return Status::InvalidArgument("Invalid RDMA sub-batch" LOC_MARK);
+
+    int pending = rdma_batch->pending_slices_.load(std::memory_order_acquire);
+    if (pending > 0) abort();
+
     for (auto slice : rdma_batch->slice_chain) {
         while (slice) {
             auto next = slice->next;
@@ -401,6 +405,7 @@ Status RdmaTransport::submitTransferTasks(
             slice->target_addr = request.target_offset + offset;
             slice->length = length;
             slice->task = &task;
+            slice->batch = rdma_batch;  // Set batch for lifecycle management
             slice->priority = request.priority;
             slice->retry_count = 0;
             slice->ep_weak_ptr.reset();
@@ -408,6 +413,7 @@ Status RdmaTransport::submitTransferTasks(
             slice->next = nullptr;
             slice->enqueue_ts = getCurrentTimeInNano();
             task.num_slices++;
+            rdma_batch->pending_slices_.fetch_add(1, std::memory_order_relaxed);
             if (slice_idx < slice_dev_ids.size()) {
                 slice->source_dev_id = slice_dev_ids[slice_idx];
             }
@@ -442,7 +448,28 @@ Status RdmaTransport::getTransferStatus(SubBatchRef batch, int task_id,
         return Status::InvalidArgument("Invalid task ID" LOC_MARK);
     }
     auto& task = rdma_batch->task_list[task_id];
-    status = TransferStatus{task.status_word, task.transferred_bytes};
+
+    // Calculate status on-the-fly based on slice completion
+    int resolved = task.resolved_slices;
+    int total = task.num_slices;
+
+    TransferStatusEnum calculated_status;
+    if (resolved >= total) {
+        // All slices resolved
+        if (task.success_slices == total) {
+            calculated_status = TransferStatusEnum::COMPLETED;
+        } else {
+            calculated_status = task.first_error;
+            if (calculated_status == TransferStatusEnum::PENDING) {
+                calculated_status = TransferStatusEnum::FAILED;
+            }
+        }
+    } else {
+        // Still in progress
+        calculated_status = TransferStatusEnum::PENDING;
+    }
+
+    status = TransferStatus{calculated_status, task.transferred_bytes};
     return Status::OK();
 }
 

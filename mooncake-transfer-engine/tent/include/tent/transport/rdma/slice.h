@@ -32,6 +32,11 @@
 
 namespace mooncake {
 namespace tent {
+
+// Forward declarations
+class RdmaEndPoint;
+struct RdmaSubBatch;
+struct RdmaTask;
 struct RdmaSlice;
 
 struct RdmaSliceList {
@@ -72,6 +77,9 @@ struct RdmaSlice {
     uint64_t enqueue_ts = 0;
     uint64_t submit_ts = 0;
     int priority = PRIO_HIGH;  // QoS priority
+
+    // For batch lifecycle management
+    class RdmaSubBatch* batch = nullptr;
 };
 
 using RdmaSliceStorage = Slab<RdmaSlice>;
@@ -80,6 +88,8 @@ static inline void updateSliceStatus(RdmaSlice* slice,
                                      TransferStatusEnum status) {
     if (status == PENDING) return;
     RdmaTask* task = slice->task;
+    if (!task) return;
+
     if (!__sync_bool_compare_and_swap(&slice->word, PENDING, status)) return;
     if (status == COMPLETED) {
         __sync_fetch_and_add(&task->transferred_bytes, slice->length);
@@ -87,13 +97,11 @@ static inline void updateSliceStatus(RdmaSlice* slice,
     } else {
         __sync_bool_compare_and_swap(&task->first_error, PENDING, status);
     }
-    int resolved = __sync_add_and_fetch(&task->resolved_slices, 1);
-    if (resolved >= task->num_slices) {
-        TransferStatusEnum final_st = (task->success_slices == task->num_slices)
-                                          ? COMPLETED
-                                          : task->first_error;
-        if (final_st == PENDING) final_st = FAILED;
-        __sync_bool_compare_and_swap(&task->status_word, PENDING, final_st);
+    __sync_add_and_fetch(&task->resolved_slices, 1);
+
+    // Decrease pending_slices counter in batch
+    if (slice->batch) {
+        slice->batch->pending_slices_.fetch_sub(1, std::memory_order_release);
     }
 }
 
