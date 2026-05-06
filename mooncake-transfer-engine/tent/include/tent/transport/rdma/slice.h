@@ -71,6 +71,7 @@ struct RdmaSlice {
     bool failed = false;
     uint64_t enqueue_ts = 0;
     uint64_t submit_ts = 0;
+    int priority = PRIO_HIGH;  // QoS priority
 };
 
 using RdmaSliceStorage = Slab<RdmaSlice>;

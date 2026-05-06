@@ -14,10 +14,13 @@
 
 #include "tent/transport/rdma/rdma_transport.h"
 #include "tent/transport/rdma/ibv_loader.h"
+#include "tent/transport/rdma/quota.h"
 
 #include <glog/logging.h>
 #include <sys/mman.h>
 #include <sys/time.h>
+
+#include <cmath>
 
 #include <cassert>
 #include <cstddef>
@@ -320,16 +323,13 @@ Status RdmaTransport::submitTransferTasks(
 
     const size_t default_block_size = params_->workers.block_size;
     const int num_workers = params_->workers.num_workers;
-    const int num_devices = (size_t)local_topology_->getNicCount();
     std::vector<RdmaSliceList> slice_lists(num_workers);
     std::vector<RdmaSlice*> slice_tails(num_workers, nullptr);
-    auto enqueue_ts = getCurrentTimeInNano();
-
     static std::atomic<int> g_caller_threads(0);
     thread_local int tl_caller_id = g_caller_threads.fetch_add(1);
-    bool enable_spray =
-        g_caller_threads.load(std::memory_order_relaxed) <= num_workers;
     int submit_slices = 0;
+    auto device_quota = workers_->getDeviceQuota();
+
     for (auto& request : request_list) {
         auto opcode = request.opcode;
         auto type = Platform::getLoader().getMemoryType(request.source);
@@ -357,34 +357,64 @@ Status RdmaTransport::submitTransferTasks(
             }
         }
 
-        uint64_t block_size = roundup(
-            (request.length + num_slices - 1) / num_slices, default_block_size);
+        // Calculate block_size using shared helper (must match quota.cpp)
+        uint64_t block_size = DeviceQuota::calculateBlockSize(
+            request.length, static_cast<uint32_t>(num_slices),
+            default_block_size);
 
         num_slices = std::max<uint64_t>(
             1, std::min<uint64_t>(num_slices, max_slice_count));
 
+        // Determine source location for quota allocation
+        std::string source_location;
+        auto source_locations = Platform::getLoader().getLocation(request.source, 1);
+        if (!source_locations.empty()) {
+            source_location = source_locations[0].location;
+        }
+
+        // ========== Quota makes ALL device decisions ==========
+        // Allocate devices for all slices of this request at once
+        std::vector<int> slice_dev_ids;
+        Status alloc_status = device_quota->allocate(
+            request.length,                     // Total request length
+            static_cast<uint32_t>(num_slices),  // Number of slices
+            source_location,                    // Source location
+            slice_dev_ids,                      // Output: device IDs for each slice
+            request.priority                    // Priority
+        );
+
+        if (!alloc_status.ok()) {
+            LOG(WARNING) << "Device quota allocation failed: "
+                         << alloc_status.message();
+            task.status_word = TransferStatusEnum::FAILED;
+            continue;
+        }
+
+        // Create slices with pre-assigned devices from quota
         uint64_t offset = 0;
         for (uint64_t slice_idx = 0; slice_idx < num_slices; ++slice_idx) {
+            // Use shared helper for slice length (must match quota.cpp)
             uint64_t length =
-                std::min<uint64_t>(request.length - offset, block_size);
+                DeviceQuota::getSliceLength(request.length, offset, block_size);
             auto slice = RdmaSliceStorage::Get().allocate();
             slice->source_addr = (char*)request.source + offset;
             slice->target_addr = request.target_offset + offset;
             slice->length = length;
             slice->task = &task;
+            slice->priority = request.priority;
             slice->retry_count = 0;
             slice->ep_weak_ptr.reset();
             slice->word = PENDING;
             slice->next = nullptr;
-            slice->enqueue_ts = enqueue_ts;
+            slice->enqueue_ts = getCurrentTimeInNano();
             task.num_slices++;
+            if (slice_idx < slice_dev_ids.size()) {
+                slice->source_dev_id = slice_dev_ids[slice_idx];
+            }
             offset += length;
-            int part_id =
-                ((enable_spray ? submit_slices : static_cast<int>(slice_idx)) /
-                 num_devices) %
-                num_workers;
-            auto& list = slice_lists[part_id];
-            auto& tail = slice_tails[part_id];
+            int worker_id = submit_slices % num_workers;
+            auto& list = slice_lists[worker_id];
+            auto& tail = slice_tails[worker_id];
             list.num_slices++;
             submit_slices++;
             if (list.first) {

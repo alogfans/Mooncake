@@ -68,10 +68,16 @@ struct XferBenchConfig {
     static int rpc_server_port;
     static std::string xport_type;
     static std::string backend;
+    static std::string rdma_whitelist;
     static bool notifi;
 
     static int local_gpu_id;
     static int target_gpu_id;
+
+    // QoS options
+    static std::string priority;  // "high", "medium", "low"
+    static bool enable_shared_quota;
+    static std::string shared_quota_shm_path;
 };
 
 struct XferMetricStats {

@@ -19,6 +19,7 @@
 #include <cassert>
 
 #include "tent/transport/rdma/endpoint_store.h"
+#include "tent/transport/rdma/shared_quota.h"
 #include "tent/common/utils/ip.h"
 #include "tent/common/utils/string_builder.h"
 #include "tent/common/utils/os.h"
@@ -34,18 +35,68 @@ Workers::Workers(RdmaTransport* transport)
     auto& conf = transport_->conf_;
     auto shared_quota_shm_path =
         conf->get("transports/rdma/shared_quota_shm_path", "");
-    if (!shared_quota_shm_path.empty())
-        device_quota_->enableSharedQuota(shared_quota_shm_path);
-    auto cross_numa_access =
-        conf->get("transports/rdma/cross_numa_access", false);
-    device_quota_->setCrossNumaAccess(cross_numa_access);
-    auto local_weight = conf->get("transports/rdma/local_weight", 1.0);
-    device_quota_->setLocalWeight(local_weight);
-    auto learning_rate = conf->get("transports/rdma/learning_rate", 0.1);
-    device_quota_->setLearningRate(learning_rate);
-    auto diffusion_interval =
-        conf->get("transports/rdma/diffusion_interval", 10);
-    device_quota_->setDiffusionInterval(diffusion_interval);
+    if (!shared_quota_shm_path.empty()) {
+        auto status = device_quota_->enableSharedQuota(shared_quota_shm_path);
+        if (!status.ok()) {
+            LOG(WARNING) << "Failed to enable shared quota: "
+                         << status.ToString();
+        }
+        // Configure timeslice duration for QoS scheduling
+        int timeslice_unit_ms =
+            conf->get("transports/rdma/timeslice_unit_ms", 2);
+        device_quota_->getSharedQuota()->setTimesliceUnitMs(timeslice_unit_ms);
+    }
+
+    auto enable_quota = conf->get("transports/rdma/enable_quota", true);
+    device_quota_->setEnableQuota(enable_quota);
+
+    // Configure priority from config (for shared quota QoS)
+    auto priority_str =
+        conf->get("transports/rdma/priority", std::string("high"));
+    int priority = PRIO_HIGH;
+    if (priority_str == "medium")
+        priority = PRIO_MEDIUM;
+    else if (priority_str == "low")
+        priority = PRIO_LOW;
+    device_quota_->setPriority(priority);
+
+    // Configure local priority timeslice (for intra-process QoS)
+    // Uses rdtscp for high-precision timing
+    timeslice_us_ = conf->get("transports/rdma/local_timeslice_us", 100);
+
+    // Set slice calculation parameters (must match rdma_transport.cpp)
+    device_quota_->setSliceParams(transport_->params_->workers.block_size);
+
+    // Configure EWMA scheduling parameters
+    DeviceQuota::SchedulingParams params;
+    params.ewma_alpha = conf->get("transports/rdma/ewma_alpha", 0.01);
+    params.enable_ewma_learning =
+        conf->get("transports/rdma/enable_ewma_learning", true);
+
+    // Configure device priority
+    params.enable_device_priority =
+        conf->get("transports/rdma/device_priority", false);
+    if (params.enable_device_priority) {
+        device_quota_->fillDevicePriorities();
+    }
+
+    device_quota_->setSchedulingParams(params);
+
+    // Configure priority weights for QoS scheduling (format: "w0,w1,w2")
+    // Default: High:Medium:Low = 9:3:1
+    std::string prio_weights_str =
+        conf->get("transports/rdma/priority_weights", std::string("9,3,1"));
+    kTotalWeight = 0;
+    size_t pos = 0;
+    for (size_t i = 0;
+         i < kNumPriorityLevels && pos < prio_weights_str.length(); ++i) {
+        size_t end = prio_weights_str.find(',', pos);
+        if (end == std::string::npos) end = prio_weights_str.length();
+        std::string val = prio_weights_str.substr(pos, end - pos);
+        kPriorityWeight[i] = std::stoi(val);
+        kTotalWeight += kPriorityWeight[i];
+        pos = end + 1;
+    }
 }
 
 Workers::~Workers() {
@@ -102,7 +153,14 @@ Status Workers::submit(RdmaSliceList& slice_list, int worker_id) {
         }
     }
     auto& worker = worker_context_[worker_id];
-    worker.queue.push(slice_list);
+
+    // Get priority from first slice (all slices in list have same priority)
+    int priority = PRIO_HIGH;
+    if (slice_list.first && slice_list.first->task) {
+        priority = slice_list.first->priority;
+    }
+
+    worker.queues[priority].push(slice_list);
     if (!worker.inflight_slices.fetch_add(slice_list.num_slices)) {
         std::lock_guard<std::mutex> lock(worker.mutex);
         if (worker.in_suspend) worker.cv.notify_all();
@@ -187,7 +245,7 @@ std::shared_ptr<RdmaEndPoint> Workers::getEndpoint(Workers::PostPath path) {
     return endpoint;
 }
 
-void Workers::disableEndpoint(RdmaSlice* slice) {
+void Workers::disableEndpoint(RdmaSlice* slice, int ibv_wc_status) {
     SegmentDesc* desc = nullptr;
     auto& segment_manager = transport_->metadata_->segmentManager();
     auto target_id = slice->task->request.target_id;
@@ -211,7 +269,18 @@ void Workers::disableEndpoint(RdmaSlice* slice) {
 void Workers::asyncPostSend() {
     auto& worker = worker_context_[tl_wid];
     std::vector<RdmaSliceList> result;
-    worker.queue.pop(result);
+
+    auto shared_quota = device_quota_->getSharedQuota();
+    bool can_send = shared_quota ? shared_quota->canSend() : true;
+    if (can_send) {
+        int current_slot = getCurrentPrioritySlot();
+        for (int prio = 0; prio < kNumPriorityLevels; ++prio) {
+            if (prio > current_slot) continue;  // Not allowed in this slot
+            worker.queues[prio].pop(result);
+            if (!result.empty()) break;  // Dispatched one batch, done
+        }
+    }
+
     for (auto& slice_list : result) {
         if (slice_list.num_slices == 0) continue;
         auto slice = slice_list.first;
@@ -665,5 +734,13 @@ Status Workers::generatePostPath(RdmaSlice* slice) {
     slice->target_rkey = target.buffer->rkey[slice->target_dev_id];
     return Status::OK();
 }
+
+int Workers::getCurrentPrioritySlot() const {
+    uint64_t now_ns = getCurrentTimeInNano();
+    uint64_t timeslice_ns = timeslice_us_ * 1000;
+    int slot = static_cast<int>((now_ns / timeslice_ns) % kNumPriorityLevels);
+    return slot;
+}
+
 }  // namespace tent
 }  // namespace mooncake
