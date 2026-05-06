@@ -297,9 +297,22 @@ Status RdmaTransport::freeSubBatch(SubBatchRef& batch) {
     if (!rdma_batch)
         return Status::InvalidArgument("Invalid RDMA sub-batch" LOC_MARK);
 
-    int pending = rdma_batch->pending_slices_.load(std::memory_order_acquire);
-    if (pending > 0) abort();
+    // Check if all task slices are completed
+    int total_pending = 0;
+    for (const auto& task : rdma_batch->task_list) {
+        int pending = task.pending_slices_.load(std::memory_order_acquire);
+        total_pending += pending;
+    }
 
+    if (total_pending > 0) {
+        // There are still pending slices, don't free yet
+        LOG(WARNING) << "freeSubBatch called with " << total_pending
+                     << " pending slices across all tasks, delaying deallocation";
+        batch = nullptr;
+        return Status::OK();
+    }
+
+    // All slices completed, safe to free
     for (auto slice : rdma_batch->slice_chain) {
         while (slice) {
             auto next = slice->next;
@@ -307,6 +320,7 @@ Status RdmaTransport::freeSubBatch(SubBatchRef& batch) {
             slice = next;
         }
     }
+
     Slab<RdmaSubBatch>::Get().deallocate(rdma_batch);
     batch = nullptr;
     return Status::OK();
@@ -405,7 +419,6 @@ Status RdmaTransport::submitTransferTasks(
             slice->target_addr = request.target_offset + offset;
             slice->length = length;
             slice->task = &task;
-            slice->batch = rdma_batch;  // Set batch for lifecycle management
             slice->priority = request.priority;
             slice->retry_count = 0;
             slice->ep_weak_ptr.reset();
@@ -413,7 +426,7 @@ Status RdmaTransport::submitTransferTasks(
             slice->next = nullptr;
             slice->enqueue_ts = getCurrentTimeInNano();
             task.num_slices++;
-            rdma_batch->pending_slices_.fetch_add(1, std::memory_order_relaxed);
+            task.pending_slices_.fetch_add(1, std::memory_order_relaxed);
             if (slice_idx < slice_dev_ids.size()) {
                 slice->source_dev_id = slice_dev_ids[slice_idx];
             }

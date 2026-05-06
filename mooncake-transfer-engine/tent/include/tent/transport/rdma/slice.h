@@ -52,6 +52,62 @@ struct RdmaTask {
     volatile int success_slices;
     volatile int resolved_slices;
     volatile TransferStatusEnum first_error = PENDING;
+    std::atomic<int> pending_slices_{0};  // Track incomplete slices for this task
+
+    // Default constructor
+    RdmaTask() = default;
+
+    // Copy constructor (needed for std::vector operations)
+    RdmaTask(const RdmaTask& other)
+        : num_slices(other.num_slices),
+          request(other.request),
+          status_word(other.status_word),
+          transferred_bytes(other.transferred_bytes),
+          success_slices(other.success_slices),
+          resolved_slices(other.resolved_slices),
+          first_error(other.first_error),
+          pending_slices_(other.pending_slices_.load()) {}
+
+    // Copy assignment operator
+    RdmaTask& operator=(const RdmaTask& other) {
+        if (this != &other) {
+            num_slices = other.num_slices;
+            request = other.request;
+            status_word = other.status_word;
+            transferred_bytes = other.transferred_bytes;
+            success_slices = other.success_slices;
+            resolved_slices = other.resolved_slices;
+            first_error = other.first_error;
+            pending_slices_.store(other.pending_slices_.load());
+        }
+        return *this;
+    }
+
+    // Move constructor
+    RdmaTask(RdmaTask&& other) noexcept
+        : num_slices(other.num_slices),
+          request(std::move(other.request)),
+          status_word(other.status_word),
+          transferred_bytes(other.transferred_bytes),
+          success_slices(other.success_slices),
+          resolved_slices(other.resolved_slices),
+          first_error(other.first_error),
+          pending_slices_(other.pending_slices_.load()) {}
+
+    // Move assignment operator
+    RdmaTask& operator=(RdmaTask&& other) noexcept {
+        if (this != &other) {
+            num_slices = other.num_slices;
+            request = std::move(other.request);
+            status_word = other.status_word;
+            transferred_bytes = other.transferred_bytes;
+            success_slices = other.success_slices;
+            resolved_slices = other.resolved_slices;
+            first_error = other.first_error;
+            pending_slices_.store(other.pending_slices_.load());
+        }
+        return *this;
+    }
 };
 
 class RdmaEndPoint;
@@ -77,9 +133,6 @@ struct RdmaSlice {
     uint64_t enqueue_ts = 0;
     uint64_t submit_ts = 0;
     int priority = PRIO_HIGH;  // QoS priority
-
-    // For batch lifecycle management
-    class RdmaSubBatch* batch = nullptr;
 };
 
 using RdmaSliceStorage = Slab<RdmaSlice>;
@@ -99,10 +152,8 @@ static inline void updateSliceStatus(RdmaSlice* slice,
     }
     __sync_add_and_fetch(&task->resolved_slices, 1);
 
-    // Decrease pending_slices counter in batch
-    if (slice->batch) {
-        slice->batch->pending_slices_.fetch_sub(1, std::memory_order_release);
-    }
+    // Decrease pending_slices counter in task
+    task->pending_slices_.fetch_sub(1, std::memory_order_release);
 }
 
 }  // namespace tent

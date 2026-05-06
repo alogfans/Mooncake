@@ -50,7 +50,6 @@ struct RdmaSubBatch : public Transport::SubBatch {
     std::vector<RdmaTask> task_list;
     std::vector<RdmaSlice*> slice_chain;
     size_t max_size;
-    std::atomic<int> pending_slices_{0};  // Track incomplete slices
     virtual size_t size() const { return task_list.size(); }
 };
 
