@@ -252,33 +252,7 @@ Status SharedQuotaManager::attachProcess() {
 Status SharedQuotaManager::detachProcess() { return Status::OK(); }
 
 Status SharedQuotaManager::diffusion() {
-    if (!hdr_) return Status::InvalidArgument("not attached");
-    pid_t pid = getpid();
-    int rc = lock();
-    if (rc != 0)
-        return Status::InternalError("lock failed: " +
-                                     std::string(strerror(rc)));
-    for (int d = 0; d < hdr_->num_devices; ++d) {
-        std::string dev_name = hdr_->devices[d].dev_name;
-        auto dev_id = local_quota_->getTopology()->getNicId(dev_name);
-        if (dev_name.empty() || dev_id < 0) continue;
-        PidUsage* slot = findOrCreatePidSlotLocked(dev_id, pid);
-        if (!slot) {
-            unlock();
-            return Status::InternalError("no free pid slot for device");
-        }
-        auto used_bytes = local_quota_->getActiveBytes(dev_id);
-        slot->used_bytes = used_bytes;
-        uint64_t sum = 0;
-        for (int s = 0; s < MAX_PID_SLOTS; ++s)
-            sum += hdr_->devices[d].pid_usages[s].used_bytes;
-        uint64_t diffusion_active_bytes =
-            sum < used_bytes ? 0 : sum - used_bytes;
-        hdr_->devices[d].active_bytes = sum;
-        local_quota_->setDiffusionActiveBytes(dev_id, diffusion_active_bytes);
-    }
-    unlock();
-    return Status::OK();
+    return Status::NotImplemented("Legacy Shared Quota Deprecated");
 }
 
 }  // namespace tent

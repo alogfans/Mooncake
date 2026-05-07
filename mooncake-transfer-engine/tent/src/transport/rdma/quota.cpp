@@ -15,25 +15,26 @@
 #include "tent/transport/rdma/quota.h"
 #include "tent/transport/rdma/shared_quota.h"
 #include "tent/common/utils/random.h"
+#include "tent/common/utils/os.h"
 
-#include <assert.h>
-#include <unordered_set>
+#include <algorithm>
+#include <iostream>
+#include <iomanip>
 
 namespace mooncake {
 namespace tent {
 Status DeviceQuota::loadTopology(std::shared_ptr<Topology>& local_topology) {
     local_topology_ = local_topology;
-    std::unordered_set<int> used_numa_id;
     for (size_t dev_id = 0; dev_id < local_topology->getNicCount(); ++dev_id) {
         auto entry = local_topology->getNicEntry(dev_id);
-        if (entry->type != Topology::NIC_RDMA) continue;
+        if (!entry || entry->type != Topology::NIC_RDMA) continue;
         DeviceInfo& info = devices_[dev_id];
         info.dev_id = dev_id;
-        info.bw_gbps = 200.0;
+        info.bw_gbps = kDefaultBwGbps;
         info.numa_id = entry->numa_node;
-        used_numa_id.insert(entry->numa_node);
+        info.ewma_bandwidth_bps.store(info.getTheoreticalBandwidth(),
+                                      std::memory_order_relaxed);
     }
-    if (used_numa_id.size() == 1) allow_cross_numa_ = true;
     return Status::OK();
 }
 
@@ -44,145 +45,273 @@ Status DeviceQuota::enableSharedQuota(const std::string& shm_name) {
     return status;
 }
 
-struct TlsDeviceInfo {
-    uint64_t active_bytes{0};
-    double beta0{0.0};
-    double beta1{1.0};
-};
-
-thread_local std::unordered_map<int, TlsDeviceInfo> tl_device_info;
-
-Status DeviceQuota::allocate(uint64_t length, const std::string& location,
-                             int& chosen_dev_id) {
+Status DeviceQuota::allocate(uint64_t total_length, uint32_t num_slices,
+                             uint64_t slice_bytes,
+                             const std::string& location,
+                             std::vector<int>& slice_dev_ids,
+                             uint64_t device_mask) {
+    slice_dev_ids.clear();
+    slice_dev_ids.reserve(num_slices);
     auto entry = local_topology_->getMemEntry(location);
     if (!entry) return Status::InvalidArgument("Unknown location" LOC_MARK);
 
     if (!enable_quota_) {
-        thread_local int id = 0;
         for (size_t rank = 0; rank < Topology::DevicePriorityRanks; ++rank) {
-            auto& list = entry->device_list[rank];
-            if (list.empty()) continue;
-            chosen_dev_id = list[id % list.size()];
-            id++;
+            thread_local std::vector<int> tl_eligible;
+            tl_eligible.clear();
+            for (int dev_id : entry->device_list[rank]) {
+                if (!devices_.count(dev_id)) continue;
+                if ((device_mask & (1ULL << dev_id)) == 0) continue;
+                tl_eligible.push_back(dev_id);
+            }
+            if (tl_eligible.empty()) break;
+            uint64_t offset = 0;
+            for (uint32_t i = 0; i < num_slices; ++i) {
+                thread_local uint64_t tl_rr_counter = 0;
+                int dev_id = tl_eligible[tl_rr_counter % tl_eligible.size()];
+                tl_rr_counter++;
+                slice_dev_ids.push_back(dev_id);
+                uint64_t this_slice_bytes = std::min(slice_bytes, total_length - offset);
+                offset += this_slice_bytes;
+                devices_[dev_id].total_bytes.fetch_add(
+                    this_slice_bytes, std::memory_order_relaxed);
+            }
             return Status::OK();
         }
-        return Status::DeviceNotFound("no eligible devices for " + location);
+        return Status::DeviceNotFound("no eligible devices");
     }
 
-    static constexpr double penalty[] = {1.0, 3.0, 10.0};
-    const double w = local_weight_;
-    std::unordered_map<int, double> score_map;
-    bool found_device = false;
-    double best_score = std::numeric_limits<double>::infinity();
+    std::vector<DeviceQuota::Candidate> tl_candidates;
+    Status status = buildCandidates(entry, slice_bytes, device_mask,
+                                    tl_candidates);
+    if (!status.ok()) return status;
+    if (num_slices == 1) {
+        selectSinglePath(tl_candidates, num_slices, total_length,
+                         slice_dev_ids);
+    } else {
+        thread_local uint64_t tl_call_count = 0;
+        bool explore_mode = ((++tl_call_count % 100) == 0);
+        selectMultiPath(tl_candidates, num_slices, total_length, slice_dev_ids,
+                        explore_mode);
+    }
+    return Status::OK();
+}
+
+int DeviceQuota::getDeviceRank(const std::string& location, int dev_id) const {
+    auto entry = local_topology_->getMemEntry(location);
+    if (!entry) return 0;
     for (size_t rank = 0; rank < Topology::DevicePriorityRanks; ++rank) {
-        if (rank == Topology::DevicePriorityRanks - 1 && !allow_cross_numa_ &&
-            found_device)
-            continue;
+        for (int id : entry->device_list[rank]) {
+            if (id == dev_id) return static_cast<int>(rank);
+        }
+    }
+    return 0;
+}
+
+Status DeviceQuota::buildCandidates(const Topology::MemEntry* entry,
+                                    uint64_t slice_bytes, uint64_t device_mask,
+                                    std::vector<Candidate>& candidates) {
+    for (size_t rank = 0; rank < Topology::DevicePriorityRanks; ++rank) {
         for (int dev_id : entry->device_list[rank]) {
             if (!devices_.count(dev_id)) continue;
+            if ((device_mask & (1ULL << dev_id)) == 0) continue;
+
             auto& dev = devices_[dev_id];
-            auto& tl_dev = tl_device_info[dev_id];
-            uint64_t overall_active_bytes =
-                dev.diffusion_active_bytes.load(std::memory_order_relaxed) +
-                dev.active_bytes.load(std::memory_order_relaxed);
-            double weighted_active = w * tl_dev.active_bytes +
-                                     (1.0 - w) * overall_active_bytes + length;
-            double beta0_g = dev.beta0.load(std::memory_order_relaxed);
-            double beta1_g = dev.beta1.load(std::memory_order_relaxed);
-            double beta0 = w * tl_dev.beta0 + (1.0 - w) * beta0_g;
-            double beta1 = w * tl_dev.beta1 + (1.0 - w) * beta1_g;
-            double bw = dev.bw_gbps * 1e9 / 8;
-            double predicted_time = (weighted_active / bw) * beta1 + beta0;
-            score_map[dev_id] = penalty[rank] * predicted_time;
-            best_score = std::min(best_score, score_map[dev_id]);
-            found_device = true;
+            uint64_t inflight = dev.getInflightBytes();
+            double ewma_bw = dev.getEwmaBandwidth();
+            double predicted_time = static_cast<double>(inflight + slice_bytes) / ewma_bw;
+            double rank_weight = sched_params_.rank_weights[rank];
+            double score = predicted_time * rank_weight;
+            score += (SimpleRandom::Get().next(10) * 1e-9);
+
+            Candidate c;
+            c.dev_id = dev_id;
+            c.score = score;
+            c.is_cross_numa = (rank > 0);
+            c.dev_priority = getDevicePriority(dev_id);
+            candidates.push_back(c);
         }
     }
 
-    if (!found_device) {
-        return Status::DeviceNotFound("no eligible devices for " + location);
+    if (candidates.empty()) {
+        return Status::DeviceNotFound("no eligible devices");
     }
 
-    std::vector<int> filtered;
-    for (const auto& [dev_id, score] : score_map) {
-        if (score <= best_score * 1.05) filtered.push_back(dev_id);
+    std::sort(candidates.begin(), candidates.end(),
+              [](const Candidate& a, const Candidate& b) {
+                  if (std::abs(a.score - b.score) > 1e-9)
+                      return a.score < b.score;
+                  return a.dev_id < b.dev_id;
+              });
+
+    return Status::OK();
+}
+
+void DeviceQuota::selectSinglePath(const std::vector<Candidate>& candidates,
+                                   uint32_t num_slices, uint64_t total_length,
+                                   std::vector<int>& slice_dev_ids) {
+    if (candidates.empty()) return;
+
+    const Candidate& best = candidates[0];
+    int dev_id = best.dev_id;
+    auto& dev = devices_[dev_id];
+
+    dev.addInflight(total_length);
+    dev.total_bytes.fetch_add(total_length, std::memory_order_relaxed);
+
+    for (uint32_t i = 0; i < num_slices; ++i) {
+        slice_dev_ids.push_back(dev_id);
     }
+}
 
-    std::sort(filtered.begin(), filtered.end(), [&](int a, int b) {
-        if (std::abs(score_map[a] - score_map[b]) > 1e-9)
-            return score_map[a] < score_map[b];
-        return a < b;
-    });
+void DeviceQuota::selectMultiPath(const std::vector<Candidate>& candidates,
+                                  uint32_t num_slices, uint64_t total_length,
+                                  std::vector<int>& slice_dev_ids,
+                                  bool explore_mode) {
+    if (candidates.empty()) return;
+    uint64_t slice_bytes = (total_length + num_slices - 1) / num_slices;
+    if (explore_mode) {
+        for (uint32_t i = 0; i < num_slices; ++i) {
+            const Candidate& c = candidates[i % candidates.size()];
+            slice_dev_ids.push_back(c.dev_id);
+            devices_[c.dev_id].addInflight(slice_bytes);
+            devices_[c.dev_id].total_bytes.fetch_add(
+                slice_bytes, std::memory_order_relaxed);
+        }
+    } else {
+        double total_weight = 0.0;
+        double max_weight = -1.0;
+        int best_dev_idx = -1;
+        for (size_t i = 0; i < candidates.size(); ++i) {
+            double w = 1.0 / (candidates[i].score + 1e-12);
+            total_weight += w;
+            if (w > max_weight) {
+                max_weight = w;
+                best_dev_idx = static_cast<int>(i);
+            }
+        }
+        if (best_dev_idx == -1 || num_slices == 0 || total_weight <= 0.0)
+            return;
+        uint32_t remaining_slices = num_slices;
+        for (size_t i = 0; i < candidates.size(); ++i) {
+            double w = 1.0 / (candidates[i].score + 1e-12);
+            uint32_t assigned =
+                static_cast<uint32_t>((w / total_weight) * num_slices);
+            if (assigned > 0) {
+                if (assigned > remaining_slices) assigned = remaining_slices;
+                remaining_slices -= assigned;
+                const Candidate& c = candidates[i];
+                for (uint32_t s = 0; s < assigned; ++s) {
+                    slice_dev_ids.push_back(c.dev_id);
+                }
+                uint64_t total_assigned_bytes =
+                    static_cast<uint64_t>(slice_bytes) * assigned;
+                devices_[c.dev_id].addInflight(total_assigned_bytes);
+                devices_[c.dev_id].total_bytes.fetch_add(
+                    total_assigned_bytes, std::memory_order_relaxed);
+            }
+        }
+        if (remaining_slices > 0) {
+            const Candidate& c = candidates[best_dev_idx];
+            for (uint32_t s = 0; s < remaining_slices; ++s) {
+                slice_dev_ids.push_back(c.dev_id);
+            }
+            uint64_t total_assigned_bytes =
+                static_cast<uint64_t>(slice_bytes) * remaining_slices;
+            devices_[c.dev_id].addInflight(total_assigned_bytes);
+            devices_[c.dev_id].total_bytes.fetch_add(total_assigned_bytes,
+                                                     std::memory_order_relaxed);
+        }
+    }
+}
 
-    thread_local size_t rr_index = 0;
-    chosen_dev_id = filtered[rr_index % filtered.size()];
-    rr_index++;
-
-    tl_device_info[chosen_dev_id].active_bytes += length;
-    if (local_weight_ < 1 - 1e-6)
-        devices_[chosen_dev_id].active_bytes.fetch_add(
-            length, std::memory_order_relaxed);
+Status DeviceQuota::allocate(uint64_t length, const std::string& location,
+                             int& chosen_dev_id) {
+    std::vector<int> slice_dev_ids;
+    Status status = allocate(length, 1, length, location, slice_dev_ids, ~0ULL);
+    if (!status.ok()) return status;
+    if (slice_dev_ids.empty()) {
+        return Status::DeviceNotFound("allocation failed");
+    }
+    chosen_dev_id = slice_dev_ids[0];
     return Status::OK();
 }
 
 Status DeviceQuota::release(int dev_id, uint64_t length, double latency) {
-    if (!enable_quota_) return Status::OK();
     auto it = devices_.find(dev_id);
     if (it == devices_.end())
         return Status::InvalidArgument("device not found");
 
     auto& dev = it->second;
-    auto& tl_dev = tl_device_info[dev_id];
+    dev.releaseInflight(length);
 
-    if (local_weight_ < 1 - 1e-6)
-        dev.active_bytes.fetch_sub(length, std::memory_order_relaxed);
-    tl_dev.active_bytes -= length;
+    if (!enable_quota_ || !sched_params_.enable_ewma_learning) {
+        return Status::OK();
+    }
 
-    if (!update_quota_params_) return Status::OK();
+    double observed_bw = static_cast<double>(length) / latency;
+    double current_ewma = dev.getEwmaBandwidth();
 
-    double bw = dev.bw_gbps * 1e9 / 8;
-    double theory_time = static_cast<double>(length) / bw;
-    double obs_time = latency;
+    double alpha = sched_params_.ewma_alpha;
+    double new_ewma = alpha * current_ewma + (1.0 - alpha) * observed_bw;
 
-    const double w = local_weight_;
-    double beta0_g = dev.beta0.load(std::memory_order_relaxed);
-    double beta1_g = dev.beta1.load(std::memory_order_relaxed);
-    double beta0 = w * tl_dev.beta0 + (1.0 - w) * beta0_g;
-    double beta1 = w * tl_dev.beta1 + (1.0 - w) * beta1_g;
+    double theoretical_bw = dev.getTheoreticalBandwidth();
+    new_ewma = std::max(0.1 * theoretical_bw, std::min(10.0 * theoretical_bw, new_ewma));
 
-    double pred_time = beta0 + beta1 * theory_time;
-    double err = obs_time - pred_time;
-    double rel_err = (pred_time > 1e-9) ? (err / pred_time) : 0.0;
+    dev.ewma_bandwidth_bps.store(new_ewma, std::memory_order_relaxed);
+    dev.addSample(length, latency);
 
-    double adapt_alpha = alpha_;
-    if (std::abs(err) > 0.05 * pred_time)
-        adapt_alpha = std::min(1.0, alpha_ * 5.0);
+    return Status::OK();
+}
 
-    double delta0 = adapt_alpha * err;
-    double delta1 = adapt_alpha * rel_err;
+void DeviceQuota::updateStats(int dev_id, uint64_t bytes) {
+    auto it = devices_.find(dev_id);
+    if (it != devices_.end()) {
+        it->second.total_bytes.fetch_add(bytes, std::memory_order_relaxed);
+    }
+}
 
-    double new_beta0_l = tl_dev.beta0 + w * delta0;
-    double new_beta1_l = tl_dev.beta1 * (1.0 + w * delta1);
-    tl_dev.beta0 = std::clamp(new_beta0_l, 0.0, 5e-4);
-    tl_dev.beta1 = std::clamp(new_beta1_l, 0.5, 20.0);
+void DeviceQuota::printTrafficStats() {
+    std::cout << "=== Device Traffic Statistics ===" << std::endl;
+    for (const auto& [dev_id, dev] : devices_) {
+        uint64_t total = dev.total_bytes.load(std::memory_order_relaxed);
+        double ewma_bw_gbps = dev.getEwmaBandwidth() / 1e9 * 8.0;
+        uint64_t inflight = dev.getInflightBytes();
+        std::cout << "Dev " << dev_id << ": "
+                  << "Total=" << (total / 1024.0 / 1024.0 / 1024.0) << " GB, "
+                  << "EWMA BW=" << std::fixed << std::setprecision(2) << ewma_bw_gbps << " Gbps, "
+                  << "Inflight=" << inflight << " bytes"
+                  << std::endl;
+    }
+}
 
-    if (local_weight_ < 1 - 1e-6) {
-        double new_beta0_g = beta0_g + (1.0 - w) * delta0;
-        double new_beta1_g = beta1_g * (1.0 + (1.0 - w) * delta1);
-        dev.beta0.store(std::clamp(new_beta0_g, 0.0, 5e-4),
-                        std::memory_order_relaxed);
-        dev.beta1.store(std::clamp(new_beta1_g, 0.5, 20.0),
-                        std::memory_order_relaxed);
-        if (shared_quota_) {
-            thread_local uint64_t tl_last_ts = 0;
-            uint64_t now = getCurrentTimeInNano();
-            if (now - tl_last_ts > diffusion_interval_) {
-                tl_last_ts = now;
-                return shared_quota_->diffusion();
+void DeviceQuota::fillDevicePriorities() {
+    sched_params_.device_base_priorities.clear();
+    for (const auto& [dev_id, dev] : devices_) {
+        sched_params_.device_base_priorities.push_back(dev_id);
+    }
+}
+
+int DeviceQuota::getDevicePriority(int dev_id) const {
+    if (!sched_params_.enable_device_priority) return 0;
+
+    auto it = std::find(sched_params_.device_base_priorities.begin(),
+                        sched_params_.device_base_priorities.end(), dev_id);
+    if (it == sched_params_.device_base_priorities.end()) return 0;
+
+    return static_cast<int>(std::distance(sched_params_.device_base_priorities.begin(), it));
+}
+
+bool DeviceQuota::isCrossNumaNodeIdle(int dev_numa) const {
+    for (const auto& [dev_id, dev] : devices_) {
+        if (dev.numa_id == dev_numa) {
+            uint64_t inflight = dev.getInflightBytes();
+            if (inflight < 1024 * 1024) {
+                return true;
             }
         }
     }
-    return Status::OK();
+    return false;
 }
 
 }  // namespace tent

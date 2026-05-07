@@ -33,6 +33,8 @@ namespace mooncake {
 namespace tent {
 
 class RdmaTransport;
+class DeviceQuota;
+
 class Workers {
    public:
     static constexpr size_t kCapacity = 1024 * 8;
@@ -52,6 +54,8 @@ class Workers {
     Status submit(RdmaSliceList &slice_list, int worker_id = -1);
 
     Status cancel(RdmaSliceList &slice_list);
+
+    DeviceQuota *getDeviceQuota() const { return device_quota_.get(); }
 
    private:
     using Task = std::function<void()>;
