@@ -81,6 +81,98 @@ RdmaEndPoint::~RdmaEndPoint() {
     }
 }
 
+void RdmaEndPoint::addPendingTokens(
+    const std::vector<CompletionToken *> &tokens) {
+    std::lock_guard<std::mutex> guard(pending_slices_mutex_);
+    pending_tokens_.reserve(pending_tokens_.size() + tokens.size());
+    for (auto *token : tokens) pending_tokens_.insert(token);
+}
+
+void RdmaEndPoint::removePendingTokens(
+    const std::vector<CompletionToken *> &tokens, size_t start, size_t count) {
+    std::lock_guard<std::mutex> guard(pending_slices_mutex_);
+    for (size_t i = 0; i < count; ++i) {
+        pending_tokens_.erase(tokens[start + i]);
+    }
+}
+
+std::vector<uint8_t> RdmaEndPoint::claimPendingSlices(
+    const std::vector<CompletionToken *> &tokens) {
+    std::vector<uint8_t> claimed(tokens.size(), 0);
+    std::lock_guard<std::mutex> guard(pending_slices_mutex_);
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        auto *token = tokens[i];
+        if (!token) continue;
+        auto iter = pending_tokens_.find(token);
+        if (iter == pending_tokens_.end()) continue;
+        pending_tokens_.erase(iter);
+        claimed[i] = 1;
+    }
+    return claimed;
+}
+
+std::vector<RdmaEndPoint::CompletionToken *>
+RdmaEndPoint::claimAllPendingTokens() {
+    std::lock_guard<std::mutex> guard(pending_slices_mutex_);
+    std::vector<CompletionToken *> pending_tokens;
+    pending_tokens.reserve(pending_tokens_.size());
+    for (auto *token : pending_tokens_) pending_tokens.push_back(token);
+    pending_tokens_.clear();
+    return pending_tokens;
+}
+
+void RdmaEndPoint::completePendingSlicesAsFailed(
+    const std::vector<CompletionToken *> &pending_tokens) {
+    for (auto *token : pending_tokens) {
+        if (!token) continue;
+        auto *slice = token->slice.load(std::memory_order_acquire);
+        if (!slice) continue;
+        auto *qp_depth = token->qp_depth.load(std::memory_order_acquire);
+        if (qp_depth) {
+            qp_depth->fetch_sub(1, std::memory_order_relaxed);
+        }
+        cq_outstanding_->fetch_sub(1, std::memory_order_relaxed);
+        slice->markFailed();
+        // A CQE may still arrive after the destruction fallback has already
+        // completed this slice. Keep the token alive for that late CQE, but
+        // detach it from objects whose lifetime is controlled elsewhere.
+        slice->rdma.endpoint = nullptr;
+        slice->rdma.qp_depth = nullptr;
+        token->endpoint.store(nullptr, std::memory_order_release);
+        token->slice.store(nullptr, std::memory_order_release);
+        token->qp_depth.store(nullptr, std::memory_order_release);
+        token->fallback_completed.store(true, std::memory_order_release);
+    }
+}
+
+uint64_t RdmaEndPoint::beginHandshakeAttempt() {
+    return handshake_version_.fetch_add(1, std::memory_order_relaxed) + 1;
+}
+
+bool RdmaEndPoint::verifyHandshakeVersion(uint64_t response_version) const {
+    return response_version == 0 ||
+           handshake_version_.load(std::memory_order_relaxed) ==
+               response_version;
+}
+
+bool RdmaEndPoint::validateHandshakeTimestamp(uint64_t timestamp) const {
+    if (timestamp == 0) return true;
+    // Wall-clock timestamps come from a remote host and clocks may drift.
+    // Treat them as a replay/staleness hint only; never use them for strict
+    // ordering between hosts.
+    uint64_t now = getCurrentTimeInNano();
+    if (timestamp > now + kHandshakeStalenessNs) return false;
+    if (now > timestamp && now - timestamp > kHandshakeTimeoutNs) return false;
+    return true;
+}
+
+void RdmaEndPoint::recordSuccessfulHandshake(
+    const std::vector<uint32_t> &peer_qp_num, uint64_t version) {
+    established_peer_.qp_num = peer_qp_num.empty() ? 0 : peer_qp_num[0];
+    established_peer_.handshake_version = version;
+    established_peer_.timestamp = getCurrentTimeInNano();
+}
+
 int RdmaEndPoint::construct(ibv_cq *cq, size_t num_qp_list,
                             size_t max_sge_per_wr, size_t max_wr_depth,
                             size_t max_inline_bytes) {
@@ -90,19 +182,19 @@ int RdmaEndPoint::construct(ibv_cq *cq, size_t num_qp_list,
     }
 
     qp_list_.resize(num_qp_list);
-    cq_outstanding_ = (volatile int *)cq->cq_context;
+    cq_outstanding_ = static_cast<std::atomic<int> *>(cq->cq_context);
 
     max_wr_depth_ = (int)max_wr_depth;
     max_sge_per_wr_ = max_sge_per_wr;
     max_inline_bytes_ = max_inline_bytes;
 
-    wr_depth_list_ = new volatile int[num_qp_list]();
+    wr_depth_list_ = new std::atomic<int>[num_qp_list]();
     if (!wr_depth_list_) {
         LOG(ERROR) << "Failed to allocate memory for work request depth list";
         return ERR_MEMORY;
     }
     for (size_t i = 0; i < num_qp_list; ++i) {
-        wr_depth_list_[i] = 0;
+        wr_depth_list_[i].store(0, std::memory_order_relaxed);
         ibv_qp_init_attr attr;
         memset(&attr, 0, sizeof(attr));
         attr.send_cq = cq;
@@ -116,6 +208,15 @@ int RdmaEndPoint::construct(ibv_cq *cq, size_t num_qp_list,
         qp_list_[i] = ibv_create_qp(context_.pd(), &attr);
         if (!qp_list_[i]) {
             PLOG(ERROR) << "Failed to create QP";
+            for (size_t j = 0; j < i; ++j) {
+                if (qp_list_[j]) {
+                    ibv_destroy_qp(qp_list_[j]);
+                    qp_list_[j] = nullptr;
+                }
+            }
+            qp_list_.clear();
+            delete[] wr_depth_list_;
+            wr_depth_list_ = nullptr;
             return ERR_ENDPOINT;
         }
     }
@@ -124,56 +225,37 @@ int RdmaEndPoint::construct(ibv_cq *cq, size_t num_qp_list,
     return 0;
 }
 
-int RdmaEndPoint::reconstruct() {
-    // Save original construction parameters
-    size_t num_qp = qp_list_.size();
-    auto max_wr_depth = max_wr_depth_;
-    auto max_sge_per_wr = max_sge_per_wr_;
-    auto max_inline_bytes = max_inline_bytes_;
-
-    // Deconstruct and reconstruct to get fresh QPs (same as delete+create)
-    // Use deconstructLocked because callers already hold lock_
-    int ret = deconstructLocked();
-    if (ret) {
-        LOG(ERROR) << "Failed to deconstruct endpoint: " << ret;
-        return ret;
-    }
-
-    // Get CQ from context for reconstruction
-    ibv_cq *cq = context_.cq();
-    if (!cq) {
-        LOG(ERROR) << "No CQ available for endpoint reconstruction";
-        return ERR_ENDPOINT;
-    }
-
-    // Reconstruct with same parameters as original construction
-    status_.store(INITIALIZING, std::memory_order_relaxed);
-    active_ = true;
-
-    return construct(cq, num_qp, max_sge_per_wr, max_wr_depth,
-                     max_inline_bytes);
-}
-
 int RdmaEndPoint::deconstruct() {
     RWSpinlock::WriteGuard guard(lock_);
     return deconstructLocked();
 }
 
 int RdmaEndPoint::deconstructLocked() {
+    auto pending_tokens = claimAllPendingTokens();
+    if (!pending_tokens.empty()) {
+        LOG(WARNING) << "Completing " << pending_tokens.size()
+                     << " pending RDMA slices as failed before endpoint "
+                        "deconstruction";
+        completePendingSlicesAsFailed(pending_tokens);
+    }
+
     // Adjust cq_outstanding_ before destroying QPs, so the counter is
     // always corrected even if ibv_destroy_qp fails and we return early.
     bool displayed = false;
     if (wr_depth_list_) {
         for (size_t i = 0; i < qp_list_.size(); ++i) {
-            if (wr_depth_list_[i] != 0) {
+            auto outstanding =
+                wr_depth_list_[i].load(std::memory_order_relaxed);
+            if (outstanding != 0) {
                 if (!displayed) {
                     LOG(WARNING)
                         << "Outstanding work requests found, CQ will not "
                            "be generated";
                     displayed = true;
                 }
-                __sync_fetch_and_sub(cq_outstanding_, wr_depth_list_[i]);
-                wr_depth_list_[i] = 0;
+                cq_outstanding_->fetch_sub(outstanding,
+                                           std::memory_order_relaxed);
+                wr_depth_list_[i].store(0, std::memory_order_relaxed);
             }
         }
     }
@@ -193,6 +275,10 @@ int RdmaEndPoint::deconstructLocked() {
 
     qp_list_.clear();
     peer_qp_num_list_.clear();
+    {
+        std::lock_guard<std::mutex> guard(pending_slices_mutex_);
+        pending_tokens_.clear();
+    }
     delete[] wr_depth_list_;
     wr_depth_list_ = nullptr;
     return 0;
@@ -202,11 +288,15 @@ int RdmaEndPoint::destroyQP() { return deconstruct(); }
 
 void RdmaEndPoint::beginDestroy() {
     RWSpinlock::WriteGuard guard(lock_);
+    beginDestroyNoLock();
+}
+
+void RdmaEndPoint::beginDestroyNoLock() {
     auto current_status = status_.load(std::memory_order_relaxed);
     if (current_status == DESTROYING || current_status == DESTROYED) return;
 
-    active_ = false;
-    inactive_time_ = getCurrentTimeInNano();
+    active_.store(false, std::memory_order_release);
+    inactive_time_.store(getCurrentTimeInNano(), std::memory_order_release);
     status_.store(DESTROYING, std::memory_order_release);
 
     // Transition QPs to ERR state so hardware flushes all inflight WRs to CQ.
@@ -214,11 +304,14 @@ void RdmaEndPoint::beginDestroy() {
     ibv_qp_attr attr;
     memset(&attr, 0, sizeof(attr));
     attr.qp_state = IBV_QPS_ERR;
+    bool any_qp_failed = false;
     for (size_t i = 0; i < qp_list_.size(); ++i) {
         if (ibv_modify_qp(qp_list_[i], &attr, IBV_QP_STATE)) {
             PLOG(WARNING) << "Failed to modify QP to ERR during beginDestroy";
+            any_qp_failed = true;
         }
     }
+    needs_manual_completion_ = any_qp_failed;
 }
 
 bool RdmaEndPoint::finishDestroy() {
@@ -235,7 +328,7 @@ bool RdmaEndPoint::finishDestroy() {
     // pre-two-phase predicate (!hasOutstandingSlice == !active_): only
     // inactive endpoints are eligible for reclaim; active ones must stay.
     if (current_status != DESTROYING) {
-        if (active_) return false;
+        if (active_.load(std::memory_order_acquire)) return false;
         // Endpoints that never reached construct() own no RDMA resources
         // and have wr_depth_list_ uninitialized; deconstructLocked() would
         // delete[] a wild pointer. Drop them directly.
@@ -253,16 +346,29 @@ bool RdmaEndPoint::finishDestroy() {
         // never be flushed; enforce a timeout to avoid leaking forever.
         bool has_outstanding = false;
         for (size_t i = 0; i < qp_list_.size(); ++i) {
-            if (wr_depth_list_[i] != 0) {
+            if (wr_depth_list_[i].load(std::memory_order_relaxed) != 0) {
                 has_outstanding = true;
                 break;
             }
         }
         if (has_outstanding) {
-            double elapsed = (getCurrentTimeInNano() - inactive_time_) / 1e9;
-            if (elapsed < kFinishDestroyTimeoutSec) return false;
-            LOG(WARNING) << "finishDestroy timed out after " << elapsed
-                         << "s with outstanding WRs, forcing destruction";
+            double elapsed = (getCurrentTimeInNano() -
+                              inactive_time_.load(std::memory_order_acquire)) /
+                             1e9;
+            if (!needs_manual_completion_ &&
+                elapsed < kFinishDestroyTimeoutSec) {
+                return false;
+            }
+
+            auto pending_tokens = claimAllPendingTokens();
+            if (!pending_tokens.empty()) {
+                LOG(WARNING)
+                    << "Completing " << pending_tokens.size()
+                    << " pending RDMA slices as failed during endpoint destroy"
+                    << " (elapsed=" << elapsed
+                    << "s, manual_required=" << needs_manual_completion_ << ")";
+                completePendingSlicesAsFailed(pending_tokens);
+            }
         }
     }
 
@@ -286,8 +392,9 @@ bool RdmaEndPoint::finishDestroy() {
 void RdmaEndPoint::setPeerNicPath(const std::string &peer_nic_path) {
     RWSpinlock::WriteGuard guard(lock_);
     if (connected()) {
-        LOG(WARNING) << "Previous connection will be discarded";
-        disconnectUnlocked();
+        LOG(ERROR) << "Cannot change peer path on connected endpoint "
+                      "(unidirectional lifecycle)";
+        return;
     }
     peer_nic_path_ = peer_nic_path;
 }
@@ -314,9 +421,9 @@ int RdmaEndPoint::setupConnectionsByActive() {
         // Only proceed with RPC if we are the first to transition from
         // UNCONNECTED. This prevents duplicate concurrent handshake attempts
         // from the same endpoint.
-        auto current_status = status_.load(std::memory_order_relaxed);
-        if (current_status == UNCONNECTED) {
-            status_.store(CONNECTING, std::memory_order_relaxed);
+        Status expected = UNCONNECTED;
+        if (status_.compare_exchange_strong(expected, CONNECTING,
+                                            std::memory_order_relaxed)) {
             do_rpc = true;
 
             peer_server_name = getServerNameFromNicPath(peer_nic_path_);
@@ -363,6 +470,8 @@ int RdmaEndPoint::setupConnectionsByActive() {
     }
 
     for (;;) {
+        const uint64_t my_version = beginHandshakeAttempt();
+        const uint64_t handshake_start_time = getCurrentTimeInNano();
         std::vector<uint32_t> local_qp_num;
         {
             RWSpinlock::ReadGuard guard(lock_);
@@ -372,6 +481,9 @@ int RdmaEndPoint::setupConnectionsByActive() {
             context_, peer_nic_path_, local_qp_num, local_desc);
         rememberAutoGidSelection(attempted_auto_gid_selections,
                                  local_gid_selection);
+        local_desc.handshake_version = my_version;
+        local_desc.timestamp = handshake_start_time;
+        local_desc.flags = 0;
         peer_desc = HandShakeDesc();
 
         // Perform the RPC without holding the lock to avoid deadlock and allow
@@ -383,13 +495,13 @@ int RdmaEndPoint::setupConnectionsByActive() {
         // `peer_qp_num_list_` with `peer_desc.qp_num`, since a failed RPC may
         // result in an invalid `peer_desc.qp_num`.
         //
-        // If the RPC is failed, even if the state is CONNECTED, (which means
-        // it is handled by setupConnectionsByPassive in another thread during
-        // the RPC, or "simultaneous open"), we should resetConnection to be
-        // safe. Because we're not sure whether the peer needs a connection
-        // re-establishment. (We don't know `peer_desc.qp_num`)
         if (rc) {
             RWSpinlock::WriteGuard write_guard(lock_);
+            if (connected()) {
+                LOG(INFO) << "Active handshake RPC failed after passive "
+                             "handshake already established the endpoint";
+                return 0;
+            }
             resetConnection("handshake RPC failure");
             return rc;
         }
@@ -398,6 +510,39 @@ int RdmaEndPoint::setupConnectionsByActive() {
         {
             // Re-acquire lock after RPC to finalize state transition
             RWSpinlock::WriteGuard guard(lock_);
+
+            if (!verifyHandshakeVersion(peer_desc.handshake_version)) {
+                LOG(WARNING)
+                    << "Rejecting stale handshake response from "
+                    << peer_nic_path_ << ", current_version="
+                    << handshake_version_.load(std::memory_order_relaxed)
+                    << ", response_version=" << peer_desc.handshake_version;
+                resetConnection("stale active handshake response");
+                return ERR_REJECT_HANDSHAKE;
+            }
+
+            uint64_t elapsed = getCurrentTimeInNano() - handshake_start_time;
+            if (elapsed > kHandshakeTimeoutNs) {
+                LOG(ERROR) << "Handshake response timed out after " << elapsed
+                           << " ns for " << peer_nic_path_;
+                resetConnection("active handshake timeout");
+                return ERR_REJECT_HANDSHAKE;
+            }
+
+            if (!validateHandshakeTimestamp(peer_desc.timestamp)) {
+                LOG(WARNING) << "Rejecting invalid or stale handshake response "
+                             << "timestamp=" << peer_desc.timestamp
+                             << ", request_timestamp=" << local_desc.timestamp;
+                resetConnection("invalid active handshake timestamp");
+                return ERR_REJECT_HANDSHAKE;
+            }
+
+            if (peer_desc.flags & HandShakeDesc::FLAG_PEER_RESTART_DETECTED) {
+                LOG(WARNING)
+                    << "Peer reported restart detection for " << peer_nic_path_;
+                resetConnection("peer restart flag in handshake response");
+                return ERR_REJECT_HANDSHAKE;
+            }
 
             // Handle simultaneous open: if the peer initiates a connection
             // during our RPC and it is passively established in
@@ -468,6 +613,8 @@ int RdmaEndPoint::setupConnectionsByActive() {
             }
 
             if (ret == 0) {
+                recordSuccessfulHandshake(peer_desc.qp_num,
+                                          peer_desc.handshake_version);
                 return 0;
             }
 
@@ -523,29 +670,52 @@ int RdmaEndPoint::setupConnectionsByActive() {
 int RdmaEndPoint::setupConnectionsByPassive(const HandShakeDesc &peer_desc,
                                             HandShakeDesc &local_desc) {
     RWSpinlock::WriteGuard guard(lock_);
+    fillLocalHandshakeDesc(context_, peer_nic_path_, qpNum(), local_desc);
+    local_desc.handshake_version = peer_desc.handshake_version;
+    local_desc.timestamp = getCurrentTimeInNano();
+    local_desc.flags = 0;
+
+    if (!validateHandshakeTimestamp(peer_desc.timestamp)) {
+        local_desc.reply_msg = "Invalid or stale handshake timestamp";
+        LOG(WARNING) << local_desc.reply_msg << " from "
+                     << peer_desc.local_nic_path
+                     << ", timestamp=" << peer_desc.timestamp;
+        return ERR_REJECT_HANDSHAKE;
+    }
+
     if (connected()) {
         // If already connected with the same peer QP info, return success
         if (peer_qp_num_list_ == peer_desc.qp_num) {
-            fillLocalHandshakeDesc(context_, peer_nic_path_, qpNum(),
-                                   local_desc);
             LOG(INFO) << "Received same peer QP numbers, reusing connection.";
             return 0;
         }
         // Different peer (e.g., peer restarted)
         LOG(WARNING) << "Re-establish connection: " << toString();
-
-        int ret = resetConnection("re-establishing connection (passive)");
-        if (ret) return ret;
+        local_desc.reply_msg =
+            "Peer QP changed, destroying connected endpoint for replacement";
+        local_desc.flags |= HandShakeDesc::FLAG_PEER_RESTART_DETECTED;
+        beginDestroyNoLock();
+        return ERR_REJECT_HANDSHAKE;
     }
 
-    // At this point, the state can only be UNCONNECTED or CONNECTING.
-    // Even if the state is CONNECTING, we can still safely proceed to
-    // establish the connection on this same endpoint. Because we're holding
-    // the lock, even if there are already Active RPCs sent to the same
-    // peer nic path by setupConnectionsByActive on another thread, it will
-    // be blocked after the RPC return. Once the lock is released,
-    // they will simply observe the CONNECTED state and safely reuse the QP.
-    // This inherently handles simultaneous open.
+    auto current_status = status_.load(std::memory_order_relaxed);
+    if (current_status == CONNECTING) {
+        bool we_win = context_.nicPath() < peer_desc.local_nic_path;
+        if (we_win) {
+            local_desc.reply_msg =
+                "Simultaneous handshake rejected by deterministic ordering";
+            LOG(INFO) << local_desc.reply_msg
+                      << ": local=" << context_.nicPath()
+                      << ", peer=" << peer_desc.local_nic_path;
+            return ERR_REJECT_HANDSHAKE;
+        }
+        disconnectUnlocked();
+    } else if (current_status != UNCONNECTED) {
+        local_desc.reply_msg =
+            "Endpoint is not available for passive handshake";
+        LOG(WARNING) << local_desc.reply_msg << ": status=" << current_status;
+        return ERR_REJECT_HANDSHAKE;
+    }
 
     if (peer_desc.peer_nic_path != context_.nicPath() ||
         peer_desc.local_nic_path != peer_nic_path_) {
@@ -575,6 +745,9 @@ int RdmaEndPoint::setupConnectionsByPassive(const HandShakeDesc &peer_desc,
         for (;;) {
             auto local_gid_selection = fillLocalHandshakeDesc(
                 context_, peer_nic_path_, qpNum(), local_desc);
+            local_desc.handshake_version = peer_desc.handshake_version;
+            local_desc.timestamp = getCurrentTimeInNano();
+            local_desc.flags = 0;
             rememberAutoGidSelection(attempted_auto_gid_selections,
                                      local_gid_selection);
 
@@ -582,6 +755,8 @@ int RdmaEndPoint::setupConnectionsByPassive(const HandShakeDesc &peer_desc,
             int ret = doSetupConnection(peer_gid, peer_lid, peer_desc.qp_num,
                                         &local_desc.reply_msg, &failure_info);
             if (ret == 0) {
+                recordSuccessfulHandshake(peer_desc.qp_num,
+                                          peer_desc.handshake_version);
                 return 0;
             }
 
@@ -648,12 +823,12 @@ int RdmaEndPoint::setupConnectionsByPassive(const HandShakeDesc &peer_desc,
 
 void RdmaEndPoint::disconnect() {
     RWSpinlock::WriteGuard guard(lock_);
-    disconnectUnlocked();
+    beginDestroyNoLock();
 }
 
 int RdmaEndPoint::disconnectUnlocked() {
     auto curr_status = status_.load(std::memory_order_acquire);
-    if (curr_status != CONNECTED && curr_status != CONNECTING) return 0;
+    if (curr_status != CONNECTING) return 0;
 
     ibv_qp_attr attr;
     memset(&attr, 0, sizeof(attr));
@@ -665,16 +840,27 @@ int RdmaEndPoint::disconnectUnlocked() {
             PLOG(ERROR) << "Failed to modify QP to RESET";
             ret = ERR_ENDPOINT;
         }
-        // After resetting QP, the wr_depth_list_ won't change
-        bool displayed = false;
-        if (wr_depth_list_[i] != 0) {
-            if (!displayed) {
-                LOG(WARNING) << "Outstanding work requests found, CQ will not "
-                                "be generated";
-                displayed = true;
+    }
+
+    auto pending_tokens = claimAllPendingTokens();
+    if (!pending_tokens.empty()) {
+        LOG(WARNING) << "Completing " << pending_tokens.size()
+                     << " pending RDMA slices as failed during endpoint reset";
+        completePendingSlicesAsFailed(pending_tokens);
+    }
+
+    if (wr_depth_list_) {
+        for (size_t i = 0; i < qp_list_.size(); ++i) {
+            auto outstanding =
+                wr_depth_list_[i].load(std::memory_order_relaxed);
+            if (outstanding != 0) {
+                LOG(WARNING)
+                    << "Outstanding work requests remained after pending "
+                       "completion, correcting counters";
+                cq_outstanding_->fetch_sub(outstanding,
+                                           std::memory_order_relaxed);
+                wr_depth_list_[i].store(0, std::memory_order_relaxed);
             }
-            __sync_fetch_and_sub(cq_outstanding_, wr_depth_list_[i]);
-            wr_depth_list_[i] = 0;
         }
     }
     peer_qp_num_list_.clear();
@@ -686,11 +872,14 @@ int RdmaEndPoint::resetConnection(const std::string &reason) {
     auto curr_status = status_.load(std::memory_order_acquire);
     if (curr_status != CONNECTING && curr_status != CONNECTED) return 0;
 
-#ifdef CONFIG_ERDMA
-    int ret = reconstruct();
-#else
+    if (curr_status == CONNECTED) {
+        beginDestroyNoLock();
+        LOG(WARNING) << "Endpoint marked for destruction instead of reset "
+                     << "(triggered by: " << reason << ")";
+        return ERR_ENDPOINT;
+    }
+
     int ret = disconnectUnlocked();
-#endif
 
     if (ret) {
         LOG(ERROR) << "Failed to reset the endpoint (triggered by: " << reason
@@ -720,7 +909,8 @@ int RdmaEndPoint::submitPostSend(
     std::vector<Transport::Slice *> &slice_list,
     std::vector<Transport::Slice *> &failed_slice_list) {
     RWSpinlock::WriteGuard guard(lock_);
-    if (!active_ || status_.load(std::memory_order_relaxed) != CONNECTED) {
+    if (!active_.load(std::memory_order_acquire) ||
+        status_.load(std::memory_order_relaxed) != CONNECTED) {
         for (auto &slice : slice_list) failed_slice_list.push_back(slice);
         slice_list.clear();
         return 0;
@@ -729,7 +919,8 @@ int RdmaEndPoint::submitPostSend(
     const size_t num_qp = qp_list_.size();
     if (slice_list.empty()) return 0;
     const size_t requested = slice_list.size();
-    int cq_remaining = int(globalConfig().max_cqe) - *cq_outstanding_;
+    int cq_remaining = int(globalConfig().max_cqe) -
+                       cq_outstanding_->load(std::memory_order_relaxed);
     if (cq_remaining <= 0) return 0;
 
     // Only allocate for the max number of WRs we can actually post per QP,
@@ -745,7 +936,8 @@ int RdmaEndPoint::submitPostSend(
     for (size_t qp_index = 0;
          qp_index < num_qp && cq_remaining > 0 && cursor < requested;
          ++qp_index) {
-        int qp_avail = max_wr_depth_ - wr_depth_list_[qp_index];
+        int qp_avail = max_wr_depth_ -
+                       wr_depth_list_[qp_index].load(std::memory_order_relaxed);
         if (qp_avail <= 0) continue;
 
         size_t remaining_qps = num_qp - qp_index;
@@ -757,9 +949,18 @@ int RdmaEndPoint::submitPostSend(
 
         int wr_count = std::min(assigned_count, qp_avail);
         wr_count = std::min(wr_count, cq_remaining);
+        std::vector<CompletionToken *> token_list(wr_count, nullptr);
 
         for (int i = 0; i < wr_count; ++i) {
             auto *slice = slice_list[start + i];
+            auto *token = new CompletionToken();
+            token->endpoint.store(this, std::memory_order_relaxed);
+            token->slice.store(slice, std::memory_order_relaxed);
+            token->qp_depth.store(&wr_depth_list_[qp_index],
+                                  std::memory_order_relaxed);
+            token->fallback_completed.store(false, std::memory_order_relaxed);
+            token_list[i] = token;
+
             auto &sge = sge_list[i];
             sge.addr = (uint64_t)slice->source_addr;
             sge.length = slice->length;
@@ -767,7 +968,7 @@ int RdmaEndPoint::submitPostSend(
 
             auto &wr = wr_list[i];
             memset(&wr, 0, sizeof(ibv_send_wr));
-            wr.wr_id = (uint64_t)slice;
+            wr.wr_id = (uint64_t)token;
             wr.opcode = slice->opcode == Transport::TransferRequest::READ
                             ? IBV_WR_RDMA_READ
                             : IBV_WR_RDMA_WRITE;
@@ -781,18 +982,28 @@ int RdmaEndPoint::submitPostSend(
             slice->status = Transport::Slice::POSTED;
             slice->rdma.qp_depth = &wr_depth_list_[qp_index];
         }
+        addPendingTokens(token_list);
 
         ibv_send_wr *bad_wr = nullptr;
-        __sync_fetch_and_add(&wr_depth_list_[qp_index], wr_count);
-        __sync_fetch_and_add(cq_outstanding_, wr_count);
+        wr_depth_list_[qp_index].fetch_add(wr_count, std::memory_order_relaxed);
+        cq_outstanding_->fetch_add(wr_count, std::memory_order_relaxed);
         int rc = ibv_post_send(qp_list_[qp_index], wr_list.data(), &bad_wr);
         if (rc) {
             PLOG(ERROR) << "Failed to ibv_post_send";
+            if (!bad_wr) bad_wr = wr_list.data();
+            int first_bad = bad_wr - wr_list.data();
+            removePendingTokens(token_list, first_bad, wr_count - first_bad);
             while (bad_wr) {
                 int i = bad_wr - wr_list.data();
-                failed_slice_list.push_back(slice_list[start + i]);
-                __sync_fetch_and_sub(&wr_depth_list_[qp_index], 1);
-                __sync_fetch_and_sub(cq_outstanding_, 1);
+                auto *slice = slice_list[start + i];
+                failed_slice_list.push_back(slice);
+                slice->rdma.endpoint = nullptr;
+                slice->rdma.qp_depth = nullptr;
+                delete token_list[i];
+                token_list[i] = nullptr;
+                wr_depth_list_[qp_index].fetch_sub(1,
+                                                   std::memory_order_relaxed);
+                cq_outstanding_->fetch_sub(1, std::memory_order_relaxed);
                 bad_wr = bad_wr->next;
             }
             total_posted += wr_count;
