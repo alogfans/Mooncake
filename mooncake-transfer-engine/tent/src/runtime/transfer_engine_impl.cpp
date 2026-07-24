@@ -68,15 +68,18 @@ void rollbackMemoryBuffersForTransports(
         auto type = *it;
         auto& transport = transport_list[type];
         if (!transport) continue;
+        bool rollback_unmarked_descs = (it == attempted_transports.rbegin() &&
+                                        type == TransportType::RDMA);
         for (auto& desc : descs) {
-            if (!hasRegisteredTransport(desc, type)) continue;
+            bool registered = hasRegisteredTransport(desc, type);
+            if (!registered && !rollback_unmarked_descs) continue;
             auto rollback_status = transport->removeMemoryBuffer(desc);
             if (!rollback_status.ok()) {
                 LOG(WARNING) << "Failed to roll back memory buffer for "
                              << "transport " << type << ": "
                              << rollback_status.ToString();
             }
-            eraseRegisteredTransport(desc, type);
+            if (registered) eraseRegisteredTransport(desc, type);
         }
     }
 }
