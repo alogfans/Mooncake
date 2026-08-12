@@ -387,5 +387,56 @@ double TEBenchRunner::runSingleTransfer(uint64_t local_addr,
     return duration;
 }
 
+bool TEBenchRunner::submitTraceTransfer(uint64_t local_addr,
+                                        uint64_t target_addr, uint64_t length,
+                                        OpCode opcode, uint64_t deadline_ns,
+                                        IntentType intent_type,
+                                        uint64_t* batch_id) {
+    (void)deadline_ns;
+    (void)intent_type;
+    if (!batch_id) return false;
+    auto id = engine_->allocateBatchID(1);
+    TransferRequest entry;
+    entry.opcode =
+        opcode == READ ? TransferRequest::READ : TransferRequest::WRITE;
+    entry.length = length;
+    entry.source = reinterpret_cast<void*>(local_addr);
+    entry.target_id = handle_;
+    entry.target_offset = target_addr;
+    std::vector<TransferRequest> requests{entry};
+    auto status = engine_->submitTransfer(id, requests);
+    if (!status.ok()) {
+        LOG(ERROR) << "Failed to submit trace transfer: " << status.ToString();
+        engine_->freeBatchID(id);
+        return false;
+    }
+    *batch_id = id;
+    return true;
+}
+
+bool TEBenchRunner::pollTraceTransfer(uint64_t batch_id, bool* completed) {
+    if (!completed) return false;
+    *completed = false;
+    mooncake::TransferStatus status;
+    auto result = engine_->getTransferStatus(batch_id, 0, status);
+    if (!result.ok()) {
+        LOG(ERROR) << "Failed to poll trace transfer: " << result.ToString();
+        return false;
+    }
+    if (status.s == TransferStatusEnum::COMPLETED) {
+        *completed = true;
+        return true;
+    }
+    if (status.s == TransferStatusEnum::FAILED) {
+        LOG(ERROR) << "Failed trace transfer detected";
+        return false;
+    }
+    return true;
+}
+
+void TEBenchRunner::freeTraceTransfer(uint64_t batch_id) {
+    CHECK_FAIL(engine_->freeBatchID(batch_id));
+}
+
 }  // namespace tent
 }  // namespace mooncake

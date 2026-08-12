@@ -17,6 +17,7 @@
 #include "bench_runner.h"
 #include "qos_metrics_adapter.h"
 #include "te_backend.h"
+#include "trace_replay.h"
 #include "workload_config.h"
 #ifdef USE_TENT
 #include "tent_backend.h"
@@ -53,6 +54,15 @@ int processBatchSizes(
     else {
         LOG(ERROR) << "Invalid args: workload only support read|write|mix";
         exit(EXIT_FAILURE);
+    }
+
+    IntentType sweep_intent_type = IntentType::INTENT_UNSPEC;
+    if (workload_classes.empty() &&
+        !parseBenchIntentType(XferBenchConfig::tent_intent_type,
+                              &sweep_intent_type)) {
+        LOG(ERROR) << "Invalid --tent_intent_type="
+                   << XferBenchConfig::tent_intent_type;
+        return -1;
     }
 
     XferBenchStats stats;
@@ -98,7 +108,7 @@ int processBatchSizes(
         const size_t thread_batch_size =
             workload ? workload->batch_size : batch_size;
         const IntentType intent_type =
-            workload ? workload->intent_type : IntentType::INTENT_UNSPEC;
+            workload ? workload->intent_type : sweep_intent_type;
         const bool tight = XferBenchConfig::deadline_us > 0 &&
                            thread_id < XferBenchConfig::deadline_tight_threads;
         auto deadlineNs = [&]() -> uint64_t {
@@ -292,6 +302,11 @@ int main(int argc, char* argv[]) {
         LOG(ERROR) << "qos_link_capacity_gbps must be finite and non-negative";
         return EXIT_FAILURE;
     }
+    if (!XferBenchConfig::trace_file.empty() &&
+        XferBenchConfig::op_type == "mix") {
+        LOG(ERROR) << "trace replay supports --op_type=read|write";
+        return EXIT_FAILURE;
+    }
     if (XferBenchConfig::deadline_tight_threads < 0 ||
         XferBenchConfig::deadline_tight_threads >
             XferBenchConfig::max_num_threads) {
@@ -301,6 +316,11 @@ int main(int argc, char* argv[]) {
     if (XferBenchConfig::deadline_us > 0 &&
         XferBenchConfig::backend != "tent") {
         LOG(ERROR) << "deadline tagging is supported only by the tent backend";
+        return EXIT_FAILURE;
+    }
+    if (XferBenchConfig::tent_intent_type != "unspec" &&
+        XferBenchConfig::backend != "tent") {
+        LOG(ERROR) << "--tent_intent_type is supported only by the tent backend";
         return EXIT_FAILURE;
     }
     if (!workload_classes.empty() &&
@@ -347,6 +367,13 @@ int main(int argc, char* argv[]) {
                   << " --backend=" << XferBenchConfig::backend << std::endl
                   << "Press Ctrl-C to terminate\033[0m" << std::endl;
         return runner->runTarget();
+    }
+    if (!XferBenchConfig::trace_file.empty()) {
+        const int num_threads = 1;
+        if (runner->startInitiator(num_threads) != 0) return EXIT_FAILURE;
+        const int rc = processTraceReplay(*runner, num_threads);
+        runner->stopInitiator();
+        return rc == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
     }
     if (!workload_classes.empty()) {
         const int num_threads = XferBenchConfig::start_num_threads;

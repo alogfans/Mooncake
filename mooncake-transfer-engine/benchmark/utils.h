@@ -77,6 +77,9 @@ struct XferBenchConfig {
     static double qos_link_capacity_gbps;
     static std::string qos_output_jsonl;
     static uint64_t request_interval_us;
+    static std::string trace_file;
+    static std::string trace_source_filter;
+    static std::string trace_source_intents;
     static uint64_t deadline_us;
     static int deadline_tight_threads;
     static bool deadline_bw_arbitration;
