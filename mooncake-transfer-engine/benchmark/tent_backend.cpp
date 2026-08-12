@@ -455,5 +455,57 @@ double TENTBenchRunner::runSingleTransfer(uint64_t local_addr,
     return duration;
 }
 
+bool TENTBenchRunner::submitTraceTransfer(uint64_t local_addr,
+                                          uint64_t target_addr, uint64_t length,
+                                          OpCode opcode, uint64_t deadline_ns,
+                                          IntentType intent_type,
+                                          uint64_t* batch_id) {
+    if (!batch_id) return false;
+    auto id = engine_->allocateBatch(1);
+    Request entry;
+    entry.opcode = opcode == READ ? Request::READ : Request::WRITE;
+    entry.length = length;
+    entry.source = reinterpret_cast<void*>(local_addr);
+    entry.target_id = handle_;
+    entry.target_offset = target_addr;
+    entry.transport_hint = transport_hint_;
+    entry.deadline_ns = deadline_ns;
+    entry.intent_type =
+        intent_type == IntentType::INTENT_UNSPEC ? intent_type_ : intent_type;
+    std::vector<Request> requests{entry};
+    auto status = engine_->submitTransfer(id, requests);
+    if (!status.ok()) {
+        LOG(ERROR) << "Failed to submit trace transfer: " << status.ToString();
+        engine_->freeBatch(id);
+        return false;
+    }
+    *batch_id = id;
+    return true;
+}
+
+bool TENTBenchRunner::pollTraceTransfer(uint64_t batch_id, bool* completed) {
+    if (!completed) return false;
+    *completed = false;
+    TransferStatus status;
+    auto result = engine_->getTransferStatus(batch_id, status);
+    if (!result.ok()) {
+        LOG(ERROR) << "Failed to poll trace transfer: " << result.ToString();
+        return false;
+    }
+    if (status.s == TransferStatusEnum::COMPLETED) {
+        *completed = true;
+        return true;
+    }
+    if (status.s == TransferStatusEnum::FAILED) {
+        LOG(ERROR) << "Failed trace transfer detected";
+        return false;
+    }
+    return true;
+}
+
+void TENTBenchRunner::freeTraceTransfer(uint64_t batch_id) {
+    CHECK_FAIL(engine_->freeBatch(batch_id));
+}
+
 }  // namespace tent
 }  // namespace mooncake

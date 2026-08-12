@@ -17,6 +17,7 @@
 
 #include "utils.h"
 
+#include <cstdint>
 #include <string>
 #include <functional>
 #include <vector>
@@ -61,6 +62,16 @@ class BenchRunner {
                                      uint64_t block_size, uint64_t batch_size,
                                      OpCode opcode, uint64_t deadline_ns,
                                      IntentType intent_type) = 0;
+
+    virtual bool submitTraceTransfer(uint64_t local_addr, uint64_t target_addr,
+                                     uint64_t length, OpCode opcode,
+                                     uint64_t deadline_ns,
+                                     IntentType intent_type,
+                                     uint64_t* batch_id) = 0;
+
+    virtual bool pollTraceTransfer(uint64_t batch_id, bool* completed) = 0;
+
+    virtual void freeTraceTransfer(uint64_t batch_id) = 0;
 };
 
 }  // namespace tent

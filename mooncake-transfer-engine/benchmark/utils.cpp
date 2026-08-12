@@ -63,6 +63,17 @@ DEFINE_string(qos_output_jsonl, "",
 DEFINE_uint64(request_interval_us, 0,
               "Per-thread delay before issuing each transfer batch, in "
               "microseconds. 0 disables pacing.");
+DEFINE_string(trace_file, "",
+              "CSV trace file to replay instead of the block/batch sweep. "
+              "Requires timestamp and length columns.");
+DEFINE_string(trace_source_filter, "",
+              "When set, replay only trace rows whose source column matches "
+              "this value, e.g. batch_transfer_sync.");
+DEFINE_string(
+    trace_source_intents, "",
+    "Comma-separated source:intent mappings for trace replay, e.g. "
+    "mooncake_get:foreground_get,mooncake_put:migration. Rows whose source is "
+    "not mapped use --tent_intent_type.");
 DEFINE_uint64(deadline_us, 0,
               "tent only: relative per-transfer deadline in microseconds for "
               "tight worker threads (0 disables deadline tagging); cannot be "
@@ -119,6 +130,9 @@ std::string XferBenchConfig::workload_classes_json;
 double XferBenchConfig::qos_link_capacity_gbps = 0.0;
 std::string XferBenchConfig::qos_output_jsonl;
 uint64_t XferBenchConfig::request_interval_us = 0;
+std::string XferBenchConfig::trace_file;
+std::string XferBenchConfig::trace_source_filter;
+std::string XferBenchConfig::trace_source_intents;
 uint64_t XferBenchConfig::deadline_us = 0;
 int XferBenchConfig::deadline_tight_threads = 0;
 bool XferBenchConfig::deadline_bw_arbitration = false;
@@ -156,6 +170,9 @@ void XferBenchConfig::loadFromFlags() {
     qos_link_capacity_gbps = FLAGS_qos_link_capacity_gbps;
     qos_output_jsonl = FLAGS_qos_output_jsonl;
     request_interval_us = FLAGS_request_interval_us;
+    trace_file = FLAGS_trace_file;
+    trace_source_filter = FLAGS_trace_source_filter;
+    trace_source_intents = FLAGS_trace_source_intents;
     deadline_us = FLAGS_deadline_us;
     deadline_tight_threads = FLAGS_deadline_tight_threads;
     deadline_bw_arbitration = FLAGS_deadline_bw_arbitration;

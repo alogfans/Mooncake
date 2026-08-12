@@ -125,6 +125,15 @@ class TENTBenchRunner : public BenchRunner {
                              OpCode opcode, uint64_t deadline_ns,
                              IntentType intent_type);
 
+    bool submitTraceTransfer(uint64_t local_addr, uint64_t target_addr,
+                             uint64_t length, OpCode opcode,
+                             uint64_t deadline_ns, IntentType intent_type,
+                             uint64_t* batch_id);
+
+    bool pollTraceTransfer(uint64_t batch_id, bool* completed);
+
+    void freeTraceTransfer(uint64_t batch_id);
+
    private:
     int allocateBuffers();
 

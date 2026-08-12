@@ -17,6 +17,7 @@
 #include "bench_runner.h"
 #include "qos_metrics_adapter.h"
 #include "te_backend.h"
+#include "trace_replay.h"
 #include "workload_config.h"
 #ifdef USE_TENT
 #include "tent_backend.h"
@@ -301,6 +302,11 @@ int main(int argc, char* argv[]) {
         LOG(ERROR) << "qos_link_capacity_gbps must be finite and non-negative";
         return EXIT_FAILURE;
     }
+    if (!XferBenchConfig::trace_file.empty() &&
+        XferBenchConfig::op_type == "mix") {
+        LOG(ERROR) << "trace replay supports --op_type=read|write";
+        return EXIT_FAILURE;
+    }
     if (XferBenchConfig::deadline_tight_threads < 0 ||
         XferBenchConfig::deadline_tight_threads >
             XferBenchConfig::max_num_threads) {
@@ -361,6 +367,13 @@ int main(int argc, char* argv[]) {
                   << " --backend=" << XferBenchConfig::backend << std::endl
                   << "Press Ctrl-C to terminate\033[0m" << std::endl;
         return runner->runTarget();
+    }
+    if (!XferBenchConfig::trace_file.empty()) {
+        const int num_threads = 1;
+        if (runner->startInitiator(num_threads) != 0) return EXIT_FAILURE;
+        const int rc = processTraceReplay(*runner, num_threads);
+        runner->stopInitiator();
+        return rc == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
     }
     if (!workload_classes.empty()) {
         const int num_threads = XferBenchConfig::start_num_threads;
