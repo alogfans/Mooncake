@@ -287,27 +287,7 @@ bool TransportSelector::matchesMemoryPattern(const std::string& pattern,
         return true;
     }
 
-    // Convert MemoryType to string for comparison
-    std::string type_str;
-    switch (type) {
-        case MTYPE_CPU:
-            type_str = kMemoryTypeCpu;
-            break;
-        case MTYPE_CUDA:
-            type_str = kMemoryTypeCuda;
-            break;
-        case MTYPE_ROCM:
-            type_str = "rocm";
-            break;
-        case MTYPE_TPU:
-            type_str = "tpu";
-            break;
-        default:
-            type_str = "unknown";
-            break;
-    }
-
-    return pattern == type_str;
+    return pattern == memoryTypeName(type);
 }
 
 bool TransportSelector::matchesPolicy(const SelectionPolicy& policy,
