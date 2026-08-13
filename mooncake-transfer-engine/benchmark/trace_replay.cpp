@@ -39,20 +39,13 @@ namespace tent {
 namespace {
 
 constexpr uint64_t kTraceReportIntervalNs = 10000000000ull;
+constexpr uint64_t kTraceStatsSkipNs = 10000000000ull;
 constexpr size_t kTraceMetadataThreshold = 1ull << 20;
 
 struct TraceRecord {
     uint64_t offset_ns = 0;
     size_t length = 0;
     std::string source;
-};
-
-struct InflightTraceTransfer {
-    size_t slot = 0;
-    uint64_t batch_id = 0;
-    size_t length = 0;
-    uint64_t issue_ns = 0;
-    std::string group;
 };
 
 struct TraceStatsGroup {
@@ -262,19 +255,60 @@ IntentType intentForTraceRecord(
     return it == source_intents.end() ? default_intent : it->second;
 }
 
+const char* traceIntentTypeName(IntentType intent) {
+    switch (intent) {
+        case IntentType::INTENT_UNSPEC:
+            return "unspec";
+        case IntentType::FOREGROUND_GET:
+            return "foreground_get";
+        case IntentType::BACKGROUND_PREFETCH:
+            return "background_prefetch";
+        case IntentType::MIGRATION:
+            return "migration";
+        case IntentType::CHECKPOINT:
+            return "checkpoint";
+        case IntentType::WEIGHT_LOADING:
+            return "weight_loading";
+        case IntentType::STAGING_INTERNAL:
+            return "staging_internal";
+    }
+    return "unknown";
+}
+
+std::string describeTraceSourceIntents(
+    const std::unordered_map<std::string, IntentType>& source_intents) {
+    if (source_intents.empty()) return "<none>";
+    std::vector<std::string> entries;
+    entries.reserve(source_intents.size());
+    for (const auto& kv : source_intents) {
+        entries.push_back(kv.first + ":" + traceIntentTypeName(kv.second));
+    }
+    std::sort(entries.begin(), entries.end());
+    std::ostringstream os;
+    for (size_t i = 0; i < entries.size(); ++i) {
+        if (i > 0) os << ',';
+        os << entries[i];
+    }
+    return os.str();
+}
+
+bool shouldCollectTraceStats(const TraceRecord& record) {
+    return record.offset_ns >= kTraceStatsSkipNs;
+}
+
 void printTraceStats(const char* label, size_t completed, size_t total_events,
                      uint64_t completed_bytes, XferBenchStats& stats) {
     std::cout << std::fixed << std::setprecision(6) << label
               << " events=" << completed << '/' << total_events
               << " bytes=" << completed_bytes
-              << " wall_time_us(avg/p99/p999)="
-              << stats.transfer_duration.avg() << '/'
-              << stats.transfer_duration.p99() << '/'
-              << stats.transfer_duration.p999()
-              << " instant_GB/s(avg/p99/p999)="
-              << stats.instant_bandwidth.avg() << '/'
-              << stats.instant_bandwidth.p99() << '/'
-              << stats.instant_bandwidth.p999() << std::endl;
+              << " wall_time_us(p50/p95/p99)="
+              << stats.transfer_duration.p50() << '/'
+              << stats.transfer_duration.p95() << '/'
+              << stats.transfer_duration.p99()
+              << " instant_GB/s(p50/p95/p99)="
+              << stats.instant_bandwidth.p50() << '/'
+              << stats.instant_bandwidth.p95() << '/'
+              << stats.instant_bandwidth.p99() << std::endl;
 }
 
 std::string groupForTraceRecord(const TraceRecord& record) {
@@ -290,6 +324,11 @@ void addTraceSample(TraceStatsGroup& group, size_t bytes, double latency_us,
     group.completed_bytes += bytes;
     group.stats.transfer_duration.add(latency_us);
     group.stats.instant_bandwidth.add(instant_gbps);
+}
+
+void addTraceExpected(TraceStatsGroup& group, size_t bytes) {
+    group.total_events++;
+    group.total_bytes += bytes;
 }
 
 void printTraceStatsGroups(
@@ -331,11 +370,11 @@ int processTraceReplay(BenchRunner& runner, int num_threads) {
         LOG(ERROR) << "trace replay uses a single submit/poll thread";
         return -1;
     }
-    const size_t slot_count = std::min<size_t>(
-        records.size(), XferBenchConfig::total_buffer_size / max_length);
-    if (slot_count == 0) {
+    const size_t slot_count = 1;
+    if (max_length > XferBenchConfig::total_buffer_size) {
         LOG(ERROR) << "trace replay requires total_buffer_size >= "
-                   << max_length << " bytes for max trace length " << max_length;
+                   << max_length << " bytes for max trace length "
+                   << max_length;
         return -1;
     }
 
@@ -352,37 +391,50 @@ int processTraceReplay(BenchRunner& runner, int num_threads) {
         return -1;
     }
 
-    const OpCode opcode = traceOpcode();
-    std::cout << "Trace replay: file=" << XferBenchConfig::trace_file
-              << " source_filter="
-              << (XferBenchConfig::trace_source_filter.empty()
-                      ? "<none>"
-                      : XferBenchConfig::trace_source_filter)
-              << " source_intents="
-              << (XferBenchConfig::trace_source_intents.empty()
-                      ? "<none>"
-                      : XferBenchConfig::trace_source_intents)
-              << " records=" << records.size() << " submit_threads=1"
-              << " buffer_slots=" << slot_count << " max_length=" << max_length
-              << " trace_span_s=" << trace_span_ns / 1e9
-              << " max_outstanding_by_buffer=" << slot_count << std::endl;
-
     std::unordered_map<std::string, TraceStatsGroup> stats_groups;
     stats_groups.emplace("overall", TraceStatsGroup{});
     std::vector<std::string> group_order;
     std::unordered_map<std::string, bool> seen_groups;
+    size_t stats_window_skipped_events = 0;
+    uint64_t stats_window_skipped_bytes = 0;
     for (const auto& record : records) {
-        stats_groups["overall"].total_events++;
-        stats_groups["overall"].total_bytes += record.length;
+        if (!shouldCollectTraceStats(record)) {
+            stats_window_skipped_events++;
+            stats_window_skipped_bytes += record.length;
+            continue;
+        }
         const std::string group = groupForTraceRecord(record);
         if (!seen_groups[group]) {
             seen_groups[group] = true;
             group_order.push_back(group);
             stats_groups.emplace(group, TraceStatsGroup{});
         }
-        stats_groups[group].total_events++;
-        stats_groups[group].total_bytes += record.length;
     }
+
+    const OpCode opcode = traceOpcode();
+    std::cout << "Trace replay: file=" << XferBenchConfig::trace_file
+              << " source_filter="
+              << (XferBenchConfig::trace_source_filter.empty()
+                      ? "<none>"
+                      : XferBenchConfig::trace_source_filter)
+              << " default_intent=" << traceIntentTypeName(default_intent)
+              << " source_intents=" << describeTraceSourceIntents(source_intents)
+              << " records=" << records.size()
+              << " submit_threads=" << num_threads
+              << " buffer_slots=" << slot_count << " max_length=" << max_length
+              << " trace_span_s=" << trace_span_ns / 1e9
+              << " stats_skip_s=" << kTraceStatsSkipNs / 1e9
+              << " stats_window_records="
+              << records.size() - stats_window_skipped_events
+              << " stats_window_skipped_records="
+              << stats_window_skipped_events
+              << " stats_window_skipped_bytes=" << stats_window_skipped_bytes
+              << " max_outstanding_by_buffer=" << slot_count
+              << " delayed_when_inflight=1"
+              << std::endl;
+
+    size_t delayed_events = 0;
+    uint64_t delayed_bytes = 0;
 
     const int rc = runner.runInitiatorTasks([&](int thread_id) -> int {
         runner.pinThread(thread_id);
@@ -390,93 +442,84 @@ int processTraceReplay(BenchRunner& runner, int num_threads) {
             runner.getLocalBufferBase(thread_id, max_length, slot_count);
         const uint64_t target_base =
             runner.getTargetBufferBase(thread_id, max_length, slot_count);
+
         const uint64_t start_ns = steadyClockNs();
         uint64_t next_report_ns = start_ns + kTraceReportIntervalNs;
-        size_t next_event = 0;
-        std::vector<size_t> free_slots;
-        free_slots.reserve(slot_count);
-        for (size_t slot = 0; slot < slot_count; ++slot) {
-            free_slots.push_back(slot_count - 1 - slot);
-        }
-        std::vector<InflightTraceTransfer> inflight;
-        inflight.reserve(slot_count);
+        auto maybeReportProgress = [&](uint64_t now_ns) {
+            if (now_ns < next_report_ns) return;
+            printTraceStatsGroups("[trace-progress]", group_order,
+                                  stats_groups);
+            do {
+                next_report_ns += kTraceReportIntervalNs;
+            } while (now_ns >= next_report_ns);
+        };
 
-        while (true) {
-            bool made_progress = false;
+        for (size_t event = 0; event < records.size(); ++event) {
+            const auto& record = records[event];
+            const uint64_t scheduled_ns = start_ns + record.offset_ns;
             uint64_t now_ns = steadyClockNs();
-
-            while (next_event < records.size() && !free_slots.empty()) {
-                const auto& record = records[next_event];
-                const uint64_t scheduled_ns = start_ns + record.offset_ns;
-                if (now_ns < scheduled_ns) break;
-
-                const size_t slot = free_slots.back();
-                free_slots.pop_back();
-                const uint64_t local_addr = local_base + slot * max_length;
-                const uint64_t target_addr = target_base + slot * max_length;
-                uint64_t batch_id = 0;
-                const uint64_t issue_ns = steadyClockNs();
-                if (!runner.submitTraceTransfer(local_addr, target_addr,
-                                                record.length, opcode,
-                                                traceDeadlineNs(),
-                                                intentForTraceRecord(
-                                                    record, source_intents,
-                                                    default_intent),
-                                                &batch_id)) {
-                    return -1;
-                }
-                inflight.push_back(InflightTraceTransfer{
-                    slot, batch_id, record.length, issue_ns,
-                    groupForTraceRecord(record)});
-                ++next_event;
-                made_progress = true;
+            const bool delayed_by_backpressure = now_ns > scheduled_ns;
+            while (now_ns < scheduled_ns) {
+                maybeReportProgress(now_ns);
+                std::this_thread::yield();
                 now_ns = steadyClockNs();
             }
 
-            for (size_t i = 0; i < inflight.size();) {
+            if (delayed_by_backpressure) {
+                delayed_events++;
+                delayed_bytes += record.length;
+            }
+
+            const uint64_t local_addr = local_base;
+            const uint64_t target_addr = target_base;
+            uint64_t batch_id = 0;
+            const uint64_t issue_ns = steadyClockNs();
+            const IntentType intent =
+                intentForTraceRecord(record, source_intents, default_intent);
+            if (!runner.submitTraceTransfer(local_addr, target_addr,
+                                            record.length, opcode,
+                                            traceDeadlineNs(), intent,
+                                            &batch_id)) {
+                return -1;
+            }
+
+            const bool collect_stats = shouldCollectTraceStats(record);
+            const std::string group = groupForTraceRecord(record);
+            if (collect_stats) {
+                addTraceExpected(stats_groups["overall"], record.length);
+                addTraceExpected(stats_groups[group], record.length);
+            }
+
+            while (true) {
                 bool completed = false;
-                if (!runner.pollTraceTransfer(inflight[i].batch_id, &completed))
+                if (!runner.pollTraceTransfer(batch_id, &completed)) {
                     return -1;
-                if (!completed) {
-                    ++i;
-                    continue;
                 }
-                const uint64_t complete_ns = steadyClockNs();
-                const double latency_us =
-                    static_cast<double>(complete_ns - inflight[i].issue_ns) /
-                    1000.0;
-                const double instant_gbps =
-                    gbPerSecond(inflight[i].length, latency_us);
-                runner.freeTraceTransfer(inflight[i].batch_id);
-                addTraceSample(stats_groups["overall"], inflight[i].length,
+                if (completed) break;
+                maybeReportProgress(steadyClockNs());
+            }
+
+            const uint64_t complete_ns = steadyClockNs();
+            const double latency_us =
+                static_cast<double>(complete_ns - issue_ns) / 1000.0;
+            const double instant_gbps =
+                gbPerSecond(record.length, latency_us);
+            runner.freeTraceTransfer(batch_id);
+            if (collect_stats) {
+                addTraceSample(stats_groups["overall"], record.length,
                                latency_us, instant_gbps);
-                addTraceSample(stats_groups[inflight[i].group],
-                               inflight[i].length, latency_us, instant_gbps);
-                free_slots.push_back(inflight[i].slot);
-                inflight[i] = inflight.back();
-                inflight.pop_back();
-                made_progress = true;
+                addTraceSample(stats_groups[group], record.length, latency_us,
+                               instant_gbps);
             }
-
-            now_ns = steadyClockNs();
-            if (now_ns >= next_report_ns) {
-                printTraceStatsGroups("[trace-progress]", group_order,
-                                      stats_groups);
-                do {
-                    next_report_ns += kTraceReportIntervalNs;
-                } while (now_ns >= next_report_ns);
-            }
-
-            if (next_event >= records.size() && inflight.empty()) break;
-            if (!made_progress) {
-                std::this_thread::yield();
-            }
+            maybeReportProgress(complete_ns);
         }
-
-        printTraceStatsGroups("[trace-summary]", group_order, stats_groups);
         return 0;
     });
     if (rc != 0) return -1;
+
+    printTraceStatsGroups("[trace-summary]", group_order, stats_groups);
+    std::cout << "Trace replay delayed: events=" << delayed_events
+              << " bytes=" << delayed_bytes << std::endl;
 
     return 0;
 }

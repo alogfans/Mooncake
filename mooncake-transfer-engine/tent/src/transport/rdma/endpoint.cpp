@@ -830,6 +830,12 @@ Status RdmaEndPoint::submitDirectSlice(RdmaSlice* slice) {
     return Status::OK();
 }
 
+bool RdmaEndPoint::isDirectReady() {
+    RWSpinlock::ReadGuard guard(lock_);
+    return direct_qp_ && peer_direct_qp_num_ != 0 &&
+           status_.load(std::memory_order_relaxed) == EP_READY;
+}
+
 void RdmaEndPoint::completeDirectSlice(RdmaSlice* slice) {
     (void)slice;
     cancelDirectQuota();

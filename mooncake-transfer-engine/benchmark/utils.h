@@ -115,6 +115,8 @@ struct XferMetricStats {
         return sum / samples.size();
     }
 
+    double p50() { return percentile(50.0); }
+
     double p90() { return percentile(90.0); }
 
     double p95() { return percentile(95.0); }

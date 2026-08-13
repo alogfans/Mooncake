@@ -439,6 +439,8 @@ static inline bool prefersLatencyPosting(const Request& request) {
            request.intent_type == IntentType::FOREGROUND_GET;
 }
 
+constexpr size_t kDirectSplitThresholdSlices = 8;
+
 static bool memEntryContainsDevice(const Topology::MemEntry* entry,
                                    int device_id) {
     if (!entry) return false;
@@ -526,6 +528,7 @@ bool RdmaTransport::trySubmitDirect(RdmaSubBatch* rdma_batch,
     if (!source_mem_entry) return false;
 
     std::string target_location;
+    std::string target_nic_path_name;
     auto target_status = segment_manager.withCachedSegment(
         request.target_id, target_pin, [&](SegmentDesc* segment) {
             if (segment->type != SegmentType::Memory)
@@ -539,6 +542,7 @@ bool RdmaTransport::trySubmitDirect(RdmaSubBatch* rdma_batch,
             target_topo = &std::get<MemorySegmentDesc>(segment->detail).topology;
             target_location = bufferLocationForRange(
                 *target_buffer, request.target_offset, request.length);
+            target_nic_path_name = segment->nicPathServerName();
             return Status::OK();
         });
     if (!target_status.ok()) return false;
@@ -567,7 +571,7 @@ bool RdmaTransport::trySubmitDirect(RdmaSubBatch* rdma_batch,
     const size_t slice_size = params_->workers.block_size;
     if (slice_size == 0) return false;
     size_t num_slices = 1;
-    if (request.length > slice_size) {
+    if (request.length >= slice_size * kDirectSplitThresholdSlices) {
         num_slices = std::min<size_t>(
             source_devs.size(), (request.length + slice_size - 1) / slice_size);
     }
@@ -656,9 +660,21 @@ bool RdmaTransport::trySubmitDirect(RdmaSubBatch* rdma_batch,
     std::vector<std::shared_ptr<RdmaEndPoint>> endpoints;
     endpoints.reserve(num_slices);
     for (size_t i = 0; i < num_slices; ++i) {
-        auto endpoint = getEndpointForContextIndex(
-            context_indices[i], request.target_id, target_devs[i]);
-        if (!endpoint) {
+        auto& context = context_set_[context_indices[i]];
+        const auto target_dev_name = target_topo->getNicName(target_devs[i]);
+        if (!context || target_nic_path_name.empty() ||
+            target_dev_name.empty()) {
+            for (auto* slice : slices) RdmaSliceStorage::Get().deallocate(slice);
+            for (int acquired : acquired_contexts) {
+                context_set_[acquired]->releaseDirectLane(task);
+            }
+            RdmaTaskStorage::Get().deallocate(task);
+            return false;
+        }
+        auto endpoint =
+            context->endpointStore()->get(MakeNicPath(target_nic_path_name,
+                                                      target_dev_name));
+        if (!endpoint || !endpoint->isDirectReady()) {
             for (auto* slice : slices) RdmaSliceStorage::Get().deallocate(slice);
             for (int acquired : acquired_contexts) {
                 context_set_[acquired]->releaseDirectLane(task);
