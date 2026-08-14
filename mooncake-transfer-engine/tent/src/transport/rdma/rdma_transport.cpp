@@ -36,6 +36,7 @@
 #include "tent/transport/rdma/endpoint_store.h"
 #include "tent/transport/rdma/workers.h"
 #include "tent/common/utils/string_builder.h"
+#include "tent/runtime/direct_path_policy.h"
 #include "tent/runtime/topology.h"
 #include "tent/common/utils/random.h"
 #include "tent/thirdparty/nlohmann/json.h"
@@ -434,29 +435,6 @@ static inline uint64_t roundup(uint64_t a, uint64_t b) {
     return (a % b == 0) ? a : (a / b + 1) * b;
 }
 
-static inline bool prefersLatencyPosting(const Request& request) {
-    return request.deadline_ns != 0 ||
-           request.intent_type == IntentType::FOREGROUND_GET;
-}
-
-enum class DirectFastPathMode { Disabled, Enabled, Auto };
-
-static DirectFastPathMode directFastPathMode() {
-    static const DirectFastPathMode mode = [] {
-        const char* env = std::getenv("MC_EXP_FORCE_DIRECT");
-        if (!env || !*env) return DirectFastPathMode::Auto;
-        const std::string value(env);
-        if (value == "disabled" || value == "disable" || value == "off" ||
-            value == "0")
-            return DirectFastPathMode::Disabled;
-        if (value == "enabled" || value == "enable" || value == "on" ||
-            value == "1")
-            return DirectFastPathMode::Enabled;
-        return DirectFastPathMode::Auto;
-    }();
-    return mode;
-}
-
 constexpr size_t kDirectMaxRequestSlices = 32;
 
 static bool memEntryContainsDevice(const Topology::MemEntry* entry,
@@ -621,8 +599,7 @@ bool RdmaTransport::trySubmitDirect(RdmaSubBatch* rdma_batch,
     auto* task = RdmaTaskStorage::Get().allocate();
     if (!task) return false;
     std::vector<int> acquired_contexts;
-    const bool wait_direct_lock =
-        directFastPathMode() == DirectFastPathMode::Enabled;
+    const bool wait_direct_lock = DirectPathPolicy::requiresDirectPath(request);
     for (int context_index : context_indices) {
         auto& context = context_set_[context_index];
         bool acquired = context->tryAcquireDirectLane(task);
@@ -736,8 +713,8 @@ bool RdmaTransport::trySubmitDirect(RdmaSubBatch* rdma_batch,
     rdma_batch->slice_chain.push_back(slices.front());
 
     for (size_t i = 0; i < num_slices; ++i) {
-        auto post_status = endpoints[i]->submitDirectSlice(slices[i]);
         slices[i]->submit_ts = getCurrentTimeInNano();
+        auto post_status = endpoints[i]->submitDirectSlice(slices[i]);
         if (!post_status.ok()) {
             context_set_[context_indices[i]]->releaseDirectLane(task);
             updateSliceStatus(slices[i], FAILED);
@@ -776,11 +753,9 @@ Status RdmaTransport::submitTransferTasks(
     thread_local int tl_caller_id = g_caller_threads.fetch_add(1);
     int next_worker_idx = tl_caller_id;
     for (const auto& request : request_list) {
-        const DirectFastPathMode direct_mode = directFastPathMode();
+        const auto direct_decision = DirectPathPolicy::decide(request);
         const bool attempt_direct =
-            direct_mode == DirectFastPathMode::Enabled ||
-            (direct_mode == DirectFastPathMode::Auto &&
-             prefersLatencyPosting(request));
+            DirectPathPolicy::shouldAttemptDirectPath(direct_decision);
         if (attempt_direct && trySubmitDirect(rdma_batch, request)) continue;
         auto opcode = request.opcode;
         auto type = Platform::getLoader().getMemoryType(request.source);
