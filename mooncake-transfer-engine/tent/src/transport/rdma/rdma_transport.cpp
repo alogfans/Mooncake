@@ -439,7 +439,25 @@ static inline bool prefersLatencyPosting(const Request& request) {
            request.intent_type == IntentType::FOREGROUND_GET;
 }
 
-constexpr size_t kDirectSplitThresholdSlices = 8;
+enum class DirectFastPathMode { Disabled, Enabled, Auto };
+
+static DirectFastPathMode directFastPathMode() {
+    static const DirectFastPathMode mode = [] {
+        const char* env = std::getenv("MC_EXP_FORCE_DIRECT");
+        if (!env || !*env) return DirectFastPathMode::Auto;
+        const std::string value(env);
+        if (value == "disabled" || value == "disable" || value == "off" ||
+            value == "0")
+            return DirectFastPathMode::Disabled;
+        if (value == "enabled" || value == "enable" || value == "on" ||
+            value == "1")
+            return DirectFastPathMode::Enabled;
+        return DirectFastPathMode::Auto;
+    }();
+    return mode;
+}
+
+constexpr size_t kDirectMaxRequestSlices = 32;
 
 static bool memEntryContainsDevice(const Topology::MemEntry* entry,
                                    int device_id) {
@@ -494,6 +512,11 @@ void RdmaTransport::pollDirectCompletions(int context_index) {
 bool RdmaTransport::trySubmitDirect(RdmaSubBatch* rdma_batch,
                                     const Request& request) {
     if (!rdma_batch || request.length == 0) return false;
+    const size_t slice_size = params_->workers.block_size;
+    if (slice_size == 0 ||
+        request.length > slice_size * kDirectMaxRequestSlices) {
+        return false;
+    }
 
     SegmentDescRef source_pin, target_pin;
     BufferDesc* source_buffer = nullptr;
@@ -568,13 +591,7 @@ bool RdmaTransport::trySubmitDirect(RdmaSubBatch* rdma_batch,
     }
     if (source_devs.empty()) return false;
 
-    const size_t slice_size = params_->workers.block_size;
-    if (slice_size == 0) return false;
-    size_t num_slices = 1;
-    if (request.length >= slice_size * kDirectSplitThresholdSlices) {
-        num_slices = std::min<size_t>(
-            source_devs.size(), (request.length + slice_size - 1) / slice_size);
-    }
+    const size_t num_slices = 1;
     source_devs.resize(num_slices);
 
     const auto target_rank0 = rank0DevicesForMemEntry(target_mem_entry);
@@ -604,9 +621,21 @@ bool RdmaTransport::trySubmitDirect(RdmaSubBatch* rdma_batch,
     auto* task = RdmaTaskStorage::Get().allocate();
     if (!task) return false;
     std::vector<int> acquired_contexts;
+    const bool wait_direct_lock =
+        directFastPathMode() == DirectFastPathMode::Enabled;
     for (int context_index : context_indices) {
         auto& context = context_set_[context_index];
-        if (!context->tryAcquireDirectLane(task)) {
+        bool acquired = context->tryAcquireDirectLane(task);
+        if (!acquired) {
+            if (wait_direct_lock) {
+                while (context->status() == RdmaContext::DEVICE_ENABLED) {
+                    pollDirectCompletions(context_index);
+                    acquired = context->tryAcquireDirectLane(task);
+                    if (acquired) break;
+                }
+            }
+        }
+        if (!acquired) {
             for (int acquired : acquired_contexts) {
                 context_set_[acquired]->releaseDirectLane(task);
             }
@@ -747,8 +776,12 @@ Status RdmaTransport::submitTransferTasks(
     thread_local int tl_caller_id = g_caller_threads.fetch_add(1);
     int next_worker_idx = tl_caller_id;
     for (const auto& request : request_list) {
-        const bool latency_request = prefersLatencyPosting(request);
-        if (latency_request && trySubmitDirect(rdma_batch, request)) continue;
+        const DirectFastPathMode direct_mode = directFastPathMode();
+        const bool attempt_direct =
+            direct_mode == DirectFastPathMode::Enabled ||
+            (direct_mode == DirectFastPathMode::Auto &&
+             prefersLatencyPosting(request));
+        if (attempt_direct && trySubmitDirect(rdma_batch, request)) continue;
         auto opcode = request.opcode;
         auto type = Platform::getLoader().getMemoryType(request.source);
         size_t max_slice_count = 64;

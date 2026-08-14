@@ -77,9 +77,7 @@ int processBatchSizes(
         const uint64_t interval_ns =
             XferBenchConfig::request_interval_us * 1000ull;
         const uint64_t target_ns = steadyClockNs() + interval_ns;
-        while (steadyClockNs() < target_ns) {
-            std::this_thread::yield();
-        }
+        while (steadyClockNs() < target_ns) {}
     };
     size_t address_stride_bytes =
         XferBenchConfig::max_block_size * XferBenchConfig::max_batch_size;
@@ -133,9 +131,7 @@ int processBatchSizes(
             num_threads) {
             measurement_started.store(true, std::memory_order_release);
         } else {
-            while (!measurement_started.load(std::memory_order_acquire)) {
-                std::this_thread::yield();
-            }
+            while (!measurement_started.load(std::memory_order_acquire)) {}
         }
         timer.reset();
         std::vector<double> transfer_duration;

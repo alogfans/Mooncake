@@ -56,6 +56,17 @@ if(USE_SUNRISE)
   target_link_libraries(tebench PUBLIC tangrt_shared)
 endif()
 
+find_library(IBVERBS_DIRECT_POST_LIB ibverbs)
+find_path(IBVERBS_DIRECT_POST_INCLUDE infiniband/verbs.h)
+if(IBVERBS_DIRECT_POST_LIB AND IBVERBS_DIRECT_POST_INCLUDE)
+  add_executable(rdma_direct_post_bench
+                 tools/rdma_direct_post_bench.cpp)
+  target_include_directories(rdma_direct_post_bench
+                             PRIVATE ${IBVERBS_DIRECT_POST_INCLUDE})
+  target_link_libraries(rdma_direct_post_bench
+                        PRIVATE ${IBVERBS_DIRECT_POST_LIB})
+endif()
+
 # Set RPATH for finding libasio.so at runtime
 if(USE_SUNRISE AND MC_TANGRT_ROOT)
   set(TANGRT_RPATH ":${MC_TANGRT_ROOT}/lib")
