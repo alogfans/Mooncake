@@ -1472,6 +1472,8 @@ Status TransferEngineImpl::prepareSubmit(
     for (const auto& request : merged.request_list) {
         PreparedSubmit::Owner owner;
         owner.request = request;
+        owner.request.priority =
+            DirectPathPolicy::priorityForRequest(owner.request);
         auto resolved = resolveExecutionRoute(owner.request, 0);
         owner.route = resolved.route;
         owner.staging = resolved.staging;
@@ -1577,7 +1579,7 @@ Status TransferEngineImpl::commitPreparedSubmit(
         size_t sub_task_id = next_sub_task_id[task.type];
         next_sub_task_id[task.type]++;
 
-        classified_request_list[task.type].push_back(merged_request);
+        classified_request_list[task.type].push_back(task.request);
         task.sub_task_id = sub_task_id;
         task.derived = false;
         task_id_list[task.type].push_back(task_id);
@@ -1628,6 +1630,7 @@ void TransferEngineImpl::initializeTaskFromRoute(
     task.xport_priority = 0;
     task.status = PENDING;
     task.request = request;
+    task.request.priority = DirectPathPolicy::priorityForRequest(request);
     task.staging = false;
     task.start_time = start_time;
     task.dispatch_time = dispatch_time;
@@ -1920,7 +1923,8 @@ Status TransferEngineImpl::trySubmitDirectShortcut(
     if (batch->task_list.size() + 1 > batch->max_size)
         return Status::TooManyRequests("Exceed batch capacity" LOC_MARK);
 
-    const auto& request = request_list.front();
+    auto request = request_list.front();
+    request.priority = DirectPathPolicy::priorityForRequest(request);
     const auto direct_decision = DirectPathPolicy::decide(request);
     if (!DirectPathPolicy::shouldAttemptDirectPath(direct_decision))
         return Status::OK();
@@ -1948,7 +1952,8 @@ Status TransferEngineImpl::trySubmitDirectShortcut(
 
     auto& stored_task = batch->task_list.back();
     startTransportAttempt(stored_task, RDMA, now);
-    auto status = transport->submitTransferTasks(sub_batch, {request});
+    auto status = transport->submitTransferTasks(sub_batch,
+                                                {stored_task.request});
     if (!status.ok()) {
         finishTransportAttempt(stored_task, FAILED,
                                std::chrono::steady_clock::now());
