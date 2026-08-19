@@ -400,22 +400,48 @@ build/mooncake-transfer-engine/benchmark/sglang_trace_replay_bench \
 
 The third experiment keeps the main Mode 3 replay unchanged and injects
 additional external RDMA traffic from a separate `sglang_trace_replay_bench`
-process. This models reduced available network bandwidth without mutating the
-main business trace.
+process. The external traffic is intentionally unlabeled (`unspec` intent) and
+restricted to a single rail (`mlx5_1`). This models reduced available network
+bandwidth without mutating the main business trace.
 
-The external traces are Store-only traces generated from `build/rdma_traffic.csv`:
+The external injector uses this config:
+
+```json
+{
+  "topology": {
+    "rdma_whitelist": ["mlx5_1"]
+  }
+}
+```
+
+The external trace is synthetic Store-put traffic with fixed-size transfers and
+fixed inter-arrival time:
 
 | External load | Trace mutation |
 |---:|---|
-| `none` | no external injector; reuse the Mode 3 three-mode rerun |
-| `1x` | keep only `mooncake_put` / `mooncake_get` rows |
-| `2x` | keep only Store rows and duplicate each Store row once |
+| `none` | no external injector |
+| `10 GB/s` | 16 MiB `mooncake_put` every 1677.722 us for 60 s |
 
 The generated traces and raw logs are under:
 
 ```text
 build/sglang_fault_injection/
 ```
+
+Complete logs for this experiment:
+
+| Run | Log |
+|---|---|
+| Mode 3 target | `build/sglang_fault_injection/main_target_fault_const_10GBps.log` |
+| Mode 3 no-inject main replay | `build/sglang_fault_injection/main_replay_65s_baseline.log` |
+| Mode 3 + injector main replay | `build/sglang_fault_injection/main_replay_65s_const_10GBps_unlabeled_1rail.log` |
+| Mode 3 + injector external replay | `build/sglang_fault_injection/external_replay_const_10GBps_unlabeled_1rail_60s.log` |
+| `unspec` target | `build/sglang_fault_injection/main_target_fault_unspec.log` |
+| `unspec` no-inject main replay | `build/sglang_fault_injection/main_replay_65s_unspec_baseline.log` |
+| `unspec` + injector main replay | `build/sglang_fault_injection/main_replay_65s_unspec_const_10GBps_unlabeled_1rail.log` |
+| `unspec` + injector external replay | `build/sglang_fault_injection/external_replay_const_10GBps_unlabeled_1rail_60s_unspec_main.log` |
+| External injector target | `build/sglang_fault_injection/external_const_unlabeled_1rail_target.log` |
+| External injector target for `unspec` run | `build/sglang_fault_injection/external_const_unlabeled_1rail_target_unspec.log` |
 
 The external target uses an independent segment and RPC port range:
 
@@ -426,39 +452,55 @@ env -u MC_TENT_CONF -u MC_TE_FILTERS -u MC_TE_FILTERS_EXCLUDE \
 build/mooncake-transfer-engine/benchmark/sglang_trace_replay_bench \
   --mode=target \
   --scenario=qpool \
-  --local_segment_name=external-store-target \
-  --rpc_server_port=21201
+  --tent_conf_file=benchmarks/sglang_external_unlabeled_1rail.json \
+  --default_intent=unspec \
+  --pd_intent=unspec \
+  --store_intent=unspec \
+  --local_segment_name=external-const-unlabeled-1rail-target \
+  --rpc_server_port=21401
 '
 ```
 
-For each fault-injection run, the external Store-only replay starts 15 seconds
-before the main replay and runs for 330 seconds. The main replay remains the
-original 300-second Mode 3 replay over `build/rdma_traffic.csv`.
+The main replay runs for 65 seconds and skips the first 5 seconds from summary
+statistics. For the fault-injection run, the external replay starts at the
+5-second mark and runs for 60 seconds, so the main summary window corresponds
+to the injection window.
 
 #### Fault-Injection Summary
 
-| External load | Injector Store put Avg Inst GB/s | Main overall P50/P95/P99 us | Main overall Avg Inst GB/s | Main foreground overlap P50/P95/P99 us | Main foreground P50/P95/P99 us | Main Store put P50/P95/P99 us |
-|---:|---:|---:|---:|---:|---:|---:|
-| `none` | n/a | 450.828 / 11344.172 / 22489.473 | 9.506 | 605.326 / 1546.242 / 2903.871 | 421.850 / 881.835 / 1406.842 | 2289.001 / 19300.610 / 28558.473 |
-| `1x` | 15.080 | 411.022 / 9778.554 / 20922.863 | 9.721 | 464.017 / 1044.085 / 2330.303 | 391.748 / 839.921 / 1430.001 | 1974.028 / 16772.057 / 33566.936 |
-| `2x` | 14.048 | 516.453 / 9161.568 / 23771.400 | 8.374 | 513.373 / 1003.326 / 2654.430 | 498.388 / 820.145 / 1539.336 | 2623.945 / 17126.192 / 35384.478 |
+| Main mode | External load | External offered GB/s | Main overall P50/P95/P99 us | Main overall Avg Inst GB/s | Main foreground overlap P50/P95/P99 us | Main foreground P50/P95/P99 us | Main Store put P50/P95/P99 us |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Mode 3 qpool | `none` | n/a | 399.947 / 8446.195 / 22083.855 | 8.856 | 560.462 / 1849.417 / 1849.417 | 408.275 / 849.626 / 1612.712 | 2233.797 / 17050.385 / 26511.581 |
+| Mode 3 qpool | `10 GB/s` | 10.000 | 450.955 / 12784.542 / 23309.914 | 7.339 | 646.588 / 2716.734 / 2716.734 | 442.029 / 1623.183 / 3270.395 | 3249.379 / 18100.817 / 26792.877 |
+| `unspec` baseline | `none` | n/a | 434.688 / 9451.527 / 16982.534 | 9.647 | 407.808 / 3499.565 / 3499.565 | 377.298 / 1008.823 / 3179.772 | 1742.668 / 13661.900 / 20176.747 |
+| `unspec` baseline | `10 GB/s` | 10.000 | 498.145 / 11897.875 / 20675.951 | 9.194 | 602.340 / 8498.431 / 8498.431 | 380.990 / 3589.812 / 6902.588 | 1682.588 / 17075.642 / 30372.225 |
 
 #### Fault-Injection Details
 
-| External load | Group | Events | Bytes | Latency P50/P95/P99 us | Avg Inst GB/s |
-|---:|---|---:|---:|---:|---:|
-| `1x` | injector.store.put | 1056 | 50983862272 | 2280.465 / 10779.944 / 17630.387 | 15.080 |
-| `1x` | main.overall | 4252 | 100040981504 | 411.022 / 9778.554 / 20922.863 | 9.721 |
-| `1x` | main.foreground_pd | 692 | 4172283904 | 391.748 / 839.921 / 1430.001 | 15.288 |
-| `1x` | main.foreground_pd.overlap_store_put | 92 | 554696704 | 464.017 / 1044.085 / 2330.303 | 13.040 |
-| `1x` | main.foreground_pd.no_store_put | 600 | 3617587200 | 386.482 / 792.983 / 1113.030 | 15.632 |
-| `1x` | main.store.put | 956 | 45123371008 | 1974.028 / 16772.057 / 33566.936 | 15.046 |
-| `2x` | injector.store.put | 2112 | 101967724544 | 2503.754 / 13338.609 / 24343.803 | 14.048 |
-| `2x` | main.overall | 4252 | 100040981504 | 516.453 / 9161.568 / 23771.400 | 8.374 |
-| `2x` | main.foreground_pd | 692 | 4172283904 | 498.388 / 820.145 / 1539.336 | 13.243 |
-| `2x` | main.foreground_pd.overlap_store_put | 98 | 590872576 | 513.373 / 1003.326 / 2654.430 | 11.713 |
-| `2x` | main.foreground_pd.no_store_put | 594 | 3581411328 | 490.756 / 803.266 / 1421.604 | 13.495 |
-| `2x` | main.store.put | 956 | 45123371008 | 2623.945 / 17126.192 / 35384.478 | 12.655 |
+| Main mode | External load | Group | Events | Bytes | Latency P50/P95/P99 us | Avg Inst GB/s |
+|---|---:|---|---:|---:|---:|---:|
+| Mode 3 qpool | `none` | main.overall | 764 | 15869629184 | 399.947 / 8446.195 / 22083.855 | 8.856 |
+| Mode 3 qpool | `none` | main.foreground_pd | 136 | 819986432 | 408.275 / 849.626 / 1612.712 | 15.161 |
+| Mode 3 qpool | `none` | main.foreground_pd.overlap_store_put | 18 | 108527616 | 560.462 / 1849.417 / 1849.417 | 10.258 |
+| Mode 3 qpool | `none` | main.foreground_pd.no_store_put | 118 | 711458816 | 398.457 / 621.862 / 836.395 | 15.909 |
+| Mode 3 qpool | `none` | main.store.put | 164 | 7042236416 | 2233.797 / 17050.385 / 26511.581 | 13.367 |
+| Mode 3 qpool | `10 GB/s` | injector.store.put | 35764 | 600020353024 | 942.321 / 1089.063 / 2167.837 | 28.928 |
+| Mode 3 qpool | `10 GB/s` | main.overall | 764 | 15869629184 | 450.955 / 12784.542 / 23309.914 | 7.339 |
+| Mode 3 qpool | `10 GB/s` | main.foreground_pd | 136 | 819986432 | 442.029 / 1623.183 / 3270.395 | 13.789 |
+| Mode 3 qpool | `10 GB/s` | main.foreground_pd.overlap_store_put | 18 | 108527616 | 646.588 / 2716.734 / 2716.734 | 10.054 |
+| Mode 3 qpool | `10 GB/s` | main.foreground_pd.no_store_put | 118 | 711458816 | 416.969 / 1055.769 / 3270.395 | 14.358 |
+| Mode 3 qpool | `10 GB/s` | main.store.put | 164 | 7042236416 | 3249.379 / 18100.817 / 26792.877 | 10.478 |
+| `unspec` baseline | `none` | main.overall | 764 | 15869629184 | 434.688 / 9451.527 / 16982.534 | 9.647 |
+| `unspec` baseline | `none` | main.foreground_pd | 136 | 819986432 | 377.298 / 1008.823 / 3179.772 | 16.187 |
+| `unspec` baseline | `none` | main.foreground_pd.overlap_store_put | 18 | 108527616 | 407.808 / 3499.565 / 3499.565 | 12.495 |
+| `unspec` baseline | `none` | main.foreground_pd.no_store_put | 118 | 711458816 | 376.423 / 924.905 / 1382.465 | 16.750 |
+| `unspec` baseline | `none` | main.store.put | 164 | 7042236416 | 1742.668 / 13661.900 / 20176.747 | 15.660 |
+| `unspec` baseline | `10 GB/s` | injector.store.put | 35764 | 600020353024 | 935.420 / 1193.939 / 2800.750 | 29.047 |
+| `unspec` baseline | `10 GB/s` | main.overall | 764 | 15869629184 | 498.145 / 11897.875 / 20675.951 | 9.194 |
+| `unspec` baseline | `10 GB/s` | main.foreground_pd | 136 | 819986432 | 380.990 / 3589.812 / 6902.588 | 15.901 |
+| `unspec` baseline | `10 GB/s` | main.foreground_pd.overlap_store_put | 18 | 108527616 | 602.340 / 8498.431 / 8498.431 | 10.840 |
+| `unspec` baseline | `10 GB/s` | main.foreground_pd.no_store_put | 118 | 711458816 | 358.164 / 1148.539 / 6350.024 | 16.673 |
+| `unspec` baseline | `10 GB/s` | main.store.put | 164 | 7042236416 | 1682.588 / 17075.642 / 30372.225 | 14.427 |
 
 ### Interpretation
 
@@ -492,8 +534,14 @@ tradeoff remains visible: Store put tail latency stays high because the
 background class is deliberately assigned to the smaller, lower-TC QP pool.
 
 The external-traffic fault-injection run strengthens the same claim under a
-different pressure model. Even with an independent Store-only injector sending
-about `14-15 GB/s`, the main Mode 3 foreground-overlap P99 stays between
-`2.3 ms` and `2.7 ms`. The cost again falls mostly on aggregate bandwidth and
-Store traffic: under `2x` external load, main overall average instantaneous
-bandwidth drops to `8.374 GB/s`, and main Store put P99 rises to `35.384 ms`.
+different pressure model. With a constant, unlabeled, single-rail injector
+offering `10 GB/s` for 60 seconds, the main Mode 3 foreground-overlap P99
+stays in the low-millisecond range (`1.849 ms` without the injector and
+`2.717 ms` with the injector). The `unspec` baseline is more sensitive in the
+same 60-second window: foreground-overlap P99 rises from `3.500 ms` without the
+injector to `8.498 ms` with the injector. Under the `10 GB/s` external load,
+Mode 3's foreground-overlap P99 is about `68.0%` lower than the `unspec`
+baseline. The cost again falls mostly on aggregate bandwidth and Store traffic:
+during the injection window, Mode 3 overall average instantaneous bandwidth
+drops from `8.856 GB/s` to `7.339 GB/s`, and Mode 3 Store put P50 rises from
+`2.234 ms` to `3.249 ms`.

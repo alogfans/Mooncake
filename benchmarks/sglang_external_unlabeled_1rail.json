@@ -1,0 +1,5 @@
+{
+  "topology": {
+    "rdma_whitelist": ["mlx5_1"]
+  }
+}
