@@ -159,7 +159,7 @@ int processBatchSizes(
                     checkedMul(thread_block_size, thread_batch_size,
                                "consistency payload size");
                 const uint64_t batch_bytes = bytes;
-                uint8_t pattern = 0;
+                uint64_t pattern = 0;
                 if (XferBenchConfig::check_consistency)
                     pattern = fillData((void*)local_addr, bytes);
                 paceRequest();

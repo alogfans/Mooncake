@@ -38,6 +38,35 @@ TEST(QosMetricsTest, SupportsBulkSamples) {
     EXPECT_DOUBLE_EQ(stats.avg(), 2.0);
 }
 
+TEST(ConsistencyPatternTest, SeededPatternIsDeterministicAndVaried) {
+    constexpr size_t kLen = 8192 + 37;
+    std::vector<uint8_t> first(kLen);
+    std::vector<uint8_t> second(kLen);
+    std::vector<uint8_t> other(kLen);
+
+    fillData(first.data(), first.size(), 0x123456789abcdef0ULL);
+    fillData(second.data(), second.size(), 0x123456789abcdef0ULL);
+    fillData(other.data(), other.size(), 0x0fedcba987654321ULL);
+
+    EXPECT_EQ(first, second);
+    EXPECT_NE(first, other);
+    EXPECT_NE(first[100], first[4096 + 100])
+        << "different chunks should not collapse to one repeated byte";
+    verifyData(first.data(), first.size(), 0x123456789abcdef0ULL);
+}
+
+#if GTEST_HAS_DEATH_TEST
+TEST(ConsistencyPatternTest, DetectsCorruptedPayloadByte) {
+    constexpr size_t kLen = 8192 + 37;
+    std::vector<uint8_t> data(kLen);
+    fillData(data.data(), data.size(), 0x123456789abcdef0ULL);
+    data[4096 + 100] ^= 0x5a;
+
+    EXPECT_DEATH(verifyData(data.data(), data.size(), 0x123456789abcdef0ULL),
+                 "Inconsistent data detected");
+}
+#endif
+
 TEST(QosMetricsTest, ParsesClassContract) {
     std::vector<QosClassConfig> classes;
     std::string error;

@@ -278,12 +278,14 @@ std::vector<std::string> splitCommaSeparated(const std::string& value) {
     return result;
 }
 
-uint8_t stableDataSeed(uint64_t target_addr) {
+uint64_t stableDataSeed(uint64_t target_addr) {
     uint64_t value = target_addr;
     value ^= value >> 33;
     value *= 0xff51afd7ed558ccdULL;
     value ^= value >> 33;
-    uint8_t seed = static_cast<uint8_t>(value);
+    value *= 0xc4ceb9fe1a85ec53ULL;
+    value ^= value >> 33;
+    uint64_t seed = value;
     return seed == 0 ? 1 : seed;
 }
 

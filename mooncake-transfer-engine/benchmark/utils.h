@@ -27,6 +27,7 @@
 #include <stdexcept>
 #include <chrono>
 #include <limits>
+#include <cstring>
 
 #include "tent/common/utils/os.h"
 #include "tent/common/utils/random.h"
@@ -188,7 +189,7 @@ void printDeadlineGroupStats(const char* group, size_t block_size,
 
 std::vector<std::string> splitCommaSeparated(const std::string& value);
 
-uint8_t stableDataSeed(uint64_t target_addr);
+uint64_t stableDataSeed(uint64_t target_addr);
 
 static inline uint64_t checkedMul(uint64_t lhs, uint64_t rhs,
                                   const char* label) {
@@ -237,76 +238,178 @@ static inline bool isGpuMemory(void* ptr) {
     return false;
 }
 
-static inline void fillData(void* addr, size_t length, uint8_t seed) {
+static inline uint64_t mixConsistencyWord(uint64_t value) {
+    value += 0x9e3779b97f4a7c15ULL;
+    value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+    return value ^ (value >> 31);
+}
+
+static inline uint64_t consistencyMarker(uint64_t seed, uint64_t chunk_index,
+                                         uint64_t marker_index) {
+    return mixConsistencyWord(seed ^ (chunk_index * 0xd1342543de82ef95ULL) ^
+                              (marker_index * 0xa0761d6478bd642fULL));
+}
+
+static inline bool checkRepeatedByte(const uint8_t* data, size_t length,
+                                     uint8_t expected, size_t base_offset) {
+    for (size_t i = 0; i < length; ++i) {
+        if (data[i] != expected) {
+            LOG(FATAL) << "Inconsistent data detected at offset "
+                       << (base_offset + i) << ": expected "
+                       << static_cast<int>(expected) << ", got "
+                       << static_cast<int>(data[i]);
+            return false;
+        }
+    }
+    return true;
+}
+
+static inline void fillConsistencyPatternHost(uint8_t* data, size_t length,
+                                              uint64_t seed) {
+    constexpr size_t kChunkSize = 4096;
+    constexpr size_t kMarkerSize = sizeof(uint64_t);
+    for (size_t offset = 0, chunk = 0; offset < length;
+         offset += kChunkSize, ++chunk) {
+        const size_t chunk_len = std::min(kChunkSize, length - offset);
+        const uint8_t fill =
+            static_cast<uint8_t>(mixConsistencyWord(seed + chunk) & 0xff);
+        std::memset(data + offset, fill, chunk_len);
+        if (chunk_len >= kMarkerSize) {
+            const uint64_t front = consistencyMarker(seed, chunk, 0);
+            std::memcpy(data + offset, &front, kMarkerSize);
+        }
+        if (chunk_len >= 2 * kMarkerSize) {
+            const uint64_t back = consistencyMarker(seed, chunk, 1);
+            std::memcpy(data + offset + chunk_len - kMarkerSize, &back,
+                        kMarkerSize);
+        }
+    }
+}
+
+static inline void verifyConsistencyPatternHost(const uint8_t* data,
+                                                size_t length,
+                                                uint64_t seed) {
+    constexpr size_t kChunkSize = 4096;
+    constexpr size_t kMarkerSize = sizeof(uint64_t);
+    for (size_t offset = 0, chunk = 0; offset < length;
+         offset += kChunkSize, ++chunk) {
+        const size_t chunk_len = std::min(kChunkSize, length - offset);
+        const uint8_t fill =
+            static_cast<uint8_t>(mixConsistencyWord(seed + chunk) & 0xff);
+        const uint8_t* chunk_data = data + offset;
+        size_t constant_begin = 0;
+        size_t constant_end = chunk_len;
+        if (chunk_len >= kMarkerSize) {
+            uint64_t actual = 0;
+            const uint64_t expected = consistencyMarker(seed, chunk, 0);
+            std::memcpy(&actual, chunk_data, kMarkerSize);
+            if (actual != expected) {
+                LOG(FATAL) << "Inconsistent data detected at front marker for "
+                           << "chunk " << chunk << " offset " << offset;
+            }
+            constant_begin = kMarkerSize;
+        }
+        if (chunk_len >= 2 * kMarkerSize) {
+            uint64_t actual = 0;
+            const uint64_t expected = consistencyMarker(seed, chunk, 1);
+            const size_t marker_offset = chunk_len - kMarkerSize;
+            std::memcpy(&actual, chunk_data + marker_offset, kMarkerSize);
+            if (actual != expected) {
+                LOG(FATAL) << "Inconsistent data detected at back marker for "
+                           << "chunk " << chunk << " offset "
+                           << (offset + marker_offset);
+            }
+            constant_end = marker_offset;
+        }
+        if (constant_begin < constant_end) {
+            checkRepeatedByte(chunk_data + constant_begin,
+                              constant_end - constant_begin, fill,
+                              offset + constant_begin);
+        }
+    }
+}
+
+static inline std::vector<uint8_t>& consistencyScratch() {
+    thread_local std::vector<uint8_t> scratch;
+    return scratch;
+}
+
+static inline void fillData(void* addr, size_t length, uint64_t seed) {
 #if defined(USE_CUDA)
     if (isCudaMemory(addr)) {
-        auto err = cudaMemset(addr, seed, length);
+        auto& scratch = consistencyScratch();
+        scratch.resize(length);
+        fillConsistencyPatternHost(scratch.data(), length, seed);
+        auto err = cudaMemcpy(addr, scratch.data(), length, cudaMemcpyDefault);
         LOG_ASSERT(err == cudaSuccess)
-            << "cudaMemset failed: " << cudaGetErrorString(err);
+            << "cudaMemcpy failed: " << cudaGetErrorString(err);
         return;
     }
 #elif defined(USE_SUNRISE)
     if (isCudaMemory(addr)) {
-        auto err = cudaMemset(addr, seed, length);
+        auto& scratch = consistencyScratch();
+        scratch.resize(length);
+        fillConsistencyPatternHost(scratch.data(), length, seed);
+        auto err = cudaMemcpy(addr, scratch.data(), length, cudaMemcpyDefault);
         LOG_ASSERT(err == cudaSuccess)
-            << "cudaMemset failed: " << cudaGetErrorString(err);
+            << "cudaMemcpy failed: " << cudaGetErrorString(err);
         return;
     }
 #endif
 #ifdef USE_HIP
     if (isHipMemory(addr)) {
-        auto err = hipMemset(addr, seed, length);
+        auto& scratch = consistencyScratch();
+        scratch.resize(length);
+        fillConsistencyPatternHost(scratch.data(), length, seed);
+        auto err = hipMemcpy(addr, scratch.data(), length, hipMemcpyDefault);
         LOG_ASSERT(err == hipSuccess)
-            << "hipMemset failed: " << hipGetErrorString(err);
+            << "hipMemcpy failed: " << hipGetErrorString(err);
         return;
     }
 #endif
-    memset(addr, seed, length);
+    fillConsistencyPatternHost(static_cast<uint8_t*>(addr), length, seed);
 }
 
-static inline uint8_t fillData(void* addr, size_t length) {
-    uint8_t seed = (uint8_t)SimpleRandom::Get().next(256);
+static inline uint64_t fillData(void* addr, size_t length) {
+    uint64_t seed = SimpleRandom::Get().next();
+    seed = (seed << 32) | SimpleRandom::Get().next();
     fillData(addr, length, seed);
     return seed;
 }
 
-static inline void verifyData(void* addr, size_t length, uint8_t seed) {
-    std::vector<uint8_t> ref_data(length, seed);
+static inline void verifyData(void* addr, size_t length, uint64_t seed) {
 #if defined(USE_CUDA)
     if (isCudaMemory(addr)) {
-        std::vector<uint8_t> act_data(length);
-        cudaMemcpy(act_data.data(), addr, length, cudaMemcpyDefault);
-        if (memcmp(act_data.data(), ref_data.data(), length)) {
-            LOG(FATAL) << "Inconsistent data detected";
-        }
+        auto& scratch = consistencyScratch();
+        scratch.resize(length);
+        cudaMemcpy(scratch.data(), addr, length, cudaMemcpyDefault);
+        verifyConsistencyPatternHost(scratch.data(), length, seed);
         return;
     }
 #elif defined(USE_SUNRISE)
     if (isCudaMemory(addr)) {
-        std::vector<uint8_t> act_data(length);
+        auto& scratch = consistencyScratch();
+        scratch.resize(length);
         auto err =
-            cudaMemcpy(act_data.data(), addr, length, cudaMemcpyDeviceToHost);
+            cudaMemcpy(scratch.data(), addr, length, cudaMemcpyDeviceToHost);
         LOG_ASSERT(err == cudaSuccess)
             << "cudaMemcpy failed: " << cudaGetErrorString(err);
-        if (memcmp(act_data.data(), ref_data.data(), length)) {
-            LOG(FATAL) << "Inconsistent data detected";
-        }
+        verifyConsistencyPatternHost(scratch.data(), length, seed);
         return;
     }
 #endif
 #ifdef USE_HIP
     if (isHipMemory(addr)) {
-        std::vector<uint8_t> act_data(length);
-        hipMemcpy(act_data.data(), addr, length, hipMemcpyDefault);
-        if (memcmp(act_data.data(), ref_data.data(), length)) {
-            LOG(FATAL) << "Inconsistent data detected";
-        }
+        auto& scratch = consistencyScratch();
+        scratch.resize(length);
+        hipMemcpy(scratch.data(), addr, length, hipMemcpyDefault);
+        verifyConsistencyPatternHost(scratch.data(), length, seed);
         return;
     }
 #endif
-    if (memcmp(addr, ref_data.data(), length)) {
-        LOG(FATAL) << "Inconsistent data detected";
-    }
+    verifyConsistencyPatternHost(static_cast<const uint8_t*>(addr), length,
+                                 seed);
 }
 
 enum OpCode { READ, WRITE };
