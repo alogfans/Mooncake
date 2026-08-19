@@ -1,0 +1,49 @@
+{
+  "topology": {
+    "rdma_whitelist": ["mlx5_1", "mlx5_2", "mlx5_3", "mlx5_4"]
+  },
+  "policy": [
+    {
+      "name": "sglang-foreground",
+      "segment_type": "memory",
+      "intent_type": "foreground_get",
+      "transports": ["rdma"],
+      "qp_pool": "fg"
+    },
+    {
+      "name": "sglang-background",
+      "segment_type": "memory",
+      "intent_type": "background_prefetch",
+      "transports": ["rdma"],
+      "qp_pool": "bg"
+    },
+    {
+      "name": "sglang-default",
+      "segment_type": "memory",
+      "transports": ["rdma"],
+      "qp_pool": "fg"
+    }
+  ],
+  "transports": {
+    "rdma": {
+      "endpoint": {
+        "traffic_class": 96,
+        "service_level": 3,
+        "qp_pools": [
+          {
+            "name": "fg",
+            "num_qp": 4,
+            "traffic_class": 96,
+            "service_level": 3
+          },
+          {
+            "name": "bg",
+            "num_qp": 2,
+            "traffic_class": 8,
+            "service_level": 0
+          }
+        ]
+      }
+    }
+  }
+}

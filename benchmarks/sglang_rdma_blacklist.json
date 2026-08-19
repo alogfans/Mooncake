@@ -1,0 +1,5 @@
+{
+  "topology": {
+    "rdma_blacklist": ["mlx5_0"]
+  }
+}

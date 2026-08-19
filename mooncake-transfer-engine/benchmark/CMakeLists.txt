@@ -77,6 +77,29 @@ set_target_properties(
   tebench PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE
                      INSTALL_RPATH "$ORIGIN/../lib:$ORIGIN/../../mooncake-common${TANGRT_RPATH}")
 
+if(USE_TENT)
+  add_executable(sglang_trace_replay_bench
+                 tools/sglang_trace_replay_bench.cpp)
+  target_link_libraries(sglang_trace_replay_bench
+                        PRIVATE tent_link_group gflags::gflags glog::glog)
+  if(TARGET mooncake_common)
+    add_dependencies(sglang_trace_replay_bench mooncake_common)
+  endif()
+  if(USE_CUDA)
+    target_link_libraries(sglang_trace_replay_bench PRIVATE CUDA::cudart)
+  endif()
+  if(USE_HIP)
+    target_link_libraries(sglang_trace_replay_bench PRIVATE hip::host)
+  endif()
+  if(USE_SUNRISE)
+    target_link_libraries(sglang_trace_replay_bench PRIVATE tangrt_shared)
+  endif()
+  set_target_properties(
+    sglang_trace_replay_bench
+    PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE
+               INSTALL_RPATH "$ORIGIN/../lib:$ORIGIN/../../mooncake-common${TANGRT_RPATH}")
+endif()
+
 if(BUILD_UNIT_TESTS)
   add_executable(tebench_qos_metrics_test tests/qos_metrics_test.cpp
                                           qos_metrics_adapter.cpp

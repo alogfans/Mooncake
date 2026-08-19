@@ -158,6 +158,8 @@ class RdmaEndPoint : public std::enable_shared_from_this<RdmaEndPoint> {
 
     int submitSlices(std::vector<RdmaSlice*>& slice_list, int qp_index);
 
+    int selectQpIndex(const std::string& qp_pool, int candidate);
+
     bool isDirectReady();
 
     Status submitDirectSlice(RdmaSlice* slice);

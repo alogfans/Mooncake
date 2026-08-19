@@ -1,0 +1,24 @@
+{
+  "topology": {
+    "rdma_blacklist": ["mlx5_0"]
+  },
+  "policy": [
+    {
+      "name": "sglang-foreground",
+      "segment_type": "memory",
+      "intent_type": "foreground_get",
+      "transports": ["rdma"]
+    },
+    {
+      "name": "sglang-background",
+      "segment_type": "memory",
+      "intent_type": "background_prefetch",
+      "transports": ["rdma"]
+    },
+    {
+      "name": "sglang-default",
+      "segment_type": "memory",
+      "transports": ["rdma"]
+    }
+  ]
+}

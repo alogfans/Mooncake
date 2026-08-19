@@ -747,6 +747,13 @@ const QpPoolSegment* RdmaEndPoint::poolForQp(int qp_index) const {
     return nullptr;
 }
 
+int RdmaEndPoint::selectQpIndex(const std::string& qp_pool, int candidate) {
+    RWSpinlock::ReadGuard guard(lock_);
+    if (qp_list_.empty()) return -1;
+    return selectQpInPool(qp_pool_segments_, qp_pool, candidate,
+                          (int)qp_list_.size());
+}
+
 int RdmaEndPoint::setupAllQPs(const std::string& peer_gid, uint16_t peer_lid,
                               std::vector<uint32_t> peer_qp_num_list,
                               std::string* reply_msg) {

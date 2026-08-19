@@ -265,10 +265,15 @@ Status Workers::submit(RdmaSliceList& slice_list, int worker_id) {
 }
 
 Status Workers::submit(RdmaSlice* slice) {
+    return submit(slice, -1);
+}
+
+Status Workers::submit(RdmaSlice* slice, int worker_id) {
     RdmaSliceList slice_list;
     slice_list.first = slice;
     slice_list.num_slices = 1;
-    return submit(slice_list);
+    if (slice) slice->next = nullptr;
+    return submit(slice_list, worker_id);
 }
 
 Status Workers::cancel(RdmaTask* task) {
@@ -449,36 +454,85 @@ void Workers::asyncPostSend() {
             }
         }
 
-        int num_submitted = endpoint->submitSlices(slices, tl_wid);
-        for (int id = 0; id < num_submitted; ++id) {
-            auto slice = slices[id];
-            if (slice->failed) {
-                releaseSliceQuota(slice);
-                if (slice->task->cancel_requested.load(
-                        std::memory_order_acquire)) {
-                    updateSliceStatus(slice, CANCELED);
-                    worker.inflight_slices.fetch_sub(1);
-                    continue;
-                }
-                slice->retry_count++;
-                if (slice->retry_count >=
-                    transport_->params_->workers.max_retry_count) {
-                    LOG(WARNING)
-                        << "Slice " << slice << " failed: retry count exceeded";
-                    disableEndpoint(slice);
-                    updateSliceStatus(slice, FAILED);
-                } else {
-                    submit(slice);
-                }
+        auto qp_pool_name = [](RdmaSlice* slice) -> std::string {
+            return (slice && slice->task) ? slice->task->qp_pool : std::string();
+        };
+
+        std::vector<RdmaSlice*> kept;
+        kept.reserve(slices.size());
+        for (auto* slice : slices) {
+            const int qp_index =
+                endpoint->selectQpIndex(qp_pool_name(slice), tl_wid);
+            const int owner =
+                qp_index >= 0 && num_workers_ > 0
+                    ? qp_index % static_cast<int>(num_workers_)
+                    : tl_wid;
+            if (owner == tl_wid) {
+                kept.push_back(slice);
+                continue;
+            }
+            auto st = submit(slice, owner);
+            if (st.ok()) {
                 worker.inflight_slices.fetch_sub(1);
             } else {
-                slice->submit_ts = getCurrentTimeInNano();
-                worker.inflight_slice_set.insert(slice);
+                LOG(ERROR) << "Failed to redirect slice " << slice
+                           << " to worker " << owner << ": " << st.ToString();
+                releaseSliceQuota(slice);
+                updateSliceStatus(slice, FAILED);
+                worker.inflight_slices.fetch_sub(1);
+            }
+        }
+        slices.swap(kept);
+        if (slices.empty()) continue;
+
+        std::vector<std::string> pool_order;
+        std::unordered_map<std::string, std::vector<RdmaSlice*>> by_pool;
+        for (auto* slice : slices) {
+            auto pool = qp_pool_name(slice);
+            auto [it, inserted] = by_pool.emplace(pool, std::vector<RdmaSlice*>());
+            if (inserted) pool_order.push_back(pool);
+            it->second.push_back(slice);
+        }
+
+        std::unordered_set<RdmaSlice*> submitted;
+        for (const auto& pool : pool_order) {
+            auto& group = by_pool[pool];
+            int num_submitted = endpoint->submitSlices(group, tl_wid);
+            for (int id = 0; id < num_submitted; ++id) {
+                auto slice = group[id];
+                submitted.insert(slice);
+                if (slice->failed) {
+                    releaseSliceQuota(slice);
+                    if (slice->task->cancel_requested.load(
+                            std::memory_order_acquire)) {
+                        updateSliceStatus(slice, CANCELED);
+                        worker.inflight_slices.fetch_sub(1);
+                        continue;
+                    }
+                    slice->retry_count++;
+                    if (slice->retry_count >=
+                        transport_->params_->workers.max_retry_count) {
+                        LOG(WARNING) << "Slice " << slice
+                                     << " failed: retry count exceeded";
+                        disableEndpoint(slice);
+                        updateSliceStatus(slice, FAILED);
+                    } else {
+                        submit(slice);
+                    }
+                    worker.inflight_slices.fetch_sub(1);
+                } else {
+                    slice->submit_ts = getCurrentTimeInNano();
+                    worker.inflight_slice_set.insert(slice);
+                }
             }
         }
 
-        if (num_submitted) {
-            slices.erase(slices.begin(), slices.begin() + num_submitted);
+        if (!submitted.empty()) {
+            slices.erase(std::remove_if(slices.begin(), slices.end(),
+                                        [&](RdmaSlice* slice) {
+                                            return submitted.count(slice) != 0;
+                                        }),
+                         slices.end());
         }
     }
 }
