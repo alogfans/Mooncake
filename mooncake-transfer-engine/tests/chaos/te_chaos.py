@@ -28,6 +28,15 @@ DEFAULT_DEVICES = ("mlx5_1", "mlx5_2", "mlx5_3", "mlx5_4")
 DEFAULT_NETDEVS = ("eth1", "eth2", "eth3", "eth4")
 DEFAULT_EXCLUDED_DEVICES = ("mlx5_0",)
 DEFAULT_EXCLUDED_NETDEVS = ("eth0",)
+DEFAULT_FAULT_KINDS = (
+    "delay",
+    "loss",
+    "reorder",
+    "corrupt",
+    "duplicate",
+    "rate-limit",
+    "link-down",
+)
 
 
 def now_s() -> float:
@@ -269,6 +278,7 @@ class RunConfig:
     startup_wait_s: float
     warmup_s: float
     action_gap_s: float
+    fault_kinds: list[str]
     dry_run: bool
 
     @property
@@ -413,54 +423,79 @@ class ChaosRunner:
             hold_s=hold_s,
         )
 
+    def make_rate_limit(
+        self, host: Host, netdev: str, rate: str, hold_s: float
+    ) -> ChaosAction:
+        quoted = shlex.quote(netdev)
+        quoted_rate = shlex.quote(rate)
+        return ChaosAction(
+            name=f"rate-limit-{rate}",
+            host_name=host.name,
+            netdev=netdev,
+            command=self.sudo_cmd(
+                "tc qdisc replace dev "
+                f"{quoted} root tbf rate {quoted_rate} burst 32mb latency 400ms"
+            ),
+            revert_command=(
+                self.sudo_cmd(f"tc qdisc del dev {quoted} root")
+                + " 2>/dev/null || true"
+            ),
+            hold_s=hold_s,
+        )
+
     def deterministic_actions(self) -> list[ChaosAction]:
         actions: list[ChaosAction] = []
         host_order = [self.cfg.initiator, self.cfg.target]
+        enabled = set(self.cfg.fault_kinds)
         for host in host_order:
             for netdev in self.cfg.netdevs:
-                actions.append(
-                    self.make_netem(
-                        host=host,
-                        netdev=netdev,
-                        name="delay-100ms-jitter-20ms",
-                        netem_args="delay 100ms 20ms distribution normal",
-                        hold_s=30,
+                if "delay" in enabled:
+                    actions.append(
+                        self.make_netem(
+                            host=host,
+                            netdev=netdev,
+                            name="delay-100ms-jitter-20ms",
+                            netem_args="delay 100ms 20ms distribution normal",
+                            hold_s=30,
+                        )
                     )
-                )
-                actions.append(
-                    self.make_netem(
-                        host=host,
-                        netdev=netdev,
-                        name="loss-1pct",
-                        netem_args="loss 1%",
-                        hold_s=30,
+                if "loss" in enabled:
+                    actions.append(
+                        self.make_netem(
+                            host=host,
+                            netdev=netdev,
+                            name="loss-1pct",
+                            netem_args="loss 1%",
+                            hold_s=30,
+                        )
                     )
-                )
-                actions.append(
-                    self.make_netem(
-                        host=host,
-                        netdev=netdev,
-                        name="reorder-25pct",
-                        netem_args="delay 20ms reorder 25% 50%",
-                        hold_s=30,
+                if "reorder" in enabled:
+                    actions.append(
+                        self.make_netem(
+                            host=host,
+                            netdev=netdev,
+                            name="reorder-25pct",
+                            netem_args="delay 20ms reorder 25% 50%",
+                            hold_s=30,
+                        )
                     )
-                )
-                actions.append(self.make_link_down(host, netdev, hold_s=10))
+                if "rate-limit" in enabled:
+                    actions.append(
+                        self.make_rate_limit(
+                            host=host,
+                            netdev=netdev,
+                            rate="5gbit",
+                            hold_s=30,
+                        )
+                    )
+                if "link-down" in enabled:
+                    actions.append(self.make_link_down(host, netdev, hold_s=10))
         return actions
 
     def random_action(self, rnd: random.Random) -> ChaosAction:
         host = rnd.choice([self.cfg.initiator, self.cfg.target])
         netdev = rnd.choice(self.cfg.netdevs)
-        kind = rnd.choice(
-            [
-                "delay",
-                "loss",
-                "corrupt",
-                "duplicate",
-                "reorder",
-                "link-down",
-            ]
-        )
+        kind = rnd.choice(self.cfg.fault_kinds)
         hold_s = rnd.uniform(5, 45)
         if kind == "delay":
             delay = rnd.choice([20, 50, 100, 200])
@@ -507,6 +542,9 @@ class ChaosRunner:
                 netem_args="delay 20ms reorder 25% 50%",
                 hold_s=hold_s,
             )
+        if kind == "rate-limit":
+            rate = rnd.choice(["1gbit", "5gbit", "10gbit"])
+            return self.make_rate_limit(host, netdev, rate, hold_s=hold_s)
         return self.make_link_down(host, netdev, hold_s=min(hold_s, 15))
 
     def action_stream(self, suite: str, seed: int) -> Iterable[ChaosAction]:
@@ -959,8 +997,15 @@ def build_config(args: argparse.Namespace) -> RunConfig:
     netdevs = parse_csv(args.netdevs)
     excluded_devices = parse_csv(args.exclude_devices)
     excluded_netdevs = parse_csv(args.exclude_netdevs)
+    fault_kinds = parse_csv(args.fault_kinds)
     if "mlx5_0" in devices or "eth0" in netdevs:
         raise ValueError("refusing to include mlx5_0/eth0 in the chaos target set")
+    allowed_fault_kinds = set(DEFAULT_FAULT_KINDS)
+    unknown_fault_kinds = sorted(set(fault_kinds) - allowed_fault_kinds)
+    if unknown_fault_kinds:
+        raise ValueError(f"unsupported fault kinds: {','.join(unknown_fault_kinds)}")
+    if not fault_kinds:
+        raise ValueError("at least one fault kind must be selected")
     return RunConfig(
         initiator=initiator,
         target=target,
@@ -978,6 +1023,7 @@ def build_config(args: argparse.Namespace) -> RunConfig:
         startup_wait_s=args.startup_wait,
         warmup_s=args.warmup,
         action_gap_s=args.action_gap,
+        fault_kinds=fault_kinds,
         dry_run=dry_run,
     )
 
@@ -1005,6 +1051,14 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--startup-wait", type=float, default=5.0)
     parser.add_argument("--warmup", type=float, default=10.0)
     parser.add_argument("--action-gap", type=float, default=2.0)
+    parser.add_argument(
+        "--fault-kinds",
+        default=",".join(DEFAULT_FAULT_KINDS),
+        help=(
+            "Comma-separated fault kinds: delay,loss,reorder,corrupt,"
+            "duplicate,rate-limit,link-down"
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
 
 
