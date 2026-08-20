@@ -207,7 +207,8 @@ class ManagedProcess:
             commands.append(
                 "if test -s "
                 f"{pid_file}; then pid=$(cat {pid_file}); "
-                f"kill -{sig} -- -$pid 2>/dev/null || "
+                "pgid=$(ps -o pgid= -p $pid 2>/dev/null | tr -d ' '); "
+                f"test -n \"$pgid\" && kill -{sig} -- -$pgid 2>/dev/null || "
                 f"kill -{sig} $pid 2>/dev/null || true; fi"
             )
         if self.remote_kill_pattern:
@@ -697,6 +698,7 @@ def discover_p2p_target_seg_name(log_path: Path, timeout_s: float) -> str:
     deadline = now_s() + timeout_s
     patterns = [
         re.compile(r"--target_seg_name=([^\s]+)"),
+        re.compile(r"listening on ([^\s]+:\d+)"),
         re.compile(r"Transfer Engine ([^\s]+:\d+) started successfully"),
     ]
     while now_s() < deadline:
