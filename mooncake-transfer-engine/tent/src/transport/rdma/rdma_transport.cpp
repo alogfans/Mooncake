@@ -20,13 +20,16 @@
 #include <sys/mman.h>
 #include <sys/time.h>
 
+#include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cerrno>
 #include <cstddef>
 #include <cstdlib>
 #include <future>
 #include <limits>
 #include <sstream>
+#include <thread>
 
 #include "tent/common/status.h"
 #include "tent/common/utils/ip.h"
@@ -391,6 +394,24 @@ Status RdmaTransport::quiesce() {
             LOG(ERROR) << "RDMA workers quiesce failed: " << drain.ToString();
         }
     }
+    const uint64_t deadline_ns = getCurrentTimeInNano() + timeout_ns;
+    while (true) {
+        bool direct_busy = false;
+        for (size_t i = 0; i < context_set_.size(); ++i) {
+            pollDirectCompletions(static_cast<int>(i));
+            auto& context = context_set_[i];
+            if (context && context->hasDirectLaneOwner()) direct_busy = true;
+        }
+        if (!direct_busy) break;
+        if (static_cast<uint64_t>(getCurrentTimeInNano()) >= deadline_ns) {
+            Status direct_drain = Status::InternalError(
+                "RDMA direct quiesce timed out with in-flight direct work" LOC_MARK);
+            LOG(ERROR) << direct_drain.ToString();
+            if (drain.ok()) drain = direct_drain;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
     const Status sync =
         Platform::getLoader().synchronizeDevices(local_topology_.get());
     if (!sync.ok()) {
@@ -463,6 +484,262 @@ static inline uint64_t roundup(uint64_t a, uint64_t b) {
     return (a % b == 0) ? a : (a / b + 1) * b;
 }
 
+static std::string bufferLocationForRange(const BufferDesc& buffer,
+                                          uint64_t addr, uint64_t length) {
+    std::string location = buffer.location;
+    if (buffer.regions.empty()) return location;
+
+    uint64_t offset = buffer.addr;
+    uint64_t best_overlap = 0;
+    const uint64_t target_start = addr;
+    const uint64_t target_end = addr + length;
+    for (const auto& entry : buffer.regions) {
+        const uint64_t region_start = offset;
+        const uint64_t region_end = offset + entry.size;
+        const uint64_t overlap_start = std::max(region_start, target_start);
+        const uint64_t overlap_end = std::min(region_end, target_end);
+        const uint64_t overlap =
+            overlap_end > overlap_start ? overlap_end - overlap_start : 0;
+        if (overlap > best_overlap) {
+            best_overlap = overlap;
+            location = entry.location;
+        }
+        offset += entry.size;
+    }
+    return location;
+}
+
+static bool memEntryContainsDevice(const Topology::MemEntry* entry,
+                                   int device_id) {
+    if (!entry) return false;
+    for (size_t rank = 0; rank < Topology::DevicePriorityRanks; ++rank) {
+        const auto& list = entry->device_list[rank];
+        if (std::find(list.begin(), list.end(), device_id) != list.end())
+            return true;
+    }
+    return false;
+}
+
+static int chooseTargetDevice(const Topology::MemEntry* entry,
+                              const BufferDesc& buffer,
+                              int preferred_device) {
+    if (preferred_device >= 0 &&
+        memEntryContainsDevice(entry, preferred_device) &&
+        static_cast<size_t>(preferred_device) < buffer.rkey.size()) {
+        return preferred_device;
+    }
+    if (!entry) return -1;
+    for (size_t rank = 0; rank < Topology::DevicePriorityRanks; ++rank) {
+        for (int device_id : entry->device_list[rank]) {
+            if (device_id >= 0 &&
+                static_cast<size_t>(device_id) < buffer.rkey.size()) {
+                return device_id;
+            }
+        }
+    }
+    return -1;
+}
+
+int RdmaTransport::contextIndexForDevice(int device_id) const {
+    if (!local_topology_) return -1;
+    const auto* nic = local_topology_->getNicEntry(device_id);
+    if (!nic) return -1;
+    auto it = context_name_lookup_.find(nic->name);
+    if (it == context_name_lookup_.end()) return -1;
+    return it->second;
+}
+
+void RdmaTransport::pollDirectCompletions(int context_index) {
+    if (context_index < 0 || context_index >= (int)context_set_.size()) return;
+    auto& context = context_set_[context_index];
+    if (!context || !context->directCq()) return;
+
+    ibv_wc wc[8];
+    int nr_poll = context->directCq()->poll(8, wc);
+    if (nr_poll <= 0) return;
+
+    for (int i = 0; i < nr_poll; ++i) {
+        auto* slice = reinterpret_cast<RdmaSlice*>(wc[i].wr_id);
+        if (!slice || !slice->task) continue;
+        if (auto ep = slice->ep_weak_ptr.lock()) {
+            ep->completeDirectSlice(slice);
+            if (wc[i].status != IBV_WC_SUCCESS) {
+                ep->resetConnection("Direct QP completion error");
+            }
+        }
+        if (slice->task->direct) {
+            context->releaseDirectLane(slice->task);
+        }
+        updateSliceStatus(slice,
+                          wc[i].status == IBV_WC_SUCCESS ? COMPLETED : FAILED);
+    }
+}
+
+bool RdmaTransport::trySubmitDirect(RdmaSubBatch* rdma_batch,
+                                    const Request& request) {
+    if (!rdma_batch || request.length == 0) return false;
+    if (rdma_batch->task_list.size() + 1 > rdma_batch->max_size) return false;
+    const size_t slice_size = params_->workers.block_size;
+    if (slice_size == 0 || request.length > slice_size) return false;
+
+    SegmentDescRef source_pin, target_pin;
+    BufferDesc* source_buffer = nullptr;
+    BufferDesc* target_buffer = nullptr;
+    const Topology* source_topo = nullptr;
+    const Topology* target_topo = nullptr;
+    std::string source_location;
+    std::string target_location;
+    auto& segment_manager = metadata_->segmentManager();
+
+    auto source_status = segment_manager.withCachedSegment(
+        LOCAL_SEGMENT_ID, source_pin, [&](SegmentDesc* segment) {
+            if (segment->type != SegmentType::Memory)
+                return Status::NeedsRefreshCache(
+                    "Local segment type is not Memory" LOC_MARK);
+            source_buffer = segment->findBuffer(
+                reinterpret_cast<uint64_t>(request.source), request.length);
+            if (!source_buffer)
+                return Status::NeedsRefreshCache(
+                    "No matched local buffer for direct RDMA" LOC_MARK);
+            source_topo = &std::get<MemorySegmentDesc>(segment->detail).topology;
+            source_location = bufferLocationForRange(
+                *source_buffer, reinterpret_cast<uint64_t>(request.source),
+                request.length);
+            return Status::OK();
+        });
+    if (!source_status.ok()) return false;
+
+    auto target_status = segment_manager.withCachedSegment(
+        request.target_id, target_pin, [&](SegmentDesc* segment) {
+            if (segment->type != SegmentType::Memory)
+                return Status::NeedsRefreshCache(
+                    "Target segment type is not Memory" LOC_MARK);
+            target_buffer =
+                segment->findBuffer(request.target_offset, request.length);
+            if (!target_buffer)
+                return Status::NeedsRefreshCache(
+                    "No matched target buffer for direct RDMA" LOC_MARK);
+            target_topo = &std::get<MemorySegmentDesc>(segment->detail).topology;
+            target_location = bufferLocationForRange(
+                *target_buffer, request.target_offset, request.length);
+            return Status::OK();
+        });
+    if (!target_status.ok()) return false;
+
+    auto source_mem_id = source_topo->getMemId(source_location);
+    if (source_mem_id < 0)
+        source_mem_id = source_topo->getMemId(kWildcardLocation);
+    const auto* source_mem_entry = source_topo->getMemEntry(source_mem_id);
+    auto target_mem_id = target_topo->getMemId(target_location);
+    if (target_mem_id < 0)
+        target_mem_id = target_topo->getMemId(kWildcardLocation);
+    const auto* target_mem_entry = target_topo->getMemEntry(target_mem_id);
+    if (!source_mem_entry || !target_mem_entry) return false;
+
+    int source_dev_id = -1;
+    int context_index = -1;
+    for (size_t rank = 0; rank < Topology::DevicePriorityRanks; ++rank) {
+        for (int dev_id : source_mem_entry->device_list[rank]) {
+            if (dev_id < 0 || dev_id >= 64) continue;
+            if ((rdma_batch->device_mask & (1ULL << dev_id)) == 0) continue;
+            if (static_cast<size_t>(dev_id) >= source_buffer->lkey.size())
+                continue;
+            int candidate_context = contextIndexForDevice(dev_id);
+            if (candidate_context < 0 ||
+                candidate_context >= (int)context_set_.size())
+                continue;
+            auto& context = context_set_[candidate_context];
+            if (!context || context->status() != RdmaContext::DEVICE_ENABLED ||
+                !context->directCq())
+                continue;
+            source_dev_id = dev_id;
+            context_index = candidate_context;
+            break;
+        }
+        if (source_dev_id >= 0) break;
+    }
+    if (source_dev_id < 0) return false;
+
+    const int target_dev_id =
+        chooseTargetDevice(target_mem_entry, *target_buffer, source_dev_id);
+    if (target_dev_id < 0) return false;
+
+    auto* task = RdmaTaskStorage::Get().allocate();
+    if (!task) return false;
+    auto& context = context_set_[context_index];
+    if (!context->tryAcquireDirectLane(task)) {
+        RdmaTaskStorage::Get().deallocate(task);
+        return false;
+    }
+
+    auto* slice = RdmaSliceStorage::Get().allocate();
+    if (!slice) {
+        context->releaseDirectLane(task);
+        RdmaTaskStorage::Get().deallocate(task);
+        return false;
+    }
+
+    auto endpoint =
+        getEndpointForContextIndex(context_index, request.target_id, target_dev_id);
+    if (!endpoint || !endpoint->isDirectReady()) {
+        RdmaSliceStorage::Get().deallocate(slice);
+        context->releaseDirectLane(task);
+        RdmaTaskStorage::Get().deallocate(task);
+        return false;
+    }
+
+    task->num_slices = 1;
+    task->request = request;
+    task->device_mask = rdma_batch->device_mask;
+    task->qp_pool = rdma_batch->qp_pool;
+    task->status_word = PENDING;
+    task->transferred_bytes = 0;
+    task->success_slices.store(0, std::memory_order_relaxed);
+    task->resolved_slices.store(0, std::memory_order_relaxed);
+    task->first_error = PENDING;
+    task->direct = true;
+    task->direct_context_index = context_index;
+    task->cancel_requested.store(false, std::memory_order_relaxed);
+    task->ref();
+    task->ref();
+
+    slice->source_addr = request.source;
+    slice->target_addr = request.target_offset;
+    slice->length = request.length;
+    slice->task = task;
+    slice->next = nullptr;
+    slice->source_lkey = source_buffer->lkey[source_dev_id];
+    slice->target_rkey = target_buffer->rkey[target_dev_id];
+    slice->source_dev_id = source_dev_id;
+    slice->target_dev_id = target_dev_id;
+    slice->ep_weak_ptr.reset();
+    slice->word = PENDING;
+    slice->qp_index = -1;
+    slice->owner_worker.store(-1, std::memory_order_relaxed);
+    slice->counted_lane.store(-1, std::memory_order_relaxed);
+    slice->charged_dev.store(-1, std::memory_order_relaxed);
+    slice->posted_dev.store(-1, std::memory_order_relaxed);
+    slice->retry_count = 0;
+    slice->last_fallback_idx = -1;
+    slice->failed = false;
+    slice->enqueue_ts = getCurrentTimeInNano();
+    slice->submit_ts = slice->enqueue_ts;
+    slice->priority = request.priority;
+
+    auto post_status = endpoint->submitDirectSlice(slice);
+    if (!post_status.ok()) {
+        context->releaseDirectLane(task);
+        task->deref();
+        task->deref();
+        RdmaSliceStorage::Get().deallocate(slice);
+        return false;
+    }
+
+    rdma_batch->task_list.push_back(task);
+    rdma_batch->slice_chain.push_back(slice);
+    return true;
+}
+
 Status RdmaTransport::submitTransferTasks(
     SubBatchRef batch, const std::vector<Request>& request_list) {
     auto rdma_batch = dynamic_cast<RdmaSubBatch*>(batch);
@@ -499,6 +776,8 @@ Status RdmaTransport::submitTransferTasks(
         task->success_slices.store(0, std::memory_order_relaxed);
         task->resolved_slices.store(0, std::memory_order_relaxed);
         task->first_error = PENDING;
+        task->direct = false;
+        task->direct_context_index = -1;
         task->cancel_requested.store(false, std::memory_order_relaxed);
         task->ref();  // Batch holds a reference to the task
 
@@ -597,6 +876,9 @@ Status RdmaTransport::getTransferStatus(SubBatchRef batch, int task_id,
         return Status::InvalidArgument("Invalid task ID" LOC_MARK);
     }
     auto* task = rdma_batch->task_list[task_id];
+    if (task->direct && task->status_word == PENDING) {
+        pollDirectCompletions(task->direct_context_index);
+    }
     status = TransferStatus{task->status_word, task->transferred_bytes};
     return Status::OK();
 }
@@ -611,6 +893,11 @@ Status RdmaTransport::cancelTransferTask(SubBatchRef batch, int task_id) {
     }
     auto* task = rdma_batch->task_list[task_id];
     if (task->status_word != PENDING) return Status::OK();
+    if (task->direct) {
+        task->cancel_requested.store(true, std::memory_order_release);
+        pollDirectCompletions(task->direct_context_index);
+        return Status::OK();
+    }
     return workers_->cancel(task);
 }
 
@@ -747,6 +1034,18 @@ int RdmaTransport::onSetupRdmaConnections(const BootstrapDesc& peer_desc,
 
 std::shared_ptr<RdmaEndPoint> RdmaTransport::getEndpoint(SegmentID target_id,
                                                          int device_id) {
+    for (size_t i = 0; i < context_set_.size(); ++i) {
+        auto& context = context_set_[i];
+        if (context && context->status() == RdmaContext::DEVICE_ENABLED) {
+            return getEndpointForContextIndex(static_cast<int>(i), target_id,
+                                              device_id);
+        }
+    }
+    return nullptr;
+}
+
+std::shared_ptr<RdmaEndPoint> RdmaTransport::getEndpointForContextIndex(
+    int context_index, SegmentID target_id, int remote_device_id) {
     std::string rpc_server_addr, target_seg_name, target_dev_name,
         target_nic_path_name;
 
@@ -764,7 +1063,7 @@ std::shared_ptr<RdmaEndPoint> RdmaTransport::getEndpoint(SegmentID target_id,
             auto topo = &std::get<MemorySegmentDesc>(segment->detail).topology;
             target_seg_name = segment->name;
             target_nic_path_name = segment->nicPathServerName();
-            target_dev_name = topo->getNicName(device_id);
+            target_dev_name = topo->getNicName(remote_device_id);
             if (target_seg_name.empty() || target_dev_name.empty()) {
                 return Status::NeedsRefreshCache(
                     "Empty target segment or device name" LOC_MARK);
@@ -777,18 +1076,13 @@ std::shared_ptr<RdmaEndPoint> RdmaTransport::getEndpoint(SegmentID target_id,
         return nullptr;
     }
 
-    // context_set_ is NicID-indexed, so slot 0 may be inert; take the first
-    // enabled context instead.
-    RdmaContext* context = nullptr;
-    for (auto& ctx : context_set_) {
-        if (ctx->status() == RdmaContext::DEVICE_ENABLED) {
-            context = ctx.get();
-            break;
-        }
-    }
-    if (!context) {
+    if (context_index < 0 || context_index >= (int)context_set_.size()) {
         return nullptr;
     }
+    auto* context = context_set_[context_index].get();
+    if (!context || context->status() != RdmaContext::DEVICE_ENABLED)
+        return nullptr;
+
     std::shared_ptr<RdmaEndPoint> endpoint;
     std::string peer_name = MakeNicPath(target_nic_path_name, target_dev_name);
     endpoint = context->endpointStore()->getOrInsert(peer_name);

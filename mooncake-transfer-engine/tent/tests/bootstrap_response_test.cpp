@@ -26,12 +26,23 @@ TEST(BootstrapResponseTest, ValidGidIsSuccess) {
     BootstrapDesc desc;
     desc.local_gid = "fe80::1";
     desc.qp_num = {1, 2};
+    desc.direct_qp_num = 42;
     BootstrapDesc parsed;
     auto status =
         ControlClient::decodeBootstrapResponse(json(desc).dump(), parsed);
     EXPECT_TRUE(status.ok());
     EXPECT_EQ(parsed.local_gid, "fe80::1");
     EXPECT_EQ(parsed.qp_num, desc.qp_num);
+    EXPECT_EQ(parsed.direct_qp_num, 42);
+}
+
+TEST(BootstrapResponseTest, MissingDirectQpDefaultsToUnsupported) {
+    json legacy = {{"local_gid", "fe80::1"}, {"qp_num", {1, 2}}};
+    BootstrapDesc parsed;
+    auto status =
+        ControlClient::decodeBootstrapResponse(legacy.dump(), parsed);
+    EXPECT_TRUE(status.ok());
+    EXPECT_EQ(parsed.direct_qp_num, 0);
 }
 
 TEST(BootstrapResponseTest, ReplyMsgIsHandshakeFailure) {

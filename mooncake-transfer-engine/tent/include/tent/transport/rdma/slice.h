@@ -64,6 +64,8 @@ struct RdmaTask {
     std::atomic<int> success_slices{0};
     std::atomic<int> resolved_slices{0};
     volatile TransferStatusEnum first_error = PENDING;
+    bool direct = false;
+    int direct_context_index = -1;
 
     // Set by the control thread. Workers observe this flag before posting or
     // retrying a slice. Already-posted WRs are allowed to drain normally.
